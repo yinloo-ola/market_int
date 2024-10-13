@@ -11,7 +11,11 @@ pub fn initialize_candle(conn: &Connection) -> Result<()> {
             close REAL NOT NULL,
             volume INTEGER NOT NULL,
             timestamp INTEGER NOT NULL
-        )",
+        );",
+        [],
+    )?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_candle_symbol_timestamp ON candle (symbol, timestamp);",
         [],
     )?;
     Ok(())
@@ -21,7 +25,7 @@ pub fn save_candles(conn: &mut Connection, candles: Vec<model::Candle>) -> Resul
     let transaction = conn.transaction()?;
     {
         let mut stmt = transaction.prepare(
-            "INSERT INTO candle (symbol, open, high, low, close, volume, timestamp)
+            "REPLACE INTO candle (symbol, open, high, low, close, volume, timestamp)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
         for candle in candles {
@@ -33,7 +37,8 @@ pub fn save_candles(conn: &mut Connection, candles: Vec<model::Candle>) -> Resul
                 candle.close,
                 candle.volume,
                 candle.timestamp,
-            ])?;
+            ])
+            .err();
         }
     }
     transaction.commit()
