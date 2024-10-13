@@ -12,8 +12,11 @@ lazy_static::lazy_static! {
     static ref CLIENT: Arc<reqwest::Client> = Arc::new(reqwest::Client::new());
 }
 
+const TOKEN_PER_SEC: u64 = 1;
 lazy_static::lazy_static! {
-    static ref RATELIMITER: Arc<Ratelimiter> = Arc::new(Ratelimiter::builder(1, Duration::from_secs(1)).initial_available(1).build().unwrap());
+    static ref RATELIMITER: Arc<Ratelimiter> = Arc::new(
+        Ratelimiter::builder(TOKEN_PER_SEC, Duration::from_secs(1)).max_tokens(TOKEN_PER_SEC).initial_available(TOKEN_PER_SEC).build().unwrap(),
+    );
 }
 
 #[derive(Error, Debug)]
@@ -29,8 +32,8 @@ pub enum RequestError {
 }
 
 pub async fn request<T: DeserializeOwned>(
-    path: String,
-    params: Option<Vec<(&str, String)>>,
+    path: &str,
+    params: Option<Vec<(&str, &str)>>,
 ) -> Result<T, RequestError> {
     if let Err(sleep) = RATELIMITER.try_wait() {
         std::thread::sleep(sleep);

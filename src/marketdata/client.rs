@@ -8,31 +8,24 @@ fn check_status(s: &str, err: &Option<String>) -> Result<(), client::RequestErro
     match s {
         "ok" => Ok(()),
         "no_data" => Err(client::RequestError::Other("No data".into())),
-        "error" => {
-            if let Some(err_str) = err {
-                Err(client::RequestError::Other(err_str.clone()))
-            } else {
-                Err(client::RequestError::Other("Unknown error".into()))
-            }
-        }
-        _ => Err(client::RequestError::Other("Unknown error".into())),
+        "error" => Err(client::RequestError::Other(
+            err.clone().unwrap_or_else(|| "Unknown error".into()),
+        )),
+        _ => Err(client::RequestError::Other("Unknown status".into())),
     }
 }
 
 pub async fn get_market_status() -> Result<result::MarketStatus, client::RequestError> {
-    let resp = client::request::<response::MarketStatusResponse>(
-        "v1/markets/status/".to_string(),
-        Option::None,
-    )
-    .await?;
+    let resp =
+        client::request::<response::MarketStatusResponse>("v1/markets/status/", None).await?;
+
     check_status(&resp.s, &resp.errmsg)?;
-    match resp.status.len() {
-        1 => match resp.status[0].as_str() {
-            "open" => Ok(result::MarketStatus::Open),
-            "closed" => Ok(result::MarketStatus::Closed),
-            _ => Ok(result::MarketStatus::Null),
-        },
-        0 => Err(client::RequestError::Other("No data".into())),
+
+    match resp.status.as_slice() {
+        [status] if status == "open" => Ok(result::MarketStatus::Open),
+        [status] if status == "closed" => Ok(result::MarketStatus::Closed),
+        [] => Err(client::RequestError::Other("No data".into())),
+        [_] => Ok(result::MarketStatus::Null),
         _ => Err(client::RequestError::Other("More than one data".into())),
     }
 }
@@ -43,10 +36,10 @@ pub async fn stock_candle(
     count: u32,
 ) -> Result<Vec<result::Candle>, client::RequestError> {
     let resp = client::request::<response::DailyCandleData>(
-        format!("v1/stocks/candles/daily/{}/", symbol),
+        &format!("v1/stocks/candles/daily/{}/", symbol),
         Some(vec![
-            ("to", to.timestamp().to_string()),
-            ("countback", count.to_string()),
+            ("to", &to.timestamp().to_string()),
+            ("countback", &count.to_string()),
         ]),
     )
     .await?;
