@@ -1,7 +1,8 @@
 use super::super::model;
 use rusqlite::{params, Connection, Result};
 
-pub fn initialize_candle(conn: &Connection) -> Result<()> {
+// Initializes the candle table in the SQLite database.
+pub fn create_table(conn: &Connection) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS candle (
             symbol TEXT NOT NULL,
@@ -21,6 +22,7 @@ pub fn initialize_candle(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// Saves a vector of candles to the candle table.  Uses REPLACE to update existing entries.
 pub fn save_candles(conn: &mut Connection, candles: Vec<model::Candle>) -> Result<()> {
     let transaction = conn.transaction()?;
     {
@@ -38,17 +40,18 @@ pub fn save_candles(conn: &mut Connection, candles: Vec<model::Candle>) -> Resul
                 candle.volume,
                 candle.timestamp,
             ])
-            .err();
+            .err(); // Ignore errors during individual inserts; transaction will handle overall success/failure.
         }
     }
     transaction.commit()
 }
 
+// Retrieves candles from the database for a given symbol and timestamp range.
 pub fn get_candles(
     conn: &mut Connection,
-    symbol: &str,
-    from: u32,
-    to: u32,
+    symbol: &str, // Symbol to fetch candles for.
+    from: u32,    // Start timestamp.
+    to: u32,      // End timestamp.
 ) -> Result<Vec<model::Candle>> {
     let mut stmt = conn.prepare(
         "SELECT symbol, open, high, low, close, volume, timestamp

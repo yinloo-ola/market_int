@@ -4,6 +4,7 @@ use crate::http::client;
 use chrono::{DateTime, Local, TimeZone};
 use std::collections::HashMap;
 
+// Checks the status returned from the API and returns an error if the status is not "ok".
 fn check_status(s: &str, err: &Option<String>) -> Result<(), client::RequestError> {
     match s {
         "ok" => Ok(()),
@@ -15,6 +16,7 @@ fn check_status(s: &str, err: &Option<String>) -> Result<(), client::RequestErro
     }
 }
 
+// Fetches the current market status.
 pub async fn market_status() -> Result<model::MarketStatus, client::RequestError> {
     let resp = client::request::<response::MarketStatus>("v1/markets/status/", None).await?;
 
@@ -29,10 +31,11 @@ pub async fn market_status() -> Result<model::MarketStatus, client::RequestError
     }
 }
 
+// Fetches daily candle data for a given stock symbol.
 pub async fn stock_candle(
-    symbol: &str,
-    to: DateTime<Local>,
-    count: u32,
+    symbol: &str,        // Stock symbol.
+    to: DateTime<Local>, // End timestamp.
+    count: u32,          // Number of candles to fetch.
 ) -> Result<Vec<model::Candle>, client::RequestError> {
     let resp = client::request::<response::DailyCandles>(
         &format!("v1/stocks/candles/daily/{}/", symbol),
@@ -60,8 +63,9 @@ pub async fn stock_candle(
     Ok(candles)
 }
 
+// Fetches daily candle data for multiple stock symbols.
 pub async fn bulk_candles(
-    symbols: Vec<String>,
+    symbols: Vec<String>, // Vector of stock symbols.
 ) -> Result<HashMap<String, model::Candle>, client::RequestError> {
     let resp = client::request::<response::BulkCandles>(
         "v1/stocks/bulkcandles/daily/",
@@ -88,12 +92,13 @@ pub async fn bulk_candles(
     Ok(quotes)
 }
 
+// Fetches option chain data for a given stock symbol.
 pub async fn option_chain(
-    symbol: &str,
-    strike_range: (f64, f64),
-    expiration_date_range: (DateTime<Local>, DateTime<Local>),
-    min_open_interest: u32,
-    side: model::OptionChainSide,
+    symbol: &str,                                              // Stock symbol.
+    strike_range: (f64, f64),                                  // Strike price range.
+    expiration_date_range: (DateTime<Local>, DateTime<Local>), // Expiration date range.
+    min_open_interest: u32,                                    // Minimum open interest.
+    side: model::OptionChainSide,                              // Call or Put.
 ) -> Result<Vec<model::OptionStrikeCandle>, client::RequestError> {
     let strike_str = [strike_range.0.to_string(), strike_range.1.to_string()].join("-");
     let resp = client::request::<response::OptionChain>(
@@ -141,6 +146,7 @@ pub async fn option_chain(
     Ok(candles)
 }
 
+// Calculates the number of weeks given the days to expiration.
 fn num_of_weeks(dte: u32) -> f64 {
     if (5..=7).contains(&dte) {
         1.0
