@@ -2,6 +2,7 @@ use super::super::model;
 use super::response;
 use crate::http::client;
 use chrono::{DateTime, Local, TimeZone};
+use core::num;
 use std::collections::HashMap;
 
 fn check_status(s: &str, err: &Option<String>) -> Result<(), client::RequestError> {
@@ -131,9 +132,18 @@ pub async fn option_chain(
             updated: Local.timestamp_opt(resp.updated[i] as i64, 0).unwrap(),
             volume: resp.volume[i],
             timestamp: resp.dte[i],
+            dte: resp.dte[i],
             open_interest: resp.open_interest[i],
-            rate_of_return: resp.mid[i] / resp.strike[i],
+            rate_of_return: resp.mid[i] / resp.strike[i] / num_of_weeks(resp.dte[i]) * 52.0,
         });
     }
     Ok(candles)
+}
+
+fn num_of_weeks(dte: u32) -> f64 {
+    if (5..=7).contains(&dte) {
+        1.0
+    } else {
+        (dte / 7) as f64 + (dte % 7) as f64 / 5.0
+    }
 }
