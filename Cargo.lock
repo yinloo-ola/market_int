@@ -690,6 +690,7 @@ dependencies = [
  "dotenv",
  "futures",
  "lazy_static",
+ "log",
  "ratelimit",
  "reqwest",
  "rusqlite",
