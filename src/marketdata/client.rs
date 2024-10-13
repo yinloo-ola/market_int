@@ -1,8 +1,8 @@
-use chrono::{DateTime, Local};
-
+use super::super::model;
 use super::response;
-use super::result;
 use crate::http::client;
+use chrono::{DateTime, Local, TimeZone};
+use std::collections::HashMap;
 
 fn check_status(s: &str, err: &Option<String>) -> Result<(), client::RequestError> {
     match s {
@@ -15,17 +15,16 @@ fn check_status(s: &str, err: &Option<String>) -> Result<(), client::RequestErro
     }
 }
 
-pub async fn get_market_status() -> Result<result::MarketStatus, client::RequestError> {
-    let resp =
-        client::request::<response::MarketStatusResponse>("v1/markets/status/", None).await?;
+pub async fn market_status() -> Result<model::MarketStatus, client::RequestError> {
+    let resp = client::request::<response::MarketStatus>("v1/markets/status/", None).await?;
 
     check_status(&resp.s, &resp.errmsg)?;
 
     match resp.status.as_slice() {
-        [status] if status == "open" => Ok(result::MarketStatus::Open),
-        [status] if status == "closed" => Ok(result::MarketStatus::Closed),
+        [status] if status == "open" => Ok(model::MarketStatus::Open),
+        [status] if status == "closed" => Ok(model::MarketStatus::Closed),
         [] => Err(client::RequestError::Other("No data".into())),
-        [_] => Ok(result::MarketStatus::Null),
+        [_] => Ok(model::MarketStatus::Null),
         _ => Err(client::RequestError::Other("More than one data".into())),
     }
 }
@@ -34,8 +33,8 @@ pub async fn stock_candle(
     symbol: String,
     to: DateTime<Local>,
     count: u32,
-) -> Result<Vec<result::Candle>, client::RequestError> {
-    let resp = client::request::<response::DailyCandleData>(
+) -> Result<Vec<model::Candle>, client::RequestError> {
+    let resp = client::request::<response::DailyCandles>(
         &format!("v1/stocks/candles/daily/{}/", symbol),
         Some(vec![
             ("to", &to.timestamp().to_string()),
@@ -48,13 +47,92 @@ pub async fn stock_candle(
     let len = resp.c.len();
     let mut candles = Vec::with_capacity(len);
     for i in 0..len {
-        candles.push(result::Candle {
+        candles.push(model::Candle {
             open: resp.o[i],
             high: resp.h[i],
             low: resp.l[i],
             close: resp.c[i],
             volume: resp.v[i] as u32,
             timestamp: resp.t[i] as u32,
+        });
+    }
+    Ok(candles)
+}
+
+pub async fn bulk_candles(
+    symbols: Vec<String>,
+) -> Result<HashMap<String, model::Candle>, client::RequestError> {
+    let resp = client::request::<response::BulkCandles>(
+        "v1/stocks/bulkcandles/daily/",
+        Some(vec![("symbols", &symbols.join(","))]),
+    )
+    .await?;
+    check_status(&resp.s, &resp.errmsg)?;
+
+    let mut quotes = HashMap::new();
+    for i in 0..resp.symbol.len() {
+        quotes.insert(
+            resp.symbol[i].clone(),
+            model::Candle {
+                close: resp.c[i],
+                high: resp.h[i],
+                low: resp.l[i],
+                open: resp.o[i],
+                timestamp: resp.t[i] as u32,
+                volume: resp.v[i] as u32,
+            },
+        );
+    }
+    Ok(quotes)
+}
+
+pub async fn option_chain(
+    symbol: &str,
+    strike_range: (f64, f64),
+    expiration_date_range: (DateTime<Local>, DateTime<Local>),
+    min_open_interest: u32,
+    side: model::OptionChainSide,
+) -> Result<Vec<model::OptionStrikeCandle>, client::RequestError> {
+    let strike_str = [strike_range.0.to_string(), strike_range.1.to_string()].join("-");
+    let resp = client::request::<response::OptionChain>(
+        &format!("v1/options/chain/{}/", symbol),
+        Some(vec![
+            ("strike", &strike_str),
+            ("from", &expiration_date_range.0.timestamp().to_string()),
+            ("to", &expiration_date_range.1.timestamp().to_string()),
+            ("minOpenInterest ", &min_open_interest.to_string()),
+            match side {
+                model::OptionChainSide::Call => ("side", "call"),
+                model::OptionChainSide::Put => ("side", "put"),
+            },
+        ]),
+    )
+    .await?;
+    check_status(&resp.s, &resp.errmsg)?;
+    let len = resp.option_symbol.len();
+    let mut candles = Vec::with_capacity(len);
+    for i in 0..len {
+        candles.push(model::OptionStrikeCandle {
+            underlying: resp.underlying[i].clone(),
+            strike: resp.strike[i],
+            underlying_price: resp.underlying_price[i],
+            side: match resp.side[i].as_str() {
+                "call" => model::OptionChainSide::Call,
+                "put" => model::OptionChainSide::Put,
+                _ => return Err(client::RequestError::Other("Unknown side".into())),
+            },
+            bid: resp.bid[i],
+            mid: resp.mid[i],
+            ask: resp.ask[i],
+            bid_size: resp.bid_size[i],
+            ask_size: resp.ask_size[i],
+            last: resp.last[i],
+            expiration: Local.timestamp_opt(resp.expiration[i] as i64, 0).unwrap(),
+            updated: Local.timestamp_opt(resp.updated[i] as i64, 0).unwrap(),
+            volume: resp.volume[i],
+            timestamp: resp.dte[i],
+            open_interest: resp.open_interest[i],
+            rate_of_return: resp.mid[i] / resp.strike[i],
         });
     }
     Ok(candles)

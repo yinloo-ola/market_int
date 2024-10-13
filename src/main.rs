@@ -1,11 +1,11 @@
 mod marketdata {
     pub mod client;
     pub mod response;
-    pub mod result;
 }
 mod http {
     pub mod client;
 }
+mod model;
 use dotenv::dotenv;
 use marketdata::client;
 use std::error::Error;
@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     dotenv().ok();
 
     let (market_status, candles) = tokio::join!(
-        client::get_market_status(),
+        client::market_status(),
         client::stock_candle("TSLA".to_string(), chrono::Local::now(), 10)
     );
     match market_status {
