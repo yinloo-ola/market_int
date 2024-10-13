@@ -1,7 +1,6 @@
 use std::{fs, path::Path};
 
 use crate::{model, store::candle};
-use chrono::format;
 use rusqlite::Connection;
 
 pub fn calculate_and_save(
