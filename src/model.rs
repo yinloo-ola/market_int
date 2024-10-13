@@ -1,6 +1,6 @@
 use chrono::{DateTime, Local};
 
-// Represents the market status.
+/// Represents the market status.
 #[derive(Debug)]
 pub enum MarketStatus {
     Open,
@@ -8,7 +8,7 @@ pub enum MarketStatus {
     Null,
 }
 
-// Structure representing a candle (OHLCV data).
+/// Structure representing a candle (OHLCV data).
 #[derive(Debug)]
 pub struct Candle {
     pub symbol: String, // Symbol of the asset.
@@ -20,14 +20,14 @@ pub struct Candle {
     pub timestamp: u32, // Timestamp of the candle.
 }
 
-// Represents the side of an option (call or put).
+/// Represents the side of an option (call or put).
 #[derive(Debug)]
 pub enum OptionChainSide {
     Call,
     Put,
 }
 
-// Structure representing a candle for an option strike.
+/// Structure representing a candle for an option strike.
 #[derive(Debug)]
 pub struct OptionStrikeCandle {
     pub underlying: String,          // Underlying asset symbol.
