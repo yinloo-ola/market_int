@@ -59,6 +59,8 @@ enum Commands {
 async fn main() {
     dotenv().ok();
 
+    env_logger::init();
+
     let args = Args::parse();
 
     let conn = store::sqlite::init_connection();

@@ -10,8 +10,9 @@
             "name": "Debug",
             "program": "${workspaceFolder}/target/debug/market_int",
             "args": [
-                "pull-quotes",
-                "abc"
+                "calculate-atr",
+                "/home/tianhai82/hobby/market_int/data/symbols.csv",
+                "0.7"
             ],
             "cwd": "${workspaceFolder}"
         }
