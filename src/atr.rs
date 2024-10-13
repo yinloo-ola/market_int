@@ -35,6 +35,15 @@ pub fn calculate_and_save(
         // Fetch candle data for the current symbol from the database.
         match candle::get_candles(&mut conn, symbol, 100) {
             Ok(candles) => {
+                // aggregate 5 candles into one. calculate the open,close,high,low based on each group of 5 candles
+                todo!("aggregate 5 candles into one. calculate the open,close,high,low based on each group of 5 candles");
+                // candles.iter().chunks(5).for_each(|group|{
+                //     let open = group.iter().map(|candle| candle.open).sum::<f64>() / 5.0;
+                //     let close = group.iter().map(|candle| candle.close).sum::<f64>() / 5.0;
+                //     let high = group.iter().map(|candle| candle.high).max().unwrap();
+                //     let low = group.iter().map(|candle| candle.low).min().unwrap();
+                // });
+
                 if candles.len() < 4 {
                     log::warn!(
                         "Not enough candles for {}, skipping ATR calculation",
@@ -49,8 +58,9 @@ pub fn calculate_and_save(
 
                 // let atr = calculate_atr(&candles, atr_percentile);
                 log::info!(
-                    "{}: ema_atr:{},  percentile{}:{}",
+                    "{}: num_candle:{} ema_atr:{},  percentile_{}:{}",
                     symbol,
+                    candles.len(),
                     ema_atr,
                     atr_percentile,
                     percentile_atr
