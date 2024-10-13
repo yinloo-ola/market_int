@@ -10,9 +10,8 @@
             "name": "Debug",
             "program": "${workspaceFolder}/target/debug/market_int",
             "args": [
-                "calculate-atr",
-                "abc",
-                "6"
+                "pull-quotes",
+                "abc"
             ],
             "cwd": "${workspaceFolder}"
         }
