@@ -12,7 +12,7 @@ lazy_static::lazy_static! {
     static ref CLIENT: Arc<reqwest::Client> = Arc::new(reqwest::Client::new());
 }
 
-const TOKEN_PER_SEC: u64 = 1;
+const TOKEN_PER_SEC: u64 = 5;
 lazy_static::lazy_static! {
     static ref RATELIMITER: Arc<Ratelimiter> = Arc::new(
         Ratelimiter::builder(TOKEN_PER_SEC, Duration::from_secs(1)).max_tokens(TOKEN_PER_SEC).initial_available(TOKEN_PER_SEC).build().unwrap(),
