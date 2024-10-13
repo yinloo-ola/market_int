@@ -9,6 +9,7 @@ pub enum MarketStatus {
 
 #[derive(Debug)]
 pub struct Candle {
+    pub symbol: String,
     pub open: f64,
     pub high: f64,
     pub low: f64,
