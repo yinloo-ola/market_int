@@ -19,7 +19,7 @@ pub enum QuotesError {
     EmptySymbolFile,
 }
 
-// Pulls stock quotes for a list of symbols and saves them to the database.
+/// Pulls stock quotes for a list of symbols and saves them to the database.
 pub async fn pull_and_save(
     symbols_file_path: &str, // Path to the file containing symbols.
     mut conn: Connection,    // Database connection.

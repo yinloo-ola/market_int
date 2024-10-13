@@ -27,7 +27,7 @@ lazy_static::lazy_static! {
     );
 }
 
-// Custom error type for HTTP requests.
+/// Custom error type for HTTP requests.
 #[derive(Error, Debug)]
 pub enum RequestError {
     #[error("Environment variable 'marketdata_token' not set")]
@@ -40,7 +40,7 @@ pub enum RequestError {
     Other(String),
 }
 
-// Makes an HTTP request to the specified path with optional parameters.
+/// Makes an HTTP request to the specified path with optional parameters.
 pub async fn request<T: DeserializeOwned>(
     path: &str,                        // API path.
     params: Option<Vec<(&str, &str)>>, // Optional query parameters.

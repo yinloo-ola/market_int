@@ -1,6 +1,6 @@
 use rusqlite::{Connection, OpenFlags, Result};
 
-// Initializes a connection to the SQLite database.
+/// Initializes a connection to the SQLite database.
 pub fn init_connection() -> Result<Connection> {
     // Open the database file specified by the environment variable `sqlite_file`.
     // The database is opened in read-write mode, and it will be created if it doesn't exist.

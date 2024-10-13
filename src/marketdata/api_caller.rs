@@ -16,7 +16,7 @@ fn check_status(s: &str, err: &Option<String>) -> Result<(), client::RequestErro
     }
 }
 
-// Fetches the current market status.
+/// Fetches the current market status.
 pub async fn market_status() -> Result<model::MarketStatus, client::RequestError> {
     let resp = client::request::<response::MarketStatus>("v1/markets/status/", None).await?;
 
@@ -31,7 +31,7 @@ pub async fn market_status() -> Result<model::MarketStatus, client::RequestError
     }
 }
 
-// Fetches daily candle data for a given stock symbol.
+/// Fetches daily candle data for a given stock symbol.
 pub async fn stock_candle(
     symbol: &str,        // Stock symbol.
     to: DateTime<Local>, // End timestamp.
@@ -63,7 +63,7 @@ pub async fn stock_candle(
     Ok(candles)
 }
 
-// Fetches daily candle data for multiple stock symbols.
+/// Fetches daily candle data for multiple stock symbols.
 pub async fn bulk_candles(
     symbols: Vec<String>, // Vector of stock symbols.
 ) -> Result<HashMap<String, model::Candle>, client::RequestError> {
@@ -92,7 +92,7 @@ pub async fn bulk_candles(
     Ok(quotes)
 }
 
-// Fetches option chain data for a given stock symbol.
+/// Fetches option chain data for a given stock symbol.
 pub async fn option_chain(
     symbol: &str,                                              // Stock symbol.
     strike_range: (f64, f64),                                  // Strike price range.

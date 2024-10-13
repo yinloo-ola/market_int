@@ -14,6 +14,8 @@ mod http {
 mod model;
 // Pull quotes functionality.
 mod quotes;
+// Average True Range (ATR) calculation.
+mod atr;
 // Data storage module.
 mod store {
     // Candle data storage.
@@ -24,7 +26,6 @@ mod store {
 
 use clap::{Parser, Subcommand};
 use dotenv::dotenv;
-use thiserror::Error;
 
 // Command-line argument parser.
 #[derive(Parser, Debug)]
@@ -53,38 +54,36 @@ enum Commands {
     },
 }
 
-#[derive(Error, Debug)]
-pub enum MarketDataError {
-    #[error("Database error: {0}")]
-    DatabaseError(#[from] rusqlite::Error),
-    #[error("Quotes error: {0}")]
-    QuotesError(#[from] quotes::QuotesError),
-    #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
-    #[error("Other error: {0}")]
-    OtherError(String),
-}
-
 #[tokio::main]
 // Main function entry point.
-async fn main() -> Result<(), MarketDataError> {
+async fn main() {
     dotenv().ok();
 
     let args = Args::parse();
 
-    let conn = store::sqlite::init_connection()?;
+    let conn = store::sqlite::init_connection();
+    if let Err(err) = conn {
+        log::error!("Error initializing database connection: {}", err);
+        return;
+    }
+    let conn = conn.unwrap();
 
     match args.command {
         Commands::PullQuotes { symbols_file_path } => {
-            quotes::pull_and_save(&symbols_file_path, conn).await?;
-            Ok(())
+            match quotes::pull_and_save(&symbols_file_path, conn).await {
+                Ok(_) => log::info!("Successfully pulled and saved quotes"),
+                Err(err) => log::error!("Error pulling and saving quotes: {}", err),
+            }
         }
+
         Commands::CalculateAtr {
-            symbols_file_path: _,
-            atr_percentile: _,
-        } => {
-            todo!()
-        }
+            symbols_file_path,
+            atr_percentile,
+        } => match atr::calculate_and_save(&symbols_file_path, atr_percentile, conn) {
+            Ok(_) => log::info!("Successfully calculated ATR and saved to DB"),
+            Err(err) => log::error!("Error calculating ATR: {}", err),
+        },
+
         Commands::PullOptionChain {
             symbols_file_path: _,
             side: _,

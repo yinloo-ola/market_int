@@ -1,7 +1,7 @@
 use super::super::model;
 use rusqlite::{params, Connection, Result};
 
-// Initializes the candle table in the SQLite database.
+/// Initializes the candle table in the SQLite database.
 pub fn create_table(conn: &Connection) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS candle (
@@ -22,7 +22,7 @@ pub fn create_table(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-// Saves a vector of candles to the candle table.  Uses REPLACE to update existing entries.
+/// Saves a vector of candles to the candle table.  Uses REPLACE to update existing entries.
 pub fn save_candles(conn: &mut Connection, candles: Vec<model::Candle>) -> Result<()> {
     let transaction = conn.transaction()?;
     {
@@ -46,19 +46,18 @@ pub fn save_candles(conn: &mut Connection, candles: Vec<model::Candle>) -> Resul
     transaction.commit()
 }
 
-// Retrieves candles from the database for a given symbol and timestamp range.
+/// Retrieves the most recent count candles from the database.
 pub fn get_candles(
     conn: &mut Connection,
     symbol: &str, // Symbol to fetch candles for.
-    from: u32,    // Start timestamp.
-    to: u32,      // End timestamp.
+    count: u32,   // Number of candles to fetch.
 ) -> Result<Vec<model::Candle>> {
     let mut stmt = conn.prepare(
         "SELECT symbol, open, high, low, close, volume, timestamp
          FROM candle
-         WHERE symbol = ?1 AND timestamp >= ?2 AND timestamp <= ?3",
+         WHERE symbol = ?1 ORDER BY timestamp DESC LIMIT ?2",
     )?;
-    let mut rows = stmt.query(params![symbol, from, to])?;
+    let mut rows = stmt.query(params![symbol, count])?;
     let mut candles = Vec::new();
     while let Some(row) = rows.next()? {
         let symbol: String = row.get(0)?;
@@ -78,5 +77,6 @@ pub fn get_candles(
             timestamp,
         });
     }
+    candles.reverse();
     Ok(candles)
 }

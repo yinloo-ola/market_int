@@ -8,7 +8,7 @@ pub struct MarketStatus {
     pub errmsg: Option<String>, // Error message (if any).
 }
 
-// Response structure for daily candles.
+/// Response structure for daily candles.
 #[derive(Debug, Deserialize)]
 pub struct DailyCandles {
     pub s: String,              // Status code.
@@ -36,7 +36,7 @@ pub struct BulkCandles {
     pub errmsg: Option<String>, // Error message (if any).
 }
 
-// Response structure for option chain data.
+/// Response structure for option chain data.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OptionChain {
