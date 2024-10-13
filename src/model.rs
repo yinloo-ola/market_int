@@ -37,6 +37,7 @@ pub struct OptionStrikeCandle {
     pub last: f64,
     pub expiration: DateTime<Local>,
     pub updated: DateTime<Local>,
+    pub dte: u32,
     pub volume: u32,
     pub timestamp: u32,
     pub open_interest: u32,
