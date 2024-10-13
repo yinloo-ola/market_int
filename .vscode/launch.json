@@ -8,8 +8,12 @@
             "type": "lldb",
             "request": "launch",
             "name": "Debug",
-            "program": "${workspaceFolder}/<executable file>",
-            "args": [],
+            "program": "${workspaceFolder}/target/debug/market_int",
+            "args": [
+                "calculate-atr",
+                "abc",
+                "6"
+            ],
             "cwd": "${workspaceFolder}"
         }
     ]

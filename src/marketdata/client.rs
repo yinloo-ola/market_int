@@ -2,7 +2,6 @@ use super::super::model;
 use super::response;
 use crate::http::client;
 use chrono::{DateTime, Local, TimeZone};
-use core::num;
 use std::collections::HashMap;
 
 fn check_status(s: &str, err: &Option<String>) -> Result<(), client::RequestError> {
@@ -31,7 +30,7 @@ pub async fn market_status() -> Result<model::MarketStatus, client::RequestError
 }
 
 pub async fn stock_candle(
-    symbol: String,
+    symbol: &str,
     to: DateTime<Local>,
     count: u32,
 ) -> Result<Vec<model::Candle>, client::RequestError> {
@@ -49,6 +48,7 @@ pub async fn stock_candle(
     let mut candles = Vec::with_capacity(len);
     for i in 0..len {
         candles.push(model::Candle {
+            symbol: symbol.into(),
             open: resp.o[i],
             high: resp.h[i],
             low: resp.l[i],
@@ -75,6 +75,7 @@ pub async fn bulk_candles(
         quotes.insert(
             resp.symbol[i].clone(),
             model::Candle {
+                symbol: resp.symbol[i].clone(),
                 close: resp.c[i],
                 high: resp.h[i],
                 low: resp.l[i],
