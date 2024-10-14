@@ -36,13 +36,36 @@ pub fn calculate_and_save(
         match candle::get_candles(&mut conn, symbol, 100) {
             Ok(candles) => {
                 // aggregate 5 candles into one. calculate the open,close,high,low based on each group of 5 candles
-                todo!("aggregate 5 candles into one. calculate the open,close,high,low based on each group of 5 candles");
-                // candles.iter().chunks(5).for_each(|group|{
-                //     let open = group.iter().map(|candle| candle.open).sum::<f64>() / 5.0;
-                //     let close = group.iter().map(|candle| candle.close).sum::<f64>() / 5.0;
-                //     let high = group.iter().map(|candle| candle.high).max().unwrap();
-                //     let low = group.iter().map(|candle| candle.low).min().unwrap();
-                // });
+                let candles: Vec<model::Candle> = candles
+                    .chunks(5)
+                    .map(|group| {
+                        let open = group[0].open;
+                        let close = group[group.len() - 1].close;
+                        let highs = group.iter().map(|candle| candle.high);
+                        let mut high = group[0].high;
+                        for h in highs {
+                            if h > high {
+                                high = h;
+                            }
+                        }
+                        let lows = group.iter().map(|candle| candle.low);
+                        let mut low = group[0].low;
+                        for l in lows {
+                            if l < low {
+                                low = l;
+                            }
+                        }
+                        model::Candle {
+                            symbol: symbol.to_string(),
+                            open,
+                            high,
+                            low,
+                            close,
+                            volume: 0,
+                            timestamp: group[0].timestamp,
+                        }
+                    })
+                    .collect();
 
                 if candles.len() < 4 {
                     log::warn!(
