@@ -1,76 +1,97 @@
-use std::fs;
+use chrono::Local;
+use http::client;
+use rusqlite::Connection;
+use std::error::Error;
+use std::fmt::Display;
+use std::fs::OpenOptions;
+use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
-use chrono::Local;
-use rusqlite::Connection;
-use thiserror::Error;
-
+use crate::http;
 use crate::{marketdata::api_caller, store};
 
-#[derive(Error, Debug)]
+type Result<T> = std::result::Result<T, QuotesError>;
+
+#[derive(Debug)]
 pub enum QuotesError {
-    #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
-    #[error("Database error: {0}")]
-    DatabaseError(#[from] rusqlite::Error),
-    #[error("Invalid symbol file: {0}")]
-    InvalidSymbolFile(String),
-    #[error("Empty symbol file")]
-    EmptySymbolFile,
+    FileNotFound(String),
+    CouldNotOpenFile(io::Error),
+    CouldNotReadLine,
+    EmptySymbolFile(String),
+    DatabaseError(rusqlite::Error),
+    HttpError(client::RequestError),
+}
+
+impl Display for QuotesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl Error for QuotesError {}
+
+impl From<io::Error> for QuotesError {
+    fn from(value: io::Error) -> Self {
+        Self::CouldNotOpenFile(value)
+    }
+}
+
+impl From<rusqlite::Error> for QuotesError {
+    fn from(value: rusqlite::Error) -> Self {
+        Self::DatabaseError(value)
+    }
+}
+
+impl From<client::RequestError> for QuotesError {
+    fn from(value: client::RequestError) -> Self {
+        Self::HttpError(value)
+    }
 }
 
 /// Pulls stock quotes for a list of symbols and saves them to the database.
 pub async fn pull_and_save(
     symbols_file_path: &str, // Path to the file containing symbols.
     mut conn: Connection,    // Database connection.
-) -> Result<(), QuotesError> {
+) -> Result<()> {
     // Validate symbols file path
     let path = Path::new(symbols_file_path);
     if !path.exists() {
-        return Err(QuotesError::InvalidSymbolFile(format!(
-            "File not found: {}",
-            symbols_file_path
-        )));
-    }
-    if !path.is_file() {
-        return Err(QuotesError::InvalidSymbolFile(format!(
-            "Not a file: {}",
-            symbols_file_path
-        )));
+        return Err(QuotesError::FileNotFound(symbols_file_path.into()));
     }
 
-    // Read symbols from the specified file.
-    let symbols = fs::read_to_string(symbols_file_path)?;
-    // Split the symbols string into a vector of strings, filtering out empty lines.
-    let symbols: Vec<&str> = symbols
-        .split("\n")
-        .filter(|s| !s.trim().is_empty())
+    let file = OpenOptions::new().read(true).open(path)?;
+
+    let symbols: Vec<_> = BufReader::new(file)
+        .lines()
+        .map(|line| line.map_err(|_e| QuotesError::CouldNotReadLine))
         .collect();
 
     if symbols.is_empty() {
-        return Err(QuotesError::EmptySymbolFile);
+        return Err(QuotesError::EmptySymbolFile(symbols_file_path.into()));
     }
 
     // Initialize the candle table in the database.
     store::candle::create_table(&conn)?;
 
+    let mut i = 0;
     // Iterate over each symbol.
     for symbol in symbols {
-        // Fetch candle data for the current symbol.
-        let candles = api_caller::stock_candle(&symbol, Local::now(), 100).await;
-        // Handle the result of the candle data fetch.
-        match candles {
-            Ok(candles) => {
-                // Save the fetched candles to the database.
-                store::candle::save_candles(&mut conn, candles)?;
-                log::info!("Successfully fetched and saved candles for {}", symbol);
-            }
-            Err(e) => {
-                // Log the error and continue to the next symbol if an error occurs.
-                log::error!("Error fetching candles for {}: {}", symbol, e);
-                continue;
-            }
+        let symbol = symbol?;
+        if symbol.trim().len() == 0 {
+            log::warn!("line {i} is empty");
+            i += 1;
+            continue;
         }
+
+        // Fetch candle data for the current symbol.
+        let candles = api_caller::stock_candle(&symbol, Local::now(), 100).await?;
+        // Handle the result of the candle data fetch.
+
+        // Save the fetched candles to the database.
+        store::candle::save_candles(&mut conn, candles)?;
+
+        log::info!("Successfully fetched and saved candles for {}", symbol);
+        i += 1;
     }
     Ok(())
 }
