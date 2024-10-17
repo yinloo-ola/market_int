@@ -1,103 +1,108 @@
-use std::{fs, path::Path};
-
-use crate::{model, store::candle};
+use crate::{
+    constants, model,
+    store::{self, candle, true_range},
+};
 use rusqlite::Connection;
+use std::{
+    fs::OpenOptions,
+    io::{BufRead, BufReader},
+    path::Path,
+};
 
 pub fn calculate_and_save(
     symbols_file_path: &str, // Path to the file containing symbols.
     atr_percentile: f64,     // ATR percentile.
     mut conn: Connection,    // Database connection.)
-) -> Result<(), String> {
+) -> model::Result<()> {
     // Validate symbols file path
     let path = Path::new(symbols_file_path);
     if !path.exists() {
-        return Err(format!("File not found: {}", symbols_file_path));
+        return Err(model::QuotesError::FileNotFound(symbols_file_path.into()));
     }
     if !path.is_file() {
-        return Err(format!("Not a file: {}", symbols_file_path));
+        return Err(model::QuotesError::FileNotFound(symbols_file_path.into()));
     }
 
-    // Read symbols from the specified file.
-    let symbols = fs::read_to_string(symbols_file_path)
-        .map_err(|err| format!("fail to read {}: {}", symbols_file_path, err))?;
-    // Split the symbols string into a vector of strings, filtering out empty lines.
-    let symbols: Vec<&str> = symbols
-        .split("\n")
-        .filter(|s| !s.trim().is_empty())
+    let file = OpenOptions::new().read(true).open(path)?;
+
+    let symbols: Vec<_> = BufReader::new(file)
+        .lines()
+        .map(|line| line.map_err(|_e| model::QuotesError::CouldNotReadLine))
         .collect();
 
     if symbols.is_empty() {
-        return Err(format!("Empty symbols file: {}", symbols_file_path));
+        return Err(model::QuotesError::EmptySymbolFile(
+            symbols_file_path.into(),
+        ));
     }
 
+    // Initialize the candle table in the database.
+    store::true_range::create_table(&conn)?;
+
+    let mut true_range_vec: Vec<model::TrueRange> = Vec::with_capacity(symbols.len() * 5);
     // Iterate over each symbol.
     for symbol in symbols {
+        let symbol = symbol?; // return Err when any symbol is not ok
+
         // Fetch candle data for the current symbol from the database.
-        match candle::get_candles(&mut conn, symbol, 100) {
-            Ok(candles) => {
-                // aggregate 5 candles into one. calculate the open,close,high,low based on each group of 5 candles
-                let candles: Vec<model::Candle> = candles
-                    .chunks(5)
-                    .map(|group| {
-                        let open = group[0].open;
-                        let close = group[group.len() - 1].close;
-                        let highs = group.iter().map(|candle| candle.high);
-                        let mut high = group[0].high;
-                        for h in highs {
-                            if h > high {
-                                high = h;
-                            }
-                        }
-                        let lows = group.iter().map(|candle| candle.low);
-                        let mut low = group[0].low;
-                        for l in lows {
-                            if l < low {
-                                low = l;
-                            }
-                        }
-                        model::Candle {
-                            symbol: symbol.to_string(),
-                            open,
-                            high,
-                            low,
-                            close,
-                            volume: 0,
-                            timestamp: group[0].timestamp,
-                        }
-                    })
-                    .collect();
+        let candles = candle::get_candles(&mut conn, symbol.as_str(), constants::CANDLE_COUNT)?;
 
-                if candles.len() < 4 {
-                    log::warn!(
-                        "Not enough candles for {}, skipping ATR calculation",
-                        symbol
-                    );
-                    continue;
+        // aggregate 5 candles into one. calculate the open,close,high,low based on each group of 5 candles
+        let candles: Vec<model::Candle> = candles
+            .chunks(5)
+            .map(|group| {
+                let open = group[0].open;
+                let close = group[group.len() - 1].close;
+                let highs = group.iter().map(|candle| candle.high);
+                let mut high = group[0].high;
+                for h in highs {
+                    if h > high {
+                        high = h;
+                    }
                 }
-                // Calculate the ATR for the candles.
-                let trs = true_ranges(&candles);
-                let ema_atr = exponential_moving_average(&trs, 4)?;
-                let percentile_atr = percentile(&trs, atr_percentile)?;
+                let lows = group.iter().map(|candle| candle.low);
+                let mut low = group[0].low;
+                for l in lows {
+                    if l < low {
+                        low = l;
+                    }
+                }
+                model::Candle {
+                    symbol: symbol.to_string(),
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume: 0,
+                    timestamp: group[0].timestamp,
+                }
+            })
+            .collect();
 
-                // let atr = calculate_atr(&candles, atr_percentile);
-                log::info!(
-                    "{}: num_candle:{} ema_atr:{},  percentile_{}:{}",
-                    symbol,
-                    candles.len(),
-                    ema_atr,
-                    atr_percentile,
-                    percentile_atr
-                );
-                // Save the ATR to the database.
-                // store::atr::save_atr(&mut conn, symbol, atr)?;
-            }
-            Err(e) => {
-                // Log the error and continue to the next symbol if an error occurs.
-                log::error!("Error fetching candles for {}: {}", symbol, e);
-                continue;
-            }
+        // candles here are now weekly candles
+        if candles.len() < 4 {
+            log::warn!(
+                "Not enough candles for {}, skipping ATR calculation",
+                symbol
+            );
+            continue;
         }
+
+        // Calculate the ATR for the candles.
+        let trs = true_ranges(&candles);
+        let ema_atr = exponential_moving_average(&trs, 4)?;
+        let percentile_atr = percentile(&trs, atr_percentile)?;
+
+        true_range_vec.push(model::TrueRange {
+            symbol: symbol.into(),
+            percentile_range: percentile_atr,
+            ema_range: ema_atr,
+            timestamp: candles.last().unwrap().timestamp,
+        });
     }
+
+    // Save the true ranges to the database.
+    true_range::save_true_ranges(&mut conn, true_range_vec)?;
     Ok(())
 }
 
@@ -122,12 +127,10 @@ fn ema(prev: f64, current: f64, multiplier: f64) -> f64 {
     current * multiplier + prev * (1.0 - multiplier)
 }
 
-fn exponential_moving_average(array: &[f64], period: u32) -> Result<f64, String> {
+fn exponential_moving_average(array: &[f64], period: u32) -> model::Result<f64> {
     if array.len() < period as usize {
-        return Err(format!(
-            "array length {} is less than period {}",
-            array.len(),
-            period
+        return Err(model::QuotesError::NotEnoughCandlesForStatistics(
+            "exponential_moving_average".into(),
         ));
     }
     let multiplier = 2.0 / (period as f64 + 1.0);
@@ -139,9 +142,16 @@ fn exponential_moving_average(array: &[f64], period: u32) -> Result<f64, String>
     Ok(prev)
 }
 
-fn percentile(values: &[f64], percentile: f64) -> Result<f64, String> {
+fn percentile(values: &[f64], percentile: f64) -> model::Result<f64> {
     if values.is_empty() {
-        return Err(format!("empty values"));
+        return Err(model::QuotesError::NotEnoughCandlesForStatistics(
+            "percentile".into(),
+        ));
+    }
+    if percentile < 0.0 {
+        return Err(model::QuotesError::NotEnoughCandlesForStatistics(
+            "percentile < 0".into(),
+        ));
     }
 
     if percentile == 0.5 && values.len() == 1 {
@@ -154,7 +164,7 @@ fn percentile(values: &[f64], percentile: f64) -> Result<f64, String> {
     let index = percentile * (values.len() as f64 - 1.0);
 
     if index < 0.0 || index >= values.len() as f64 {
-        return Err(format!("invalid index {} for values {:?}", index, values));
+        panic!("percentile: impossible index!!");
     }
 
     let lower = index as usize;

@@ -18,11 +18,15 @@ mod quotes;
 mod atr;
 // Data storage module.
 mod store {
-    // Candle data storage.
+    /// Candle data storage.
     pub mod candle;
-    // SQLite database interaction.
+    /// SQLite database interaction.
     pub mod sqlite;
+    /// true range storage.
+    pub mod true_range;
 }
+// module storing defaults
+mod constants;
 
 use clap::{Parser, Subcommand};
 use dotenv::dotenv;
