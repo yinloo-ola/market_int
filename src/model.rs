@@ -1,4 +1,8 @@
+use std::{error::Error, fmt::Display, io};
+
 use chrono::{DateTime, Local};
+
+use crate::http::client;
 
 /// Represents the market status.
 #[derive(Debug)]
@@ -18,6 +22,14 @@ pub struct Candle {
     pub close: f64,     // Closing price.
     pub volume: u32,    // Trading volume.
     pub timestamp: u32, // Timestamp of the candle.
+}
+
+#[derive(Debug)]
+pub struct TrueRange {
+    pub symbol: String, // Symbol of the asset.
+    pub percentile_range: f64,
+    pub ema_range: f64,
+    pub timestamp: u32,
 }
 
 /// Represents the side of an option (call or put).
@@ -47,4 +59,43 @@ pub struct OptionStrikeCandle {
     pub timestamp: u32,              // Timestamp.
     pub open_interest: u32,          // Open interest.
     pub rate_of_return: f64,         // Rate of return.
+}
+
+pub type Result<T> = std::result::Result<T, QuotesError>;
+
+#[derive(Debug)]
+pub enum QuotesError {
+    FileNotFound(String),
+    CouldNotOpenFile(io::Error),
+    CouldNotReadLine,
+    EmptySymbolFile(String),
+    DatabaseError(rusqlite::Error),
+    HttpError(client::RequestError),
+    NotEnoughCandlesForStatistics(String),
+}
+
+impl Display for QuotesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl Error for QuotesError {}
+
+impl From<io::Error> for QuotesError {
+    fn from(value: io::Error) -> Self {
+        Self::CouldNotOpenFile(value)
+    }
+}
+
+impl From<rusqlite::Error> for QuotesError {
+    fn from(value: rusqlite::Error) -> Self {
+        Self::DatabaseError(value)
+    }
+}
+
+impl From<client::RequestError> for QuotesError {
+    fn from(value: client::RequestError) -> Self {
+        Self::HttpError(value)
+    }
 }

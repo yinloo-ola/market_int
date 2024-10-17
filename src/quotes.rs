@@ -1,73 +1,33 @@
-use chrono::Local;
-use http::client;
-use rusqlite::Connection;
-use std::error::Error;
-use std::fmt::Display;
-use std::fs::OpenOptions;
-use std::io::{self, BufRead, BufReader};
-use std::path::Path;
-
-use crate::http;
+use crate::{constants, model};
 use crate::{marketdata::api_caller, store};
-
-type Result<T> = std::result::Result<T, QuotesError>;
-
-#[derive(Debug)]
-pub enum QuotesError {
-    FileNotFound(String),
-    CouldNotOpenFile(io::Error),
-    CouldNotReadLine,
-    EmptySymbolFile(String),
-    DatabaseError(rusqlite::Error),
-    HttpError(client::RequestError),
-}
-
-impl Display for QuotesError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl Error for QuotesError {}
-
-impl From<io::Error> for QuotesError {
-    fn from(value: io::Error) -> Self {
-        Self::CouldNotOpenFile(value)
-    }
-}
-
-impl From<rusqlite::Error> for QuotesError {
-    fn from(value: rusqlite::Error) -> Self {
-        Self::DatabaseError(value)
-    }
-}
-
-impl From<client::RequestError> for QuotesError {
-    fn from(value: client::RequestError) -> Self {
-        Self::HttpError(value)
-    }
-}
+use chrono::Local;
+use rusqlite::Connection;
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
 
 /// Pulls stock quotes for a list of symbols and saves them to the database.
 pub async fn pull_and_save(
     symbols_file_path: &str, // Path to the file containing symbols.
     mut conn: Connection,    // Database connection.
-) -> Result<()> {
+) -> model::Result<()> {
     // Validate symbols file path
     let path = Path::new(symbols_file_path);
     if !path.exists() {
-        return Err(QuotesError::FileNotFound(symbols_file_path.into()));
+        return Err(model::QuotesError::FileNotFound(symbols_file_path.into()));
     }
 
     let file = OpenOptions::new().read(true).open(path)?;
 
     let symbols: Vec<_> = BufReader::new(file)
         .lines()
-        .map(|line| line.map_err(|_e| QuotesError::CouldNotReadLine))
+        .map(|line| line.map_err(|_e| model::QuotesError::CouldNotReadLine))
         .collect();
 
     if symbols.is_empty() {
-        return Err(QuotesError::EmptySymbolFile(symbols_file_path.into()));
+        return Err(model::QuotesError::EmptySymbolFile(
+            symbols_file_path.into(),
+        ));
     }
 
     // Initialize the candle table in the database.
@@ -84,7 +44,8 @@ pub async fn pull_and_save(
         }
 
         // Fetch candle data for the current symbol.
-        let candles = api_caller::stock_candle(&symbol, Local::now(), 100).await?;
+        let candles =
+            api_caller::stock_candle(&symbol, Local::now(), constants::CANDLE_COUNT).await?;
         // Handle the result of the candle data fetch.
 
         // Save the fetched candles to the database.
