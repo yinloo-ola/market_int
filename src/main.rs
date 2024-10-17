@@ -13,9 +13,9 @@ mod http {
 // Data models.
 mod model;
 // Pull quotes functionality.
-mod quotes;
+mod pull_quotes;
 // Average True Range (ATR) calculation.
-mod atr;
+mod calc_atr;
 // Data storage module.
 mod store {
     /// Candle data storage.
@@ -76,7 +76,7 @@ async fn main() {
 
     match args.command {
         Commands::PullQuotes { symbols_file_path } => {
-            match quotes::pull_and_save(&symbols_file_path, conn).await {
+            match pull_quotes::pull_and_save(&symbols_file_path, conn).await {
                 Ok(_) => log::info!("Successfully pulled and saved quotes"),
                 Err(err) => log::error!("Error pulling and saving quotes: {}", err),
             }
@@ -85,7 +85,7 @@ async fn main() {
         Commands::CalculateAtr {
             symbols_file_path,
             atr_percentile,
-        } => match atr::calculate_and_save(&symbols_file_path, atr_percentile, conn) {
+        } => match calc_atr::calculate_and_save(&symbols_file_path, atr_percentile, conn) {
             Ok(_) => log::info!("Successfully calculated ATR and saved to DB"),
             Err(err) => log::error!("Error calculating ATR: {}", err),
         },
