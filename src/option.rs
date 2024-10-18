@@ -31,10 +31,17 @@ pub async fn retrieve_option_chains_base_on_ranges(
             constants::MIN_OPEN_INTEREST,
             side,
         )
-        .await?;
+        .await;
 
-        for chain in chains {
-            log::info!("{:?}", chain);
+        match chains {
+            Ok(chains) => {
+                for chain in chains {
+                    log::info!("{:?}", chain);
+                }
+            }
+            Err(e) => {
+                log::error!("Fail to retrieve option chain for {}. Err: {}", symbol, e);
+            }
         }
     }
     Ok(())
