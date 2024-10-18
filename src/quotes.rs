@@ -16,7 +16,6 @@ pub async fn pull_and_save(
     let mut i = 0;
     // Iterate over each symbol.
     for symbol in symbols {
-        let symbol = symbol?;
         if symbol.trim().len() == 0 {
             log::warn!("line {i} is empty");
             i += 1;

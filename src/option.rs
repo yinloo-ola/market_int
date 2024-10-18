@@ -18,7 +18,6 @@ pub async fn retrieve_option_chains_base_on_ranges(
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
     for symbol in symbols {
-        let symbol = symbol?;
         let true_range = true_range::get_true_range(&conn, &symbol)?;
         let latest_candle = &candle::get_candles(&conn, &symbol, 1)?[0];
         let v1 = latest_candle.close - true_range.ema_range;
