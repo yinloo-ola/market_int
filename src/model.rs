@@ -72,6 +72,7 @@ pub enum QuotesError {
     DatabaseError(rusqlite::Error),
     HttpError(client::RequestError),
     NotEnoughCandlesForStatistics(String),
+    SymbolCandleNotFound(String),
 }
 
 impl Display for QuotesError {

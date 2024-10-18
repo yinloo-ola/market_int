@@ -1,34 +1,14 @@
-use crate::{constants, model};
+use crate::{constants, model, symbols};
 use crate::{marketdata::api_caller, store};
 use chrono::Local;
 use rusqlite::Connection;
-use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader};
-use std::path::Path;
 
 /// Pulls stock quotes for a list of symbols and saves them to the database.
 pub async fn pull_and_save(
     symbols_file_path: &str, // Path to the file containing symbols.
     mut conn: Connection,    // Database connection.
 ) -> model::Result<()> {
-    // Validate symbols file path
-    let path = Path::new(symbols_file_path);
-    if !path.exists() {
-        return Err(model::QuotesError::FileNotFound(symbols_file_path.into()));
-    }
-
-    let file = OpenOptions::new().read(true).open(path)?;
-
-    let symbols: Vec<_> = BufReader::new(file)
-        .lines()
-        .map(|line| line.map_err(|_e| model::QuotesError::CouldNotReadLine))
-        .collect();
-
-    if symbols.is_empty() {
-        return Err(model::QuotesError::EmptySymbolFile(
-            symbols_file_path.into(),
-        ));
-    }
+    let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
     // Initialize the candle table in the database.
     store::candle::create_table(&conn)?;

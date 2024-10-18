@@ -40,3 +40,18 @@ pub fn save_true_ranges(conn: &mut Connection, true_ranges: Vec<model::TrueRange
     }
     transaction.commit()
 }
+
+pub fn get_true_range(conn: &Connection, symbol: &str) -> Result<model::TrueRange> {
+    conn.query_row(
+        "SELECT symbol,percentile_range,ema_range,timestamp FROM true_range where symbol = ?1",
+        [symbol],
+        |row| {
+            Ok(model::TrueRange {
+                symbol: row.get(0)?,
+                percentile_range: row.get(1)?,
+                ema_range: row.get(2)?,
+                timestamp: row.get(3)?,
+            })
+        },
+    )
+}
