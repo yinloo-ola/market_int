@@ -98,7 +98,7 @@ pub async fn option_chain(
     strike_range: (f64, f64),                                  // Strike price range.
     expiration_date_range: (DateTime<Local>, DateTime<Local>), // Expiration date range.
     min_open_interest: u32,                                    // Minimum open interest.
-    side: model::OptionChainSide,                              // Call or Put.
+    side: &model::OptionChainSide,                             // Call or Put.
 ) -> Result<Vec<model::OptionStrikeCandle>, client::RequestError> {
     let strike_str = [strike_range.0.to_string(), strike_range.1.to_string()].join("-");
     let resp = client::request::<response::OptionChain>(

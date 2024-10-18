@@ -48,7 +48,7 @@ pub fn save_candles(conn: &mut Connection, candles: Vec<model::Candle>) -> Resul
 
 /// Retrieves the most recent count candles from the database.
 pub fn get_candles(
-    conn: &mut Connection,
+    conn: &Connection,
     symbol: &str, // Symbol to fetch candles for.
     count: u32,   // Number of candles to fetch.
 ) -> Result<Vec<model::Candle>> {

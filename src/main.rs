@@ -12,10 +12,14 @@ mod http {
 }
 // Data models.
 mod model;
-// Pull quotes functionality.
+// Pull quotes from API.
 mod pull_quotes;
 // Average True Range (ATR) calculation.
 mod calc_atr;
+/// Pull option chains from API based on ATR retrieved from database.
+mod pull_option;
+/// module to read symbols from symbol file
+mod symbols;
 // Data storage module.
 mod store {
     /// Candle data storage.
@@ -91,10 +95,17 @@ async fn main() {
         },
 
         Commands::PullOptionChain {
-            symbols_file_path: _,
+            symbols_file_path,
             side: _,
-        } => {
-            todo!()
-        }
+        } => match pull_option::retrieve_option_chains_base_on_ranges(
+            &symbols_file_path,
+            &model::OptionChainSide::Put,
+            conn,
+        )
+        .await
+        {
+            Ok(_) => log::info!("Successfully pulled and saved option chains"),
+            Err(err) => log::error!("Error pulling option chains: {}", err),
+        },
     }
 }
