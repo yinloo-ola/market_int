@@ -15,13 +15,13 @@ lazy_static::lazy_static! {
 }
 
 // Rate limit: 5 requests per second.
-const TOKEN_PER_SEC: u64 = 5;
+const TOKEN_PER_SEC: u64 = 1;
 // Rate limiter instance.
 lazy_static::lazy_static! {
     static ref RATELIMITER: Arc<Ratelimiter> = Arc::new(
-        Ratelimiter::builder(TOKEN_PER_SEC, Duration::from_secs(1))
+        Ratelimiter::builder(TOKEN_PER_SEC, Duration::from_millis(100))
             .max_tokens(TOKEN_PER_SEC)
-            .initial_available(TOKEN_PER_SEC)
+            .initial_available(1)
             .build()
             .unwrap(),
     );
@@ -33,7 +33,7 @@ pub enum RequestError {
     #[error("Environment variable 'marketdata_token' not set")]
     TokenNotSet,
     #[error("HTTP error: {0}. Response body: {1}")]
-    HttpError(u16, String),
+    HttpError(reqwest::Url, u16, String),
     #[error("Error deserializing JSON: {0}")]
     JsonError(String),
     #[error("Other error: {0}")]
@@ -63,7 +63,7 @@ pub async fn request<T: DeserializeOwned>(
 
     // Send the HTTP request.
     let response = CLIENT
-        .get(url)
+        .get(url.as_str())
         .bearer_auth(token)
         .send()
         .await
@@ -78,7 +78,7 @@ pub async fn request<T: DeserializeOwned>(
             .text()
             .await
             .map_err(|e| RequestError::Other(e.to_string()))?;
-        return Err(RequestError::HttpError(status.as_u16(), body));
+        return Err(RequestError::HttpError(url, status.as_u16(), body));
     }
 
     // Deserialize the JSON response.

@@ -107,7 +107,7 @@ pub async fn option_chain(
             ("strike", &strike_str),
             ("from", &expiration_date_range.0.timestamp().to_string()),
             ("to", &expiration_date_range.1.timestamp().to_string()),
-            ("minOpenInterest ", &min_open_interest.to_string()),
+            ("minOpenInterest", &min_open_interest.to_string()),
             match side {
                 model::OptionChainSide::Call => ("side", "call"),
                 model::OptionChainSide::Put => ("side", "put"),
