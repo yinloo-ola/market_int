@@ -13,11 +13,11 @@ mod http {
 // Data models.
 mod model;
 // Pull quotes from API.
-mod pull_quotes;
+mod quotes;
 // Average True Range (ATR) calculation.
-mod calc_atr;
+mod atr;
 /// Pull option chains from API based on ATR retrieved from database.
-mod pull_option;
+mod option;
 /// module to read symbols from symbol file
 mod symbols;
 // Data storage module.
@@ -80,7 +80,7 @@ async fn main() {
 
     match args.command {
         Commands::PullQuotes { symbols_file_path } => {
-            match pull_quotes::pull_and_save(&symbols_file_path, conn).await {
+            match quotes::pull_and_save(&symbols_file_path, conn).await {
                 Ok(_) => log::info!("Successfully pulled and saved quotes"),
                 Err(err) => log::error!("Error pulling and saving quotes: {}", err),
             }
@@ -89,7 +89,7 @@ async fn main() {
         Commands::CalculateAtr {
             symbols_file_path,
             atr_percentile,
-        } => match calc_atr::calculate_and_save(&symbols_file_path, atr_percentile, conn) {
+        } => match atr::calculate_and_save(&symbols_file_path, atr_percentile, conn) {
             Ok(_) => log::info!("Successfully calculated ATR and saved to DB"),
             Err(err) => log::error!("Error calculating ATR: {}", err),
         },
@@ -97,7 +97,7 @@ async fn main() {
         Commands::PullOptionChain {
             symbols_file_path,
             side: _,
-        } => match pull_option::retrieve_option_chains_base_on_ranges(
+        } => match option::retrieve_option_chains_base_on_ranges(
             &symbols_file_path,
             &model::OptionChainSide::Put,
             conn,

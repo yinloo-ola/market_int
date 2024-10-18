@@ -18,8 +18,6 @@ pub fn calculate_and_save(
     let mut true_range_vec: Vec<model::TrueRange> = Vec::with_capacity(symbols.len() * 5);
     // Iterate over each symbol.
     for symbol in symbols {
-        let symbol = symbol?; // return Err when any symbol is not ok
-
         // Fetch candle data for the current symbol from the database.
         let candles = candle::get_candles(&mut conn, symbol.as_str(), constants::CANDLE_COUNT)?;
 
