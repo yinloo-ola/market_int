@@ -1,7 +1,5 @@
 use std::{error::Error, fmt::Display, io};
 
-use chrono::{DateTime, Local};
-
 use crate::http::client;
 
 /// Represents the market status.
@@ -39,8 +37,8 @@ pub enum OptionChainSide {
     Put,
 }
 
-impl From<OptionChainSide> for String {
-    fn from(value: OptionChainSide) -> Self {
+impl From<&OptionChainSide> for String {
+    fn from(value: &OptionChainSide) -> Self {
         match value {
             OptionChainSide::Call => "call".to_string(),
             OptionChainSide::Put => "put".to_string(),

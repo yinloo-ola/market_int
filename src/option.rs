@@ -5,7 +5,7 @@ use crate::{
     constants,
     marketdata::api_caller,
     model,
-    store::{self, candle, option_chain, true_range},
+    store::{candle, option_chain, true_range},
     symbols,
 };
 
@@ -18,7 +18,9 @@ pub async fn retrieve_option_chains_base_on_ranges(
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
     // Initialize the option_strike table in the database.
-    store::option_chain::create_table(&conn)?;
+    option_chain::create_table(&conn)?;
+
+    let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
 
     for symbol in symbols {
         let true_range = true_range::get_true_range(&conn, &symbol)?;
@@ -38,14 +40,18 @@ pub async fn retrieve_option_chains_base_on_ranges(
 
         match chains {
             Ok(chains) => {
-                option_chain::save_option_strike(&mut conn, chains)?;
-                // for chain in chains {}
+                // save to DB
+                option_chain::save_option_strike(&mut conn, &chains)?;
+                all_chains.extend(chains);
             }
             Err(e) => {
                 log::error!("Fail to retrieve option chain for {}. Err: {}", symbol, e);
             }
         }
     }
+
+    // Save all_chains to a csv file and upload it to dropbox
+
     Ok(())
 }
 

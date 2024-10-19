@@ -1,7 +1,7 @@
 use super::super::model;
 use super::response;
 use crate::http::client;
-use chrono::{DateTime, Local, TimeZone};
+use chrono::{DateTime, Local};
 use std::collections::HashMap;
 
 // Checks the status returned from the API and returns an error if the status is not "ok".
