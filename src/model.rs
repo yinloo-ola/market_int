@@ -1,4 +1,11 @@
-use std::{error::Error, fmt::Display, io};
+use std::{
+    error::Error,
+    fmt::Display,
+    io::{self, BufWriter},
+};
+
+use csv::Writer;
+use serde::Serialize;
 
 use crate::http::client;
 
@@ -31,7 +38,7 @@ pub struct TrueRange {
 }
 
 /// Represents the side of an option (call or put).
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub enum OptionChainSide {
     Call,
     Put,
@@ -47,7 +54,7 @@ impl From<&OptionChainSide> for String {
 }
 
 /// Structure representing a candle for an option strike.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct OptionStrikeCandle {
     pub underlying: String,    // Underlying asset symbol.
     pub strike: f64,           // Strike price.
@@ -67,6 +74,21 @@ pub struct OptionStrikeCandle {
     pub rate_of_return: f64,   // Rate of return.
 }
 
+pub fn option_chain_to_csv_vec(all_chains: &[OptionStrikeCandle]) -> Result<Vec<u8>> {
+    let buf = BufWriter::new(Vec::new());
+    let mut writer = Writer::from_writer(buf);
+
+    // Write the data rows.
+    for chain in all_chains {
+        writer
+            .serialize(chain)
+            .map_err(|e| QuotesError::CsvError(e))?;
+    }
+
+    let bytes = writer.into_inner().unwrap().into_inner().unwrap();
+    Ok(bytes)
+}
+
 pub type Result<T> = std::result::Result<T, QuotesError>;
 
 #[derive(Debug)]
@@ -78,6 +100,7 @@ pub enum QuotesError {
     DatabaseError(rusqlite::Error),
     HttpError(client::RequestError),
     NotEnoughCandlesForStatistics(String),
+    CsvError(csv::Error),
 }
 
 impl Display for QuotesError {

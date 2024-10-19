@@ -51,6 +51,7 @@ pub async fn retrieve_option_chains_base_on_ranges(
     }
 
     // Save all_chains to a csv file and upload it to dropbox
+    let csv = model::option_chain_to_csv_vec(&all_chains);
 
     Ok(())
 }
