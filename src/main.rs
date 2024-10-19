@@ -24,6 +24,8 @@ mod symbols;
 mod store {
     /// Candle data storage.
     pub mod candle;
+    /// option range storage.
+    pub mod option_chain;
     /// SQLite database interaction.
     pub mod sqlite;
     /// true range storage.
@@ -53,7 +55,6 @@ enum Commands {
     // Calculate Average True Range (ATR).
     CalculateAtr {
         symbols_file_path: String,
-        atr_percentile: f64,
     },
     // Pull option chain data.
     PullOptionChain {
@@ -86,13 +87,12 @@ async fn main() {
             }
         }
 
-        Commands::CalculateAtr {
-            symbols_file_path,
-            atr_percentile,
-        } => match atr::calculate_and_save(&symbols_file_path, atr_percentile, conn) {
-            Ok(_) => log::info!("Successfully calculated ATR and saved to DB"),
-            Err(err) => log::error!("Error calculating ATR: {}", err),
-        },
+        Commands::CalculateAtr { symbols_file_path } => {
+            match atr::calculate_and_save(&symbols_file_path, conn) {
+                Ok(_) => log::info!("Successfully calculated ATR and saved to DB"),
+                Err(err) => log::error!("Error calculating ATR: {}", err),
+            }
+        }
 
         Commands::PullOptionChain {
             symbols_file_path,

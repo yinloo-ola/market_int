@@ -7,7 +7,6 @@ use rusqlite::Connection;
 
 pub fn calculate_and_save(
     symbols_file_path: &str, // Path to the file containing symbols.
-    atr_percentile: f64,     // ATR percentile.
     mut conn: Connection,    // Database connection.)
 ) -> model::Result<()> {
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
@@ -65,7 +64,7 @@ pub fn calculate_and_save(
         // Calculate the ATR for the candles.
         let trs = true_ranges(&candles);
         let ema_atr = exponential_moving_average(&trs, 4)?;
-        let percentile_atr = percentile(&trs, atr_percentile)?;
+        let percentile_atr = percentile(&trs, constants::PERCENTILE)?;
 
         true_range_vec.push(model::TrueRange {
             symbol: symbol.into(),
