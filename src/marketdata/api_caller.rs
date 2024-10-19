@@ -100,7 +100,11 @@ pub async fn option_chain(
     min_open_interest: u32,                                    // Minimum open interest.
     side: &model::OptionChainSide,                             // Call or Put.
 ) -> Result<Vec<model::OptionStrikeCandle>, client::RequestError> {
-    let strike_str = [strike_range.0.to_string(), strike_range.1.to_string()].join("-");
+    let strike_str = [
+        format!("{:.3}", strike_range.0),
+        format!("{:.3}", strike_range.1),
+    ]
+    .join("-");
     let resp = client::request::<response::OptionChain>(
         &format!("v1/options/chain/{}/", symbol),
         Some(vec![
@@ -134,10 +138,9 @@ pub async fn option_chain(
             bid_size: resp.bid_size[i],
             ask_size: resp.ask_size[i],
             last: resp.last[i],
-            expiration: Local.timestamp_opt(resp.expiration[i] as i64, 0).unwrap(),
-            updated: Local.timestamp_opt(resp.updated[i] as i64, 0).unwrap(),
+            expiration: resp.expiration[i],
+            updated: resp.updated[i],
             volume: resp.volume[i],
-            timestamp: resp.dte[i],
             dte: resp.dte[i],
             open_interest: resp.open_interest[i],
             rate_of_return: resp.mid[i] / resp.strike[i] / num_of_weeks(resp.dte[i]) * 52.0,
