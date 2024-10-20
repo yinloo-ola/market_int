@@ -1,43 +1,43 @@
-// use reqwest::{Body, Client, Url};
+use crate::http::client::{self, RequestError};
+use serde::Deserialize;
+use std::{collections::HashMap, env};
 
-// pub fn upload_to_dropbox(
-//     access_token: &str,
-//     content: &[u8],
-//     dropbox_path: &str,
-// ) -> Result<(), reqwest::Error> {
-//     let url = Url::parse("https://content.dropboxapi.com/2/files/upload")?;
+#[derive(Debug, Deserialize)]
+pub struct DropboxResp {
+    pub is_downloadable: bool,
+    pub name: String,
+}
 
-//     let client = Client::new();
+pub async fn upload_to_dropbox(content: &[u8], dropbox_path: &str) -> Result<(), RequestError> {
+    let token = env::var("dropbox_token").map_err(|_| RequestError::TokenNotSet)?;
 
-//     let body = Body::from(content);
+    let resp = client::request::<DropboxResp>(
+        client::Method::Post(Some(content.to_vec())),
+        "https://content.dropboxapi.com/2/files/upload",
+        HashMap::new(),
+        HashMap::from([
+            (
+                "Dropbox-API-Arg",
+                serde_json::json!({
+                    "autorename": false,
+                    "mode": "add",
+                    "mute": false,
+                    "path": dropbox_path,
+                    "strict_conflict": false
+                })
+                .to_string()
+                .as_str(),
+            ),
+            (
+                reqwest::header::CONTENT_TYPE.as_str(),
+                "application/octet-stream",
+            ),
+        ]),
+        Some(&token),
+    )
+    .await?;
 
-//     let mut headers = reqwest::header::HeaderMap::new();
-//     headers.insert(
-//         reqwest::header::AUTHORIZATION,
-//         format!("Bearer {}", access_token).parse()?,
-//     );
-//     headers.insert(
-//         "Dropbox-API-Arg",
-//         serde_json::json!({
-//             "autorename": false,
-//             "mode": "add",
-//             "mute": false,
-//             "path": dropbox_path,
-//             "strict_conflict": false
-//         })
-//         .to_string()
-//         .parse()?,
-//     );
-//     headers.insert(
-//         reqwest::header::CONTENT_TYPE,
-//         reqwest::header::HeaderValue::from_static("application/octet-stream"),
-//     );
+    log::debug!("dropbox api return: {:?}", resp);
 
-//     let req = client.post(url).headers(headers).body(body);
-
-//     let res = req.send().await?;
-
-//     res.error_for_status()?;
-
-//     Ok(())
-// }
+    Ok(())
+}

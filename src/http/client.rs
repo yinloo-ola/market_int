@@ -1,14 +1,7 @@
-use reqwest::{
-    self,
-    header::{HeaderMap, HeaderValue, InvalidHeaderValue},
-    RequestBuilder,
-};
+use reqwest::{self, RequestBuilder};
 use serde::de::DeserializeOwned;
 use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
-
-// Base URL for the market data API.
-const BASE_URL: &str = "https://api.marketdata.app/";
 
 // Shared HTTP client instance.
 lazy_static::lazy_static! {
@@ -26,8 +19,6 @@ pub enum RequestError {
     JsonError(String),
     #[error("Other error: {0}")]
     Other(String),
-    #[error("invalid header value: {0}")]
-    InvalidHeader(InvalidHeaderValue),
 }
 
 pub enum Method {
@@ -38,7 +29,7 @@ pub enum Method {
 }
 
 /// Makes an HTTP request to the specified path with optional parameters.
-pub async fn request<'a, T: DeserializeOwned>(
+pub async fn request<T: DeserializeOwned>(
     method: Method,
     path: &str,                   // API path.
     params: HashMap<&str, &str>,  // Optional query parameters.
@@ -47,11 +38,10 @@ pub async fn request<'a, T: DeserializeOwned>(
 ) -> Result<T, RequestError> {
     // Construct the URL.
     let url = if params.len() > 0 {
-        reqwest::Url::parse_with_params(&format!("{}{}", BASE_URL, path), &params)
+        reqwest::Url::parse_with_params(path, &params)
             .map_err(|e| RequestError::Other(e.to_string()))?
     } else {
-        reqwest::Url::parse(&format!("{}{}", BASE_URL, path))
-            .map_err(|e| RequestError::Other(e.to_string()))?
+        reqwest::Url::parse(path).map_err(|e| RequestError::Other(e.to_string()))?
     };
 
     // Construct the request

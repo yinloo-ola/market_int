@@ -1,10 +1,12 @@
+use core::str;
+
 use chrono::{DateTime, Datelike, Days, Local, Timelike, Weekday};
 use rusqlite::Connection;
 
 use crate::{
-    constants,
+    constants, dropbox,
     marketdata::api_caller,
-    model,
+    model::{self, QuotesError},
     store::{candle, option_chain, true_range},
     symbols,
 };
@@ -51,7 +53,13 @@ pub async fn retrieve_option_chains_base_on_ranges(
     }
 
     // Save all_chains to a csv file and upload it to dropbox
-    let csv = model::option_chain_to_csv_vec(&all_chains);
+    let csv = model::option_chain_to_csv_vec(&all_chains)?;
+
+    let now = Local::now();
+    let formatted_date = now.format("%Y%m%d_%H%M").to_string();
+    let filename = format!("/{}.csv", formatted_date);
+
+    dropbox::upload_to_dropbox(&csv, filename.as_str()).await?;
 
     Ok(())
 }
