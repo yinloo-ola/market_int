@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use crate::{
     constants, dropbox,
     marketdata::api_caller,
-    model::{self, QuotesError},
+    model,
     store::{candle, option_chain, true_range},
     symbols,
 };
