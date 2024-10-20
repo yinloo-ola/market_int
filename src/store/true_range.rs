@@ -21,7 +21,7 @@ pub fn create_table(conn: &Connection) -> Result<()> {
 }
 
 /// Saves a vector of candles to the candle table.  Uses REPLACE to update existing entries.
-pub fn save_true_ranges(conn: &mut Connection, true_ranges: Vec<model::TrueRange>) -> Result<()> {
+pub fn save_true_ranges(conn: &mut Connection, true_ranges: &[model::TrueRange]) -> Result<()> {
     let transaction = conn.transaction()?;
     {
         let mut stmt = transaction.prepare(

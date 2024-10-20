@@ -32,7 +32,7 @@ pub fn create_table(conn: &Connection) -> Result<()> {
 
 pub fn save_option_strike(
     conn: &mut Connection,
-    strikes: &Vec<model::OptionStrikeCandle>,
+    strikes: &[model::OptionStrikeCandle],
 ) -> Result<()> {
     let transaction = conn.transaction()?;
     {

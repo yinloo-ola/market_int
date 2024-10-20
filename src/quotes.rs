@@ -24,11 +24,11 @@ pub async fn pull_and_save(
 
         // Fetch candle data for the current symbol.
         let candles =
-            api_caller::stock_candle(&symbol, Local::now(), constants::CANDLE_COUNT).await?;
+            api_caller::stock_candle(&symbol, &Local::now(), constants::CANDLE_COUNT).await?;
         // Handle the result of the candle data fetch.
 
         // Save the fetched candles to the database.
-        store::candle::save_candles(&mut conn, candles)?;
+        store::candle::save_candles(&mut conn, &candles)?;
 
         log::info!("Successfully fetched and saved candles for {}", symbol);
         i += 1;
