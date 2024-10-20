@@ -8,12 +8,12 @@ use std::{collections::HashMap, env};
 const BASE_URL: &str = "https://api.marketdata.app/";
 
 // Checks the status returned from the API and returns an error if the status is not "ok".
-fn check_status(s: &str, err: &Option<String>) -> Result<(), RequestError> {
+fn check_status(s: &str, err: Option<String>) -> Result<(), RequestError> {
     match s {
         "ok" => Ok(()),
         "no_data" => Err(RequestError::Other("No data".into())),
         "error" => Err(RequestError::Other(
-            err.clone().unwrap_or_else(|| "Unknown error".into()),
+            err.unwrap_or_else(|| "Unknown error".into()),
         )),
         _ => Err(RequestError::Other("Unknown status".into())),
     }
@@ -32,7 +32,7 @@ pub async fn market_status() -> Result<model::MarketStatus, RequestError> {
     )
     .await?;
 
-    check_status(&resp.s, &resp.errmsg)?;
+    check_status(&resp.s, resp.errmsg)?;
 
     match resp.status.as_slice() {
         [status] if status == "open" => Ok(model::MarketStatus::Open),
@@ -45,9 +45,9 @@ pub async fn market_status() -> Result<model::MarketStatus, RequestError> {
 
 /// Fetches daily candle data for a given stock symbol.
 pub async fn stock_candle(
-    symbol: &str,        // Stock symbol.
-    to: DateTime<Local>, // End timestamp.
-    count: u32,          // Number of candles to fetch.
+    symbol: &str,         // Stock symbol.
+    to: &DateTime<Local>, // End timestamp.
+    count: u32,           // Number of candles to fetch.
 ) -> Result<Vec<model::Candle>, RequestError> {
     let token = env::var("marketdata_token").map_err(|_| RequestError::TokenNotSet)?;
 
@@ -62,7 +62,7 @@ pub async fn stock_candle(
         Some(&token),
     )
     .await?;
-    check_status(&resp.s, &resp.errmsg)?;
+    check_status(&resp.s, resp.errmsg)?;
 
     let len = resp.c.len();
     let mut candles = Vec::with_capacity(len);
@@ -82,7 +82,7 @@ pub async fn stock_candle(
 
 /// Fetches daily candle data for multiple stock symbols.
 pub async fn bulk_candles(
-    symbols: Vec<String>, // Vector of stock symbols.
+    symbols: &[String], // Vector of stock symbols.
 ) -> Result<HashMap<String, model::Candle>, RequestError> {
     let token = env::var("marketdata_token").map_err(|_| RequestError::TokenNotSet)?;
 
@@ -94,7 +94,7 @@ pub async fn bulk_candles(
         Some(&token),
     )
     .await?;
-    check_status(&resp.s, &resp.errmsg)?;
+    check_status(&resp.s, resp.errmsg)?;
 
     let mut quotes = HashMap::new();
     for i in 0..resp.symbol.len() {
@@ -116,11 +116,11 @@ pub async fn bulk_candles(
 
 /// Fetches option chain data for a given stock symbol.
 pub async fn option_chain(
-    symbol: &str,                                              // Stock symbol.
-    strike_range: (f64, f64),                                  // Strike price range.
-    expiration_date_range: (DateTime<Local>, DateTime<Local>), // Expiration date range.
-    min_open_interest: u32,                                    // Minimum open interest.
-    side: &model::OptionChainSide,                             // Call or Put.
+    symbol: &str,                                               // Stock symbol.
+    strike_range: (f64, f64),                                   // Strike price range.
+    expiration_date_range: &(DateTime<Local>, DateTime<Local>), // Expiration date range.
+    min_open_interest: u32,                                     // Minimum open interest.
+    side: &model::OptionChainSide,                              // Call or Put.
 ) -> Result<Vec<model::OptionStrikeCandle>, RequestError> {
     let token = env::var("marketdata_token").map_err(|_| RequestError::TokenNotSet)?;
 
@@ -152,7 +152,7 @@ pub async fn option_chain(
         Some(&token),
     )
     .await?;
-    check_status(&resp.s, &resp.errmsg)?;
+    check_status(&resp.s, resp.errmsg)?;
     let len = resp.option_symbol.len();
     let mut candles = Vec::with_capacity(len);
     for i in 0..len {

@@ -75,7 +75,7 @@ pub fn calculate_and_save(
     }
 
     // Save the true ranges to the database.
-    true_range::save_true_ranges(&mut conn, true_range_vec)?;
+    true_range::save_true_ranges(&mut conn, &true_range_vec)?;
     Ok(())
 }
 

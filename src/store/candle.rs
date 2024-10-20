@@ -23,7 +23,7 @@ pub fn create_table(conn: &Connection) -> Result<()> {
 }
 
 /// Saves a vector of candles to the candle table.  Uses REPLACE to update existing entries.
-pub fn save_candles(conn: &mut Connection, candles: Vec<model::Candle>) -> Result<()> {
+pub fn save_candles(conn: &mut Connection, candles: &[model::Candle]) -> Result<()> {
     let transaction = conn.transaction()?;
     {
         let mut stmt = transaction.prepare(

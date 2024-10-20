@@ -34,7 +34,7 @@ pub async fn retrieve_option_chains_base_on_ranges(
         let chains = api_caller::option_chain(
             &symbol,
             strike_range,
-            get_expiration_date_range(),
+            &get_expiration_date_range(),
             constants::MIN_OPEN_INTEREST,
             side,
         )
