@@ -4,6 +4,9 @@ use crate::http::client::{self, RequestError};
 use chrono::{DateTime, Local};
 use std::{collections::HashMap, env};
 
+// Base URL for the market data API.
+const BASE_URL: &str = "https://api.marketdata.app/";
+
 // Checks the status returned from the API and returns an error if the status is not "ok".
 fn check_status(s: &str, err: &Option<String>) -> Result<(), RequestError> {
     match s {
@@ -22,7 +25,7 @@ pub async fn market_status() -> Result<model::MarketStatus, RequestError> {
 
     let resp = client::request::<response::MarketStatus>(
         client::Method::Get,
-        "v1/markets/status/",
+        format!("{}v1/markets/status/", BASE_URL).as_str(),
         HashMap::new(),
         HashMap::new(),
         Some(token.as_str()),
@@ -50,7 +53,7 @@ pub async fn stock_candle(
 
     let resp = client::request::<response::DailyCandles>(
         client::Method::Get,
-        &format!("v1/stocks/candles/daily/{}/", symbol),
+        format!("{}v1/stocks/candles/daily/{}", BASE_URL, symbol).as_str(),
         HashMap::from([
             ("to", to.timestamp().to_string().as_str()),
             ("countback", &count.to_string()),
@@ -85,7 +88,7 @@ pub async fn bulk_candles(
 
     let resp = client::request::<response::BulkCandles>(
         client::Method::Get,
-        "v1/stocks/bulkcandles/daily/",
+        format!("{}v1/stocks/bulkcandles/daily/", BASE_URL).as_str(),
         HashMap::from([("symbols", symbols.join(",").as_str())]),
         HashMap::new(),
         Some(&token),
@@ -128,7 +131,7 @@ pub async fn option_chain(
     .join("-");
     let resp = client::request::<response::OptionChain>(
         client::Method::Get,
-        &format!("v1/options/chain/{}/", symbol),
+        &format!("{}v1/options/chain/{}/", BASE_URL, symbol),
         HashMap::from([
             ("strike", strike_str.as_str()),
             (

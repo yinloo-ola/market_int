@@ -33,6 +33,7 @@ mod store {
 }
 // module storing defaults
 mod constants;
+mod dropbox;
 
 use clap::{Parser, Subcommand};
 use dotenv::dotenv;
@@ -49,18 +50,11 @@ struct Args {
 #[derive(Subcommand, Debug)]
 enum Commands {
     // Pull quotes for specified symbols.
-    PullQuotes {
-        symbols_file_path: String,
-    },
+    PullQuotes { symbols_file_path: String },
     // Calculate Average True Range (ATR).
-    CalculateAtr {
-        symbols_file_path: String,
-    },
+    CalculateAtr { symbols_file_path: String },
     // Pull option chain data.
-    PullOptionChain {
-        symbols_file_path: String,
-        side: String,
-    },
+    PullOptionChain { symbols_file_path: String },
 }
 
 #[tokio::main]
@@ -94,18 +88,17 @@ async fn main() {
             }
         }
 
-        Commands::PullOptionChain {
-            symbols_file_path,
-            side: _,
-        } => match option::retrieve_option_chains_base_on_ranges(
-            &symbols_file_path,
-            &model::OptionChainSide::Put,
-            conn,
-        )
-        .await
-        {
-            Ok(_) => log::info!("Successfully pulled and saved option chains"),
-            Err(err) => log::error!("Error pulling option chains: {}", err),
-        },
+        Commands::PullOptionChain { symbols_file_path } => {
+            match option::retrieve_option_chains_base_on_ranges(
+                &symbols_file_path,
+                &model::OptionChainSide::Put,
+                conn,
+            )
+            .await
+            {
+                Ok(_) => log::info!("Successfully pulled and saved option chains"),
+                Err(err) => log::error!("Error pulling option chains: {}", err),
+            }
+        }
     }
 }
