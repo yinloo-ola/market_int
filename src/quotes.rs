@@ -8,12 +8,12 @@ use std::time::Duration;
 /// Pulls stock quotes for a list of symbols and saves them to the database.
 pub async fn pull_and_save(
     symbols_file_path: &str, // Path to the file containing symbols.
-    conn: &mut Connection,   // Database connection.
+    mut conn: Connection,    // Database connection.
 ) -> model::Result<()> {
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
     // Initialize the candle table in the database.
-    store::candle::create_table(conn)?;
+    store::candle::create_table(&conn)?;
 
     for symbol in symbols.iter().filter(|s| !s.trim().is_empty()) {
         // Fetch candle data for the current symbol.
@@ -23,7 +23,7 @@ pub async fn pull_and_save(
         match candles {
             Ok(candles) => {
                 // Save the fetched candles to the database.
-                store::candle::save_candles(conn, &candles)?;
+                store::candle::save_candles(&mut conn, &candles)?;
                 log::info!("Successfully fetched and saved candles for {}", symbol);
             }
             Err(e) => {
@@ -31,7 +31,7 @@ pub async fn pull_and_save(
                 return Err(model::QuotesError::HttpError(e));
             }
         }
-        sleep(Duration::from_millis(100));
+        sleep(Duration::from_millis(50));
     }
 
     Ok(())

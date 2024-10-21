@@ -1,11 +1,17 @@
 use std::{
+    env::VarError,
     error::Error,
     fmt::Display,
     io::{self, BufWriter},
 };
 
 use csv::Writer;
+use rusqlite::{
+    types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef},
+    ToSql,
+};
 use serde::Serialize;
+use telegram_bot_api::bot::APIResponseError;
 
 use crate::http::client;
 
@@ -49,6 +55,32 @@ impl From<&OptionChainSide> for String {
         match value {
             OptionChainSide::Call => "call".to_string(),
             OptionChainSide::Put => "put".to_string(),
+        }
+    }
+}
+
+impl ToSql for OptionChainSide {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        match self {
+            OptionChainSide::Call => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Text(
+                "call".to_string(),
+            ))),
+            OptionChainSide::Put => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Text(
+                "put".to_string(),
+            ))),
+        }
+    }
+}
+
+impl FromSql for OptionChainSide {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value {
+            ValueRef::Text(s) => match std::str::from_utf8(s) {
+                Ok("call") => Ok(OptionChainSide::Call),
+                Ok("put") => Ok(OptionChainSide::Put),
+                _ => Err(FromSqlError::InvalidType),
+            },
+            _ => Err(FromSqlError::InvalidType),
         }
     }
 }
@@ -101,6 +133,8 @@ pub enum QuotesError {
     HttpError(client::RequestError),
     NotEnoughCandlesForStatistics(String),
     CsvError(csv::Error),
+    TelegramError(APIResponseError),
+    EnvVarNotSet(VarError),
 }
 
 impl Display for QuotesError {
@@ -110,6 +144,12 @@ impl Display for QuotesError {
 }
 
 impl Error for QuotesError {}
+
+impl From<VarError> for QuotesError {
+    fn from(value: VarError) -> Self {
+        Self::EnvVarNotSet(value)
+    }
+}
 
 impl From<io::Error> for QuotesError {
     fn from(value: io::Error) -> Self {
@@ -126,5 +166,11 @@ impl From<rusqlite::Error> for QuotesError {
 impl From<client::RequestError> for QuotesError {
     fn from(value: client::RequestError) -> Self {
         Self::HttpError(value)
+    }
+}
+
+impl From<APIResponseError> for QuotesError {
+    fn from(value: APIResponseError) -> Self {
+        Self::TelegramError(value)
     }
 }

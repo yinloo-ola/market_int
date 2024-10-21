@@ -1,12 +1,17 @@
 use core::str;
+use std::env;
 
 use chrono::{DateTime, Datelike, Days, Local, Timelike, Weekday};
 use rusqlite::Connection;
+use telegram_bot_api::{
+    bot,
+    types::{ChatId, InputFile},
+};
 
 use crate::{
-    constants, dropbox,
+    constants,
     marketdata::api_caller,
-    model,
+    model::{self, QuotesError},
     store::{candle, option_chain, true_range},
     symbols,
 };
@@ -59,8 +64,33 @@ pub async fn retrieve_option_chains_base_on_ranges(
     let formatted_date = now.format("%Y%m%d_%H%M").to_string();
     let filename = format!("/{}.csv", formatted_date);
 
-    dropbox::upload_to_dropbox(&csv, filename.as_str()).await?;
+    let token = env::var("telegram_bot_token")?;
+    let chat_id = env::var("telegram_chat_id")?;
+    let bot = bot::BotApi::new(token, None).await?;
 
+    let resp = bot
+        .send_document(telegram_bot_api::methods::SendDocument {
+            chat_id: ChatId::StringType(chat_id),
+            document: InputFile::FileBytes(filename, csv),
+            thumb: None,
+            caption: None,
+            parse_mode: None,
+            caption_entities: None,
+            disable_content_type_detection: None,
+            disable_notification: None,
+            protect_content: None,
+            reply_to_message_id: None,
+            allow_sending_without_reply: None,
+            reply_markup: None,
+        })
+        .await;
+    match resp {
+        Ok(_) => log::info!("telegram send doc ok"),
+        Err(err) => {
+            log::error!("telegram send doc failed: {:?}", err);
+            return Err(model::QuotesError::TelegramError(err));
+        }
+    }
     Ok(())
 }
 
@@ -78,4 +108,62 @@ fn get_expiration_date_range() -> (DateTime<Local>, DateTime<Local>) {
         Weekday::Sat => (now + Days::new(5), now + Days::new(5 + 2)), // Next Thur to next Sat
         Weekday::Sun => (now + Days::new(4), now + Days::new(4 + 2)), // Next Thur to next Sat
     }
+}
+
+pub async fn publish_option_chains(
+    symbols_file_path: &str, // Path to the file containing symbols.
+    mut conn: Connection,    // Database connection.
+) -> model::Result<()> {
+    option_chain::create_table(&conn)?;
+    let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
+
+    let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
+    for symbol in symbols {
+        let chains = option_chain::retrieve_option_chain(&mut conn, &symbol)?;
+        all_chains.extend(chains);
+    }
+
+    publish_to_telegram(&all_chains).await
+}
+
+pub async fn publish_to_telegram(all_chains: &[model::OptionStrikeCandle]) -> model::Result<()> {
+    // Save all_chains to a csv file and upload it to dropbox
+    let csv = model::option_chain_to_csv_vec(all_chains)?;
+
+    let now = Local::now();
+    let formatted_date = now.format("%Y%m%d_%H%M").to_string();
+    let filename = format!("/{}.csv", formatted_date);
+
+    let token = env::var("telegram_bot_token")?;
+    let chat_id = env::var("telegram_chat_id")?
+        .parse::<i64>()
+        .map_err(|_| QuotesError::EnvVarNotSet(env::VarError::NotPresent))?;
+    let bot = bot::BotApi::new(token, None).await?;
+
+    log::debug!("chat_id {chat_id}");
+
+    let resp = bot
+        .send_document(telegram_bot_api::methods::SendDocument {
+            chat_id: ChatId::IntType(chat_id),
+            document: InputFile::FileBytes(filename, csv),
+            thumb: None,
+            caption: None,
+            parse_mode: None,
+            caption_entities: None,
+            disable_content_type_detection: None,
+            disable_notification: None,
+            protect_content: None,
+            reply_to_message_id: None,
+            allow_sending_without_reply: None,
+            reply_markup: None,
+        })
+        .await;
+    match resp {
+        Ok(_) => log::info!("telegram send doc ok"),
+        Err(err) => {
+            log::error!("telegram send doc failed: {:?}", err);
+            return Err(model::QuotesError::TelegramError(err));
+        }
+    }
+    Ok(())
 }
