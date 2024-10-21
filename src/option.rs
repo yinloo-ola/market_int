@@ -57,41 +57,7 @@ pub async fn retrieve_option_chains_base_on_ranges(
         }
     }
 
-    // Save all_chains to a csv file and upload it to dropbox
-    let csv = model::option_chain_to_csv_vec(&all_chains)?;
-
-    let now = Local::now();
-    let formatted_date = now.format("%Y%m%d_%H%M").to_string();
-    let filename = format!("/{}.csv", formatted_date);
-
-    let token = env::var("telegram_bot_token")?;
-    let chat_id = env::var("telegram_chat_id")?;
-    let bot = bot::BotApi::new(token, None).await?;
-
-    let resp = bot
-        .send_document(telegram_bot_api::methods::SendDocument {
-            chat_id: ChatId::StringType(chat_id),
-            document: InputFile::FileBytes(filename, csv),
-            thumb: None,
-            caption: None,
-            parse_mode: None,
-            caption_entities: None,
-            disable_content_type_detection: None,
-            disable_notification: None,
-            protect_content: None,
-            reply_to_message_id: None,
-            allow_sending_without_reply: None,
-            reply_markup: None,
-        })
-        .await;
-    match resp {
-        Ok(_) => log::info!("telegram send doc ok"),
-        Err(err) => {
-            log::error!("telegram send doc failed: {:?}", err);
-            return Err(model::QuotesError::TelegramError(err));
-        }
-    }
-    Ok(())
+    publish_to_telegram(&all_chains).await
 }
 
 /// Calculates the range of expiration dates to use when fetching option chains.
@@ -119,8 +85,14 @@ pub async fn publish_option_chains(
 
     let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
     for symbol in symbols {
-        let chains = option_chain::retrieve_option_chain(&mut conn, &symbol)?;
-        all_chains.extend(chains);
+        let chains = option_chain::retrieve_option_chain(&mut conn, &symbol);
+        match chains {
+            Ok(chains) => all_chains.extend(chains),
+            Err(err) => {
+                log::error!("fail to retrieve chain for {}. Error: {}.", symbol, err);
+                continue;
+            }
+        };
     }
 
     publish_to_telegram(&all_chains).await
