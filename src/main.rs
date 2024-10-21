@@ -33,7 +33,6 @@ mod store {
 }
 // module storing defaults
 mod constants;
-mod dropbox;
 
 use clap::{Parser, Subcommand};
 use dotenv::dotenv;
@@ -55,6 +54,8 @@ enum Commands {
     CalculateAtr { symbols_file_path: String },
     // Pull option chain data.
     PullOptionChain { symbols_file_path: String },
+    // Publish option chain to telegram.
+    PublishOptionChain { symbols_file_path: String },
 }
 
 #[tokio::main]
@@ -98,6 +99,12 @@ async fn main() {
             {
                 Ok(_) => log::info!("Successfully pulled and saved option chains"),
                 Err(err) => log::error!("Error pulling option chains: {}", err),
+            }
+        }
+        Commands::PublishOptionChain { symbols_file_path } => {
+            match option::publish_option_chains(&symbols_file_path, conn).await {
+                Ok(_) => log::info!("Successfully published option chains"),
+                Err(err) => log::error!("Error publishing option chains: {}", err),
             }
         }
     }

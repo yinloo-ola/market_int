@@ -14,8 +14,8 @@ pub fn create_table(conn: &Connection) -> Result<()> {
             bid_size INTEGER NOT NULL,
             ask_size INTEGER NOT NULL,
             last REAL NOT NULL,
-            expiration TEXT NOT NULL,
-            updated TEXT NOT NULL,
+            expiration INTEGER NOT NULL,
+            updated INTEGER NOT NULL,
             dte INTEGER NOT NULL,
             volume INTEGER NOT NULL,
             open_interest INTEGER NOT NULL,
@@ -28,6 +28,51 @@ pub fn create_table(conn: &Connection) -> Result<()> {
         [],
     )?;
     Ok(())
+}
+
+fn get_latest_updated_time(conn: &Connection, symbol: &str) -> Result<u32> {
+    let mut stmt = conn.prepare("SELECT MAX(updated) FROM option_strike WHERE underlying = ?1")?;
+    let mut rows = stmt.query(params![symbol])?;
+    let row = rows.next()?.unwrap();
+    let latest_updated: u32 = row.get(0)?;
+    Ok(latest_updated)
+}
+
+pub fn retrieve_option_chain(
+    conn: &mut Connection,
+    symbol: &str,
+) -> Result<Vec<model::OptionStrikeCandle>> {
+    let last_update_time = get_latest_updated_time(conn, symbol)?;
+    let mut stmt =
+        conn.prepare("SELECT * FROM option_strike WHERE underlying = ?1 AND updated = ?2")?;
+    let rows: Vec<_> = stmt
+        .query_map(params![symbol, last_update_time], |row| {
+            Ok(model::OptionStrikeCandle {
+                underlying: row.get(0)?,
+                strike: row.get(1)?,
+                underlying_price: row.get(2)?,
+                side: row.get(3)?,
+                bid: row.get(4)?,
+                mid: row.get(5)?,
+                ask: row.get(6)?,
+                bid_size: row.get(7)?,
+                ask_size: row.get(8)?,
+                last: row.get(9)?,
+                expiration: row.get(10)?,
+                updated: row.get(11)?,
+                dte: row.get(12)?,
+                volume: row.get(13)?,
+                open_interest: row.get(14)?,
+                rate_of_return: row.get(15)?,
+            })
+        })?
+        .collect();
+
+    let mut results = Vec::with_capacity(rows.len());
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
 }
 
 pub fn save_option_strike(
@@ -63,7 +108,7 @@ pub fn save_option_strike(
                 strike.underlying,
                 strike.strike,
                 strike.underlying_price,
-                String::from(&strike.side),
+                strike.side,
                 strike.bid,
                 strike.mid,
                 strike.ask,
