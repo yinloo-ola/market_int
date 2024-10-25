@@ -54,6 +54,7 @@ enum Commands {
     PullOptionChain { symbols_file_path: String },
     // Publish option chain to telegram.
     PublishOptionChain { symbols_file_path: String },
+    PerformAll { symbols_file_path: String },
 }
 
 #[tokio::main]
@@ -96,6 +97,28 @@ async fn main() {
                 Err(err) => log::error!("Error pulling option chains: {}", err),
             }
         }
+
+        Commands::PerformAll { symbols_file_path } => {
+            match quotes::pull_and_save(&symbols_file_path, &mut conn).await {
+                Ok(_) => log::info!("Successfully pulled and saved quotes"),
+                Err(err) => log::error!("Error pulling and saving quotes: {}", err),
+            }
+            match atr::calculate_and_save(&symbols_file_path, &mut conn) {
+                Ok(_) => log::info!("Successfully calculated ATR and saved to DB"),
+                Err(err) => log::error!("Error calculating ATR: {}", err),
+            }
+            match option::retrieve_option_chains_base_on_ranges(
+                &symbols_file_path,
+                &model::OptionChainSide::Put,
+                conn,
+            )
+            .await
+            {
+                Ok(_) => log::info!("Successfully pulled and saved option chains"),
+                Err(err) => log::error!("Error pulling option chains: {}", err),
+            }
+        }
+
         Commands::PublishOptionChain { symbols_file_path } => {
             match option::publish_option_chains(&symbols_file_path, conn).await {
                 Ok(_) => log::info!("Successfully published option chains"),

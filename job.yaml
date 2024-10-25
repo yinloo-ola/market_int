@@ -4,8 +4,53 @@ metadata:
   name: market-int
 spec:
   template:
+    metadata:
+      annotations:
+        run.googleapis.com/client-name: cloud-console
+        run.googleapis.com/execution-environment: gen2
     spec:
+      parallelism: 1
+      taskCount: 1
       template:
         spec:
+          volumes:
+            - name: gcs-1
+              csi:
+                driver: gcsfuse.run.googleapis.com
+                volumeAttributes:
+                  bucketName: opt-intel
           containers:
-            - image: us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:0.1.0
+            - name: market-int-1
+              image: us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:0.1.2
+              command:
+                - /market_int/market_int
+              args:
+                - perform-all
+                - /data/symbols.csv
+              env:
+                - name: telegram_chat_id
+                  value: "-1002438976647"
+                - name: sqlite_file
+                  value: /data/data.db
+                - name: RUST_LOG
+                  value: debug
+                - name: marketdata_token
+                  valueFrom:
+                    secretKeyRef:
+                      key: latest
+                      name: marketdata_token
+                - name: telegram_bot_token
+                  valueFrom:
+                    secretKeyRef:
+                      key: latest
+                      name: telegram_bot_token
+              resources:
+                limits:
+                  cpu: 1000m
+                  memory: 512Mi
+              volumeMounts:
+                - name: gcs-1
+                  mountPath: /data
+          maxRetries: 3
+          timeoutSeconds: "60"
+          serviceAccountName: 628240778300-compute@developer.gserviceaccount.com

@@ -32,9 +32,11 @@ pub async fn retrieve_option_chains_base_on_ranges(
     for symbol in symbols {
         let true_range = true_range::get_true_range(&conn, &symbol)?;
         let latest_candle = &candle::get_candles(&conn, &symbol, 1)?[0];
+        let safety_range = (true_range.percentile_range - true_range.ema_range).abs() * 0.1;
         let v1 = latest_candle.close - true_range.ema_range;
         let v2 = latest_candle.close - true_range.percentile_range;
-        let strike_range = if v1 < v2 { (v1, v2) } else { (v2, v1) }; // (smaller,bigger)
+        let mut strike_range = if v1 < v2 { (v1, v2) } else { (v2, v1) }; // (smaller,bigger)
+        strike_range.0 += safety_range; // increment smaller value by safety_range
 
         let chains = api_caller::option_chain(
             &symbol,
