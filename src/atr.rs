@@ -6,8 +6,8 @@ use crate::{
 use rusqlite::Connection;
 
 pub fn calculate_and_save(
-    symbols_file_path: &str, // Path to the file containing symbols.
-    mut conn: Connection,    // Database connection.)
+    symbols_file_path: &str,   // Path to the file containing symbols.
+    mut conn: &mut Connection, // Database connection.)
 ) -> model::Result<()> {
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 

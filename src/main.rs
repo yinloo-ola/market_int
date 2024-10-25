@@ -50,8 +50,6 @@ struct Args {
 enum Commands {
     // Pull quotes for specified symbols.
     PullQuotes { symbols_file_path: String },
-    // Calculate Average True Range (ATR).
-    CalculateAtr { symbols_file_path: String },
     // Pull option chain data.
     PullOptionChain { symbols_file_path: String },
     // Publish option chain to telegram.
@@ -72,18 +70,15 @@ async fn main() {
         log::error!("Error initializing database connection: {}", err);
         return;
     }
-    let conn = conn.unwrap();
+    let mut conn = conn.unwrap();
 
     match args.command {
         Commands::PullQuotes { symbols_file_path } => {
-            match quotes::pull_and_save(&symbols_file_path, conn).await {
+            match quotes::pull_and_save(&symbols_file_path, &mut conn).await {
                 Ok(_) => log::info!("Successfully pulled and saved quotes"),
                 Err(err) => log::error!("Error pulling and saving quotes: {}", err),
             }
-        }
-
-        Commands::CalculateAtr { symbols_file_path } => {
-            match atr::calculate_and_save(&symbols_file_path, conn) {
+            match atr::calculate_and_save(&symbols_file_path, &mut conn) {
                 Ok(_) => log::info!("Successfully calculated ATR and saved to DB"),
                 Err(err) => log::error!("Error calculating ATR: {}", err),
             }

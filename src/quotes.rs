@@ -2,13 +2,11 @@ use crate::{constants, model, symbols};
 use crate::{marketdata::api_caller, store};
 use chrono::Local;
 use rusqlite::Connection;
-use std::thread::sleep;
-use std::time::Duration;
 
 /// Pulls stock quotes for a list of symbols and saves them to the database.
 pub async fn pull_and_save(
-    symbols_file_path: &str, // Path to the file containing symbols.
-    mut conn: Connection,    // Database connection.
+    symbols_file_path: &str,   // Path to the file containing symbols.
+    mut conn: &mut Connection, // Database connection.
 ) -> model::Result<()> {
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
@@ -31,7 +29,6 @@ pub async fn pull_and_save(
                 return Err(model::QuotesError::HttpError(e));
             }
         }
-        sleep(Duration::from_millis(50));
     }
 
     Ok(())

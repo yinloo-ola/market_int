@@ -1,0 +1,11 @@
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: market-int
+spec:
+  template:
+    spec:
+      template:
+        spec:
+          containers:
+            - image: us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:0.1.0
