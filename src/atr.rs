@@ -12,13 +12,13 @@ pub fn calculate_and_save(
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
     // Initialize the candle table in the database.
-    store::true_range::create_table(&conn)?;
+    store::true_range::create_table(conn)?;
 
     let mut true_range_vec: Vec<model::TrueRange> = Vec::with_capacity(symbols.len() * 5);
     // Iterate over each symbol.
     for symbol in symbols {
         // Fetch candle data for the current symbol from the database.
-        let candles = candle::get_candles(&mut conn, symbol.as_str(), constants::CANDLE_COUNT)?;
+        let candles = candle::get_candles(conn, symbol.as_str(), constants::CANDLE_COUNT)?;
 
         // Aggregate 5 candles into one. Calculate the open, close, high, low based on each group of 5 candles
         let weekly_candles: Vec<model::Candle> = candles
@@ -72,7 +72,7 @@ pub fn calculate_and_save(
     }
 
     // Save the true ranges to the database.
-    true_range::save_true_ranges(&mut conn, &true_range_vec)?;
+    true_range::save_true_ranges(conn, &true_range_vec)?;
     Ok(())
 }
 
@@ -130,7 +130,7 @@ fn percentile(values: &[f64], percentile: f64) -> model::Result<f64> {
     }
 
     if index >= values.len() as f64 {
-        return Ok(values.last().unwrap().clone());
+        return Ok(*values.last().unwrap());
     }
 
     let lower = index.floor() as usize;

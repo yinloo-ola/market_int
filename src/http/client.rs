@@ -37,7 +37,7 @@ pub async fn request<T: DeserializeOwned>(
     token: Option<&str>,
 ) -> Result<T, RequestError> {
     // Construct the URL.
-    let url = if params.len() > 0 {
+    let url = if !params.is_empty() {
         reqwest::Url::parse_with_params(path, &params)
             .map_err(|e| RequestError::Other(e.to_string()))?
     } else {
@@ -67,7 +67,7 @@ pub async fn request<T: DeserializeOwned>(
         req = req.bearer_auth(token)
     }
 
-    if headers.len() > 0 {
+    if !headers.is_empty() {
         for (k, v) in headers {
             req = req.header(k, v);
         }

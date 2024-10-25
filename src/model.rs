@@ -114,7 +114,7 @@ pub fn option_chain_to_csv_vec(all_chains: &[OptionStrikeCandle]) -> Result<Vec<
     for chain in all_chains {
         writer
             .serialize(chain)
-            .map_err(|e| QuotesError::CsvError(e))?;
+            .map_err(QuotesError::CsvError)?;
     }
 
     let bytes = writer.into_inner().unwrap().into_inner().unwrap();
