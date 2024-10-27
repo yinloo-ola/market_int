@@ -6,8 +6,8 @@ use crate::{
 use rusqlite::Connection;
 
 pub fn calculate_and_save(
-    symbols_file_path: &str,   // Path to the file containing symbols.
-    conn: &mut Connection, // Database connection.)
+    symbols_file_path: &str, // Path to the file containing symbols.
+    conn: &mut Connection,   // Database connection.)
 ) -> model::Result<()> {
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
@@ -59,7 +59,7 @@ pub fn calculate_and_save(
         }
 
         // Calculate the ATR for the candles.
-        let trs = true_ranges(&weekly_candles);
+        let trs = true_ranges_ratio(&weekly_candles);
         let ema_atr = exponential_moving_average(&trs, 4)?;
         let percentile_atr = percentile(&trs, constants::PERCENTILE)?;
 
@@ -76,17 +76,18 @@ pub fn calculate_and_save(
     Ok(())
 }
 
-fn true_ranges(candles: &[model::Candle]) -> Vec<f64> {
+fn true_ranges_ratio(candles: &[model::Candle]) -> Vec<f64> {
     candles
         .windows(2)
-        .map(|w| true_range(&w[1], &w[0]))
+        .map(|w| true_range_ratio(&w[1], &w[0]))
         .collect()
 }
 
-fn true_range(current: &model::Candle, previous: &model::Candle) -> f64 {
-    (current.high - current.low)
+fn true_range_ratio(current: &model::Candle, previous: &model::Candle) -> f64 {
+    ((current.high - current.low)
         .max((current.high - previous.close).abs())
-        .max((current.low - previous.close).abs())
+        .max((current.low - previous.close).abs()))
+        / previous.close
 }
 
 fn ema(prev: f64, current: f64, multiplier: f64) -> f64 {

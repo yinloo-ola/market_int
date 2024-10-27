@@ -4,6 +4,9 @@ pull-quotes:
 pull-option-chain:
 	RUST_LOG=debug cargo run -- pull-option-chain /home/tianhai82/hobby/market_int/data/symbols.csv
 
+calculate-atr:
+	RUST_LOG=debug cargo run -- calculate-atr /home/tianhai82/hobby/market_int/data/symbols.csv
+
 publish-option-chain:
 	RUST_LOG=debug cargo run -- publish-option-chain /home/tianhai82/hobby/market_int/data/symbols.csv
 

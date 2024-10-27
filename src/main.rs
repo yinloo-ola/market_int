@@ -55,6 +55,7 @@ enum Commands {
     // Publish option chain to telegram.
     PublishOptionChain { symbols_file_path: String },
     PerformAll { symbols_file_path: String },
+    CalculateAtr { symbols_file_path: String },
 }
 
 #[tokio::main]
@@ -79,6 +80,13 @@ async fn main() {
                 Ok(_) => log::info!("Successfully pulled and saved quotes"),
                 Err(err) => log::error!("Error pulling and saving quotes: {}", err),
             }
+            match atr::calculate_and_save(&symbols_file_path, &mut conn) {
+                Ok(_) => log::info!("Successfully calculated ATR and saved to DB"),
+                Err(err) => log::error!("Error calculating ATR: {}", err),
+            }
+        }
+
+        Commands::CalculateAtr { symbols_file_path } => {
             match atr::calculate_and_save(&symbols_file_path, &mut conn) {
                 Ok(_) => log::info!("Successfully calculated ATR and saved to DB"),
                 Err(err) => log::error!("Error calculating ATR: {}", err),

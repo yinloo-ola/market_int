@@ -30,13 +30,17 @@ pub async fn retrieve_option_chains_base_on_ranges(
     let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
 
     for symbol in symbols {
-        let true_range = true_range::get_true_range(&conn, &symbol)?;
+        let true_range_ratio = true_range::get_true_range(&conn, &symbol)?;
         let latest_candle = &candle::get_candles(&conn, &symbol, 1)?[0];
-        let safety_range = (true_range.percentile_range - true_range.ema_range).abs() * 0.1;
-        let v1 = latest_candle.close - true_range.ema_range;
-        let v2 = latest_candle.close - true_range.percentile_range;
-        let mut strike_range = if v1 < v2 { (v1, v2) } else { (v2, v1) }; // (smaller,bigger)
-        strike_range.0 += safety_range; // increment smaller value by safety_range
+        let safety_range =
+            (true_range_ratio.percentile_range - true_range_ratio.ema_range).abs() * 0.1;
+        let v1 = latest_candle.close * (1.0 - true_range_ratio.ema_range);
+        let v2 = latest_candle.close * (1.0 - true_range_ratio.percentile_range);
+        let mut strike_range = match v1 < v2 {
+            true => (v1, v2),
+            false => (v2, v1),
+        }; // (smaller,bigger)
+        strike_range.0 *= 1.0 + safety_range; // increment smaller value by safety_range
 
         let chains = api_caller::option_chain(
             &symbol,
