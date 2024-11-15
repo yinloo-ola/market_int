@@ -40,7 +40,7 @@ pub async fn retrieve_option_chains_base_on_ranges(
             true => (v1, v2),
             false => (v2, v1),
         }; // (smaller,bigger)
-        strike_range.0 *= 1.0 - safety_range; // decrement smaller value by safety_range
+        strike_range.1 *= 1.0 - safety_range; // decrement bigger value by safety_range
 
         let chains = api_caller::option_chain(
             &symbol,
