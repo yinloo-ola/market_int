@@ -98,12 +98,14 @@ pub struct OptionStrikeCandle {
     pub bid_size: u32,         // Bid size.
     pub ask_size: u32,         // Ask size.
     pub last: f64,             // Last traded price.
-    pub expiration: u32,       // Expiration date and time.
-    pub updated: u32,          // Last updated date and time.
+    pub expiration: String,    // Expiration date and time.
+    pub updated: String,       // Last updated date and time.
     pub dte: u32,              // Days to expiration.
     pub volume: u32,           // Volume.
     pub open_interest: u32,    // Open interest.
     pub rate_of_return: f64,   // Rate of return.
+    pub strike_from: f64,      // Strike price from.
+    pub strike_to: f64,        // Strike price to.
 }
 
 pub fn option_chain_to_csv_vec(all_chains: &[OptionStrikeCandle]) -> Result<Vec<u8>> {
@@ -112,9 +114,7 @@ pub fn option_chain_to_csv_vec(all_chains: &[OptionStrikeCandle]) -> Result<Vec<
 
     // Write the data rows.
     for chain in all_chains {
-        writer
-            .serialize(chain)
-            .map_err(QuotesError::CsvError)?;
+        writer.serialize(chain).map_err(QuotesError::CsvError)?;
     }
 
     let bytes = writer.into_inner().unwrap().into_inner().unwrap();

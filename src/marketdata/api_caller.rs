@@ -1,7 +1,7 @@
 use super::super::model;
 use super::response;
 use crate::http::client::{self, RequestError};
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, TimeZone};
 use std::{collections::HashMap, env};
 
 // Base URL for the market data API.
@@ -55,7 +55,7 @@ pub async fn stock_candle(
         client::Method::Get,
         format!("{}v1/stocks/candles/daily/{}", BASE_URL, symbol).as_str(),
         HashMap::from([
-            ("to", to.timestamp().to_string().as_str()),
+            ("to", format!("{}", to.timestamp()).as_str()),
             ("countback", &count.to_string()),
         ]),
         HashMap::new(),
@@ -136,11 +136,11 @@ pub async fn option_chain(
             ("strike", strike_str.as_str()),
             (
                 "from",
-                expiration_date_range.0.timestamp().to_string().as_str(),
+                format!("{}", expiration_date_range.0.timestamp()).as_str(),
             ),
             (
                 "to",
-                expiration_date_range.1.timestamp().to_string().as_str(),
+                format!("{}", expiration_date_range.1.timestamp()).as_str(),
             ),
             ("minOpenInterest", min_open_interest.to_string().as_str()),
             match side {
@@ -156,6 +156,16 @@ pub async fn option_chain(
     let len = resp.option_symbol.len();
     let mut candles = Vec::with_capacity(len);
     for i in 0..len {
+        let expiration_datetime = match Local.timestamp_opt(resp.expiration[i] as i64, 0) {
+            chrono::LocalResult::Single(dt) => dt,
+            _ => return Err(RequestError::Other("Invalid timestamp".into())),
+        };
+        let expiration_date_str = expiration_datetime.format("%Y-%m-%d").to_string();
+        let updated_datetime = match Local.timestamp_opt(resp.updated[i] as i64, 0) {
+            chrono::LocalResult::Single(dt) => dt,
+            _ => return Err(RequestError::Other("Invalid timestamp".into())),
+        };
+        let updated_date_str = updated_datetime.format("%Y-%m-%d").to_string();
         candles.push(model::OptionStrikeCandle {
             underlying: resp.underlying[i].clone(),
             strike: resp.strike[i],
@@ -171,12 +181,14 @@ pub async fn option_chain(
             bid_size: resp.bid_size[i],
             ask_size: resp.ask_size[i],
             last: resp.last[i],
-            expiration: resp.expiration[i],
-            updated: resp.updated[i],
+            expiration: expiration_date_str,
+            updated: updated_date_str,
             volume: resp.volume[i],
             dte: resp.dte[i],
             open_interest: resp.open_interest[i],
             rate_of_return: resp.mid[i] / resp.strike[i] / num_of_weeks(resp.dte[i]) * 52.0,
+            strike_from: strike_range.0,
+            strike_to: strike_range.1,
         });
     }
     Ok(candles)

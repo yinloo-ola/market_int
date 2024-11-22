@@ -19,7 +19,9 @@ pub fn create_table(conn: &Connection) -> Result<()> {
             dte INTEGER NOT NULL,
             volume INTEGER NOT NULL,
             open_interest INTEGER NOT NULL,
-            rate_of_return REAL NOT NULL
+            rate_of_return REAL NOT NULL,
+            strike_from REAL NOT NULL,
+            strike_to REAL NOT NULL
     );",
         [],
     )?;
@@ -64,6 +66,8 @@ pub fn retrieve_option_chain(
                 volume: row.get(13)?,
                 open_interest: row.get(14)?,
                 rate_of_return: row.get(15)?,
+                strike_from: row.get(16)?,
+                strike_to: row.get(17)?,
             })
         })?
         .collect();
@@ -98,9 +102,11 @@ pub fn save_option_strike(
     dte,
     volume,
     open_interest,
-    rate_of_return
+    rate_of_return,
+    strike_from,
+    strike_to
 ) VALUES (
-    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
 );",
         )?;
         for strike in strikes {
@@ -121,6 +127,8 @@ pub fn save_option_strike(
                 strike.volume,
                 strike.open_interest,
                 strike.rate_of_return,
+                strike.strike_from,
+                strike.strike_to,
             ])
             .err(); // Ignore errors during individual inserts; transaction will handle overall success/failure.
         }
