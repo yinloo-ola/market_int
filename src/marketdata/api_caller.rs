@@ -186,9 +186,14 @@ pub async fn option_chain(
             volume: resp.volume[i],
             dte: resp.dte[i],
             open_interest: resp.open_interest[i],
-            rate_of_return: resp.mid[i] / resp.strike[i] / num_of_weeks(resp.dte[i]) * 52.0,
-            strike_from: strike_range.0,
-            strike_to: strike_range.1,
+            rate_of_return: format!(
+                "{:.3}",
+                resp.mid[i] / resp.strike[i] / num_of_weeks(resp.dte[i]) * 52.0
+            )
+            .parse()
+            .unwrap(),
+            strike_from: format!("{:.3}", strike_range.0).parse().unwrap(),
+            strike_to: format!("{:.3}", strike_range.1).parse().unwrap(),
         });
     }
     Ok(candles)
