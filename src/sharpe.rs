@@ -42,12 +42,21 @@ fn calculate_sharpe(returns: &[f64], risk_free_rate: f64) -> model::Result<f64> 
         return Err(model::QuotesError::InsufficientReturnData(0));
     }
 
-    let avg_return = returns.iter().sum::<f64>() / returns.len() as f64;
-    let variance = returns
+    // Convert annual risk-free rate to daily rate
+    let daily_risk_free_rate = risk_free_rate / 252.0;
+
+    // Calculate daily excess returns
+    let excess_returns: Vec<f64> = returns.iter().map(|r| r - daily_risk_free_rate).collect();
+
+    // Calculate average daily excess return
+    let avg_excess_return = excess_returns.iter().sum::<f64>() / excess_returns.len() as f64;
+
+    // Calculate standard deviation of daily excess returns
+    let variance = excess_returns
         .iter()
-        .map(|r| (r - avg_return).powi(2))
+        .map(|r| (r - avg_excess_return).powi(2))
         .sum::<f64>()
-        / returns.len() as f64;
+        / excess_returns.len() as f64;
     let std_dev = variance.sqrt();
 
     if std_dev == 0.0 {
@@ -56,5 +65,12 @@ fn calculate_sharpe(returns: &[f64], risk_free_rate: f64) -> model::Result<f64> 
         ));
     }
 
-    Ok((avg_return - risk_free_rate) / std_dev)
+    // Annualize the components
+    let annualized_avg_excess_return = avg_excess_return * 252.0;
+    let annualized_std_dev = std_dev * (252.0_f64).sqrt();
+
+    // Calculate annualized Sharpe ratio
+    let annualized_sharpe = annualized_avg_excess_return / annualized_std_dev;
+
+    Ok(annualized_sharpe)
 }

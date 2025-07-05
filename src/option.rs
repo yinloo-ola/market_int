@@ -3,6 +3,7 @@ use std::env;
 
 use chrono::{DateTime, Datelike, Days, Local, Timelike, Weekday};
 use rusqlite::Connection;
+use std::collections::HashMap;
 use telegram_bot_api::{
     bot,
     types::{ChatId, InputFile},
@@ -12,7 +13,7 @@ use crate::{
     constants,
     marketdata::api_caller,
     model::{self, QuotesError},
-    store::{candle, option_chain, true_range},
+    store::{candle, option_chain, sharpe_ratio, true_range},
     symbols,
 };
 
@@ -29,7 +30,7 @@ pub async fn retrieve_option_chains_base_on_ranges(
 
     let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
 
-    for symbol in symbols {
+    for symbol in &symbols {
         let true_range_ratio = true_range::get_true_range(&conn, &symbol)?;
         let latest_candle = &candle::get_candles(&conn, &symbol, 1)?[0];
         let safety_range =
@@ -63,7 +64,23 @@ pub async fn retrieve_option_chains_base_on_ranges(
         }
     }
 
-    publish_to_telegram(&all_chains).await
+    // Collect Sharpe ratios for all symbols
+    let mut sharpe_ratios: HashMap<String, f64> = HashMap::new();
+    for symbol in &symbols {
+        match sharpe_ratio::get_sharpe_ratio(&conn, symbol) {
+            Ok(Some(ratio)) => {
+                sharpe_ratios.insert(symbol.clone(), ratio);
+            }
+            Ok(None) => {
+                log::warn!("No Sharpe ratio found for symbol: {}", symbol);
+            }
+            Err(err) => {
+                log::error!("Failed to get Sharpe ratio for {}: {}", symbol, err);
+            }
+        }
+    }
+
+    publish_to_telegram(&all_chains, &sharpe_ratios).await
 }
 
 /// Calculates the range of expiration dates to use when fetching option chains.
@@ -90,8 +107,10 @@ pub async fn publish_option_chains(
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
     let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
-    for symbol in symbols {
-        let chains = option_chain::retrieve_option_chain(&mut conn, &symbol);
+    let mut sharpe_ratios: HashMap<String, f64> = HashMap::new();
+
+    for symbol in &symbols {
+        let chains = option_chain::retrieve_option_chain(&mut conn, symbol);
         match chains {
             Ok(chains) => all_chains.extend(chains),
             Err(err) => {
@@ -99,14 +118,30 @@ pub async fn publish_option_chains(
                 continue;
             }
         };
+
+        // Get Sharpe ratio for this symbol
+        match sharpe_ratio::get_sharpe_ratio(&conn, symbol) {
+            Ok(Some(ratio)) => {
+                sharpe_ratios.insert(symbol.clone(), ratio);
+            }
+            Ok(None) => {
+                log::warn!("No Sharpe ratio found for symbol: {}", symbol);
+            }
+            Err(err) => {
+                log::error!("Failed to get Sharpe ratio for {}: {}", symbol, err);
+            }
+        }
     }
 
-    publish_to_telegram(&all_chains).await
+    publish_to_telegram(&all_chains, &sharpe_ratios).await
 }
 
-pub async fn publish_to_telegram(all_chains: &[model::OptionStrikeCandle]) -> model::Result<()> {
+pub async fn publish_to_telegram(
+    all_chains: &[model::OptionStrikeCandle],
+    sharpe_ratios: &HashMap<String, f64>,
+) -> model::Result<()> {
     // Save all_chains to a csv file and upload it to dropbox
-    let csv = model::option_chain_to_csv_vec(all_chains)?;
+    let csv = model::option_chain_to_csv_vec(all_chains, sharpe_ratios)?;
 
     let now = Local::now();
     let formatted_date = now.format("%Y%m%d_%H%M").to_string();

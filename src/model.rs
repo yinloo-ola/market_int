@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env::VarError,
     error::Error,
     fmt::Display,
@@ -108,13 +109,65 @@ pub struct OptionStrikeCandle {
     pub strike_to: f64,        // Strike price to.
 }
 
-pub fn option_chain_to_csv_vec(all_chains: &[OptionStrikeCandle]) -> Result<Vec<u8>> {
+pub fn option_chain_to_csv_vec(
+    all_chains: &[OptionStrikeCandle],
+    sharpe_ratios: &HashMap<String, f64>,
+) -> Result<Vec<u8>> {
     let buf = BufWriter::new(Vec::new());
     let mut writer = Writer::from_writer(buf);
 
+    // Write header row
+    writer
+        .write_record(&[
+            "underlying",
+            "strike",
+            "underlying_price",
+            "side",
+            "bid",
+            "mid",
+            "ask",
+            "bid_size",
+            "ask_size",
+            "last",
+            "expiration",
+            "updated",
+            "dte",
+            "volume",
+            "open_interest",
+            "rate_of_return",
+            "strike_from",
+            "strike_to",
+            "sharpe_ratio",
+        ])
+        .map_err(QuotesError::CsvError)?;
+
     // Write the data rows.
     for chain in all_chains {
-        writer.serialize(chain).map_err(QuotesError::CsvError)?;
+        let sharpe_ratio = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
+
+        writer
+            .write_record(&[
+                &chain.underlying,
+                &chain.strike.to_string(),
+                &chain.underlying_price.to_string(),
+                &format!("{:?}", chain.side),
+                &chain.bid.to_string(),
+                &chain.mid.to_string(),
+                &chain.ask.to_string(),
+                &chain.bid_size.to_string(),
+                &chain.ask_size.to_string(),
+                &chain.last.to_string(),
+                &chain.expiration,
+                &chain.updated,
+                &chain.dte.to_string(),
+                &chain.volume.to_string(),
+                &chain.open_interest.to_string(),
+                &chain.rate_of_return.to_string(),
+                &chain.strike_from.to_string(),
+                &chain.strike_to.to_string(),
+                &sharpe_ratio.to_string(),
+            ])
+            .map_err(QuotesError::CsvError)?;
     }
 
     let bytes = writer.into_inner().unwrap().into_inner().unwrap();
@@ -126,7 +179,7 @@ pub type Result<T> = std::result::Result<T, QuotesError>;
 #[derive(Debug)]
 pub struct SharpeConfig {
     pub risk_free_rate: Option<f64>, // None = use DEFAULT_RISK_FREE_RATE
-    pub min_candles: usize,         // From constants::SHARPE_MIN_CANDLES
+    pub min_candles: usize,          // From constants::SHARPE_MIN_CANDLES
 }
 
 #[derive(Debug)]
