@@ -1,5 +1,5 @@
 use super::super::model;
-use rusqlite::{Connection, Result};
+use rusqlite::{params, Connection, Result};
 
 pub fn create_table(conn: &Connection) -> Result<()> {
     conn.execute(
@@ -17,10 +17,14 @@ pub fn create_table(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub fn save_sharpe_ratio(conn: &Connection, symbol: &str, value: f64, timestamp: u32) -> model::Result<()> {
-    let mut stmt = conn.prepare(
-        "REPLACE INTO sharpe_ratio (symbol, value, timestamp) VALUES (?1, ?2, ?3)",
-    )?;
+pub fn save_sharpe_ratio(
+    conn: &Connection,
+    symbol: &str,
+    value: f64,
+    timestamp: u32,
+) -> model::Result<()> {
+    let mut stmt =
+        conn.prepare("REPLACE INTO sharpe_ratio (symbol, value, timestamp) VALUES (?1, ?2, ?3)")?;
     stmt.execute(params![symbol, value, timestamp])?;
     Ok(())
 }

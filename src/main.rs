@@ -28,6 +28,8 @@ mod store {
     pub mod candle;
     /// option range storage.
     pub mod option_chain;
+    /// Sharpe ratio storage.
+    pub mod sharpe_ratio;
     /// SQLite database interaction.
     pub mod sqlite;
     /// true range storage.
@@ -58,6 +60,7 @@ enum Commands {
     PublishOptionChain { symbols_file_path: String },
     PerformAll { symbols_file_path: String },
     CalculateAtr { symbols_file_path: String },
+    CalculateSharpeRatio { symbols_file_path: String },
 }
 
 #[tokio::main]
@@ -105,6 +108,17 @@ async fn main() {
             {
                 Ok(_) => log::info!("Successfully pulled and saved option chains"),
                 Err(err) => log::error!("Error pulling option chains: {}", err),
+            }
+        }
+
+        Commands::CalculateSharpeRatio { symbols_file_path } => {
+            match sharpe::calculate_and_save(
+                &symbols_file_path,
+                &mut conn,
+                constants::DEFAULT_RISK_FREE_RATE,
+            ) {
+                Ok(_) => log::info!("Successfully calculated and saved Sharpe ratios"),
+                Err(err) => log::error!("Error calculating Sharpe ratios: {}", err),
             }
         }
 

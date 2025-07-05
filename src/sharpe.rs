@@ -13,8 +13,7 @@ pub fn calculate_and_save(
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
     for symbol in symbols {
-        let candles =
-            store::candle::get_candles(conn, &symbol, constants::SHARPE_MIN_CANDLES as u32)?;
+        let candles = store::candle::get_candles(conn, &symbol, constants::CANDLE_COUNT as u32)?;
 
         if candles.len() < constants::SHARPE_MIN_CANDLES {
             return Err(model::QuotesError::InsufficientReturnData(
@@ -23,7 +22,7 @@ pub fn calculate_and_save(
         }
 
         let returns = calculate_returns(&candles);
-        let sharpe = calculate_sharpe(&returns, risk_free_rate, constants::SHARPE_MIN_CANDLES)?;
+        let sharpe = calculate_sharpe(&returns, risk_free_rate)?;
 
         sharpe_ratio::save_sharpe_ratio(conn, &symbol, sharpe, candles.last().unwrap().timestamp)?;
     }
@@ -38,9 +37,9 @@ fn calculate_returns(candles: &[model::Candle]) -> Vec<f64> {
         .collect()
 }
 
-fn calculate_sharpe(returns: &[f64], risk_free_rate: f64, period: usize) -> model::Result<f64> {
-    if returns.len() < period {
-        return Err(model::QuotesError::InsufficientReturnData(period));
+fn calculate_sharpe(returns: &[f64], risk_free_rate: f64) -> model::Result<f64> {
+    if returns.is_empty() {
+        return Err(model::QuotesError::InsufficientReturnData(0));
     }
 
     let avg_return = returns.iter().sum::<f64>() / returns.len() as f64;
