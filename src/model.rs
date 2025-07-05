@@ -124,6 +124,12 @@ pub fn option_chain_to_csv_vec(all_chains: &[OptionStrikeCandle]) -> Result<Vec<
 pub type Result<T> = std::result::Result<T, QuotesError>;
 
 #[derive(Debug)]
+pub struct SharpeConfig {
+    pub risk_free_rate: Option<f64>, // None = use DEFAULT_RISK_FREE_RATE
+    pub min_candles: usize,         // From constants::SHARPE_MIN_CANDLES
+}
+
+#[derive(Debug)]
 pub enum QuotesError {
     FileNotFound(String),
     CouldNotOpenFile(io::Error),
@@ -135,6 +141,9 @@ pub enum QuotesError {
     CsvError(csv::Error),
     TelegramError(APIResponseError),
     EnvVarNotSet(VarError),
+    SharpeCalculationError(String),
+    InsufficientReturnData(usize),
+    InvalidRiskFreeRate(String),
 }
 
 impl Display for QuotesError {

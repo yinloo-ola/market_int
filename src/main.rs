@@ -18,6 +18,8 @@ mod quotes;
 mod atr;
 /// Pull option chains from API based on ATR retrieved from database.
 mod option;
+// Sharpe ratio calculation and storage.
+mod sharpe;
 /// module to read symbols from symbol file
 mod symbols;
 // Data storage module.
@@ -114,6 +116,14 @@ async fn main() {
             match atr::calculate_and_save(&symbols_file_path, &mut conn) {
                 Ok(_) => log::info!("Successfully calculated ATR and saved to DB"),
                 Err(err) => log::error!("Error calculating ATR: {}", err),
+            }
+            match sharpe::calculate_and_save(
+                &symbols_file_path,
+                &mut conn,
+                constants::DEFAULT_RISK_FREE_RATE,
+            ) {
+                Ok(_) => log::info!("Successfully calculated and saved Sharpe ratios"),
+                Err(err) => log::error!("Error calculating Sharpe ratios: {}", err),
             }
             match option::retrieve_option_chains_base_on_ranges(
                 &symbols_file_path,
