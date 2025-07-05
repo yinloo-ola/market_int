@@ -44,5 +44,51 @@
     },
     "request": "launch",
     "adapter": "CodeLLDB"
+  },
+  {
+    "label": "Debug market_int - perform-all",
+    "build": {
+      "command": "cargo",
+      "args": [
+        "build"
+      ]
+    },
+    "program": "$ZED_WORKTREE_ROOT/target/debug/market_int",
+    "args": [
+      "perform-all",
+      "$ZED_WORKTREE_ROOT/data/symbols.csv"
+    ],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "sourceLanguages": [
+      "rust"
+    ],
+    "env": {
+      "RUST_BACKTRACE": "1"
+    },
+    "request": "launch",
+    "adapter": "CodeLLDB"
+  },
+  {
+    "label": "Debug market_int - publish-option-chain",
+    "build": {
+      "command": "cargo",
+      "args": [
+        "build"
+      ]
+    },
+    "program": "$ZED_WORKTREE_ROOT/target/debug/market_int",
+    "args": [
+      "publish-option-chain",
+      "$ZED_WORKTREE_ROOT/data/symbols.csv"
+    ],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "sourceLanguages": [
+      "rust"
+    ],
+    "env": {
+      "RUST_BACKTRACE": "1"
+    },
+    "request": "launch",
+    "adapter": "CodeLLDB"
   }
 ]
