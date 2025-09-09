@@ -42,6 +42,7 @@ mod store {
 // module storing defaults
 mod constants;
 
+use chrono::Local;
 use clap::{Parser, Subcommand};
 use dotenv::dotenv;
 
@@ -66,7 +67,7 @@ enum Commands {
     CalculateAtr { symbols_file_path: String },
     CalculateSharpeRatio { symbols_file_path: String },
     // Test Tiger API
-    TestTiger { symbol: String },
+    TestTiger { symbols: String },
 }
 
 #[tokio::main]
@@ -164,22 +165,38 @@ async fn main() {
             }
         }
 
-        Commands::TestTiger { symbol } => {
+        Commands::TestTiger { symbols } => {
+            // Split the comma-separated symbols into a vector
+            let symbol_list: Vec<&str> = symbols.split(',').map(|s| s.trim()).collect();
+            
             match tiger::api_caller::Requester::new().await {
                 Some(requester) => {
                     log::info!("Successfully connected to Tiger API");
 
                     // Test stock quotes
-                    match requester.query_stock_quotes(&symbol).await {
-                        Ok(_) => log::info!("Successfully queried stock quotes for {}", symbol),
+                    match requester
+                        .query_stock_quotes(
+                            &symbol_list,
+                            &Local::now(),
+                            constants::CANDLE_COUNT / 5,
+                            "week",
+                        )
+                        .await
+                    {
+                        Ok(candles) => {
+                            log::info!("Successfully queried stock quotes for {:?}", symbol_list);
+                            for candle in &candles {
+                                log::info!("Candle: {:?}", candle);
+                            }
+                        }
                         Err(err) => log::error!("Error querying stock quotes: {}", err),
                     }
 
                     // Test option chain
-                    match requester.query_option_chain(&symbol).await {
-                        Ok(_) => log::info!("Successfully queried option chain for {}", symbol),
-                        Err(err) => log::error!("Error querying option chain: {}", err),
-                    }
+                    // match requester.query_option_chain(&symbol).await {
+                    //     Ok(_) => log::info!("Successfully queried option chain for {}", symbol),
+                    //     Err(err) => log::error!("Error querying option chain: {}", err),
+                    // }
                 }
                 None => log::error!("Failed to initialize Tiger API requester"),
             }

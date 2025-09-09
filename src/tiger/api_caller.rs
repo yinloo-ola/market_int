@@ -1,12 +1,16 @@
-use base64::{engine::general_purpose, Engine as _};
-use chrono::Local;
+use base64::{Engine as _, engine::general_purpose};
+use chrono::{DateTime, Local};
 use reqwest;
-use rsa::{pkcs1::DecodeRsaPrivateKey, pkcs1v15::Pkcs1v15Sign, RsaPrivateKey};
+use rsa::{RsaPrivateKey, pkcs1::DecodeRsaPrivateKey, pkcs1v15::Pkcs1v15Sign};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 use std::env;
+
+// Import necessary types
+use crate::http::client::RequestError;
+use crate::model::Candle;
 
 // Constants for Tiger API request parameters
 const KEY_TIGER_ID: &str = "tiger_id"; // KeyTigerID is the key for tiger_id parameter
@@ -70,28 +74,128 @@ impl Requester {
         Some(requester)
     }
 
-    // QueryStockQuotes queries stock quotes from the Tiger API for a given symbol.
-    pub async fn query_stock_quotes(&self, symbol: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let now = Local::now();
-        let begin = now - chrono::Duration::days(30);
-
+    // QueryStockQuotes queries stock quotes from the Tiger API for given symbols.
+    pub async fn query_stock_quotes(
+        &self,
+        symbols: &[&str],
+        to: &DateTime<Local>,
+        count: u32,
+        period: &str,
+    ) -> Result<Vec<Candle>, RequestError> {
         let biz_content = serde_json::json!({
-            "symbols": [symbol],
-            "period": "week",
-            "begin_time": begin.timestamp_millis(),
-            "end_time": now.timestamp_millis(),
+            "symbols": symbols,
+            "period": period,
+            "limit": count,
+            "end_time": to.timestamp_millis(),
         });
 
+        // Execute the query and handle errors
         let resp = self
             .execute_query(METHOD_KLINE, "", Some(biz_content))
-            .await?;
+            .await
+            .map_err(|e| RequestError::Other(format!("Failed to execute query: {}", e)))?;
 
-        println!("Kline data: {:?}", resp.data);
-        Ok(())
+        // Parse the response data to extract candle information
+        let candles_array = resp.data.as_array().ok_or_else(|| {
+            RequestError::Other("Invalid response format: expected array".to_string())
+        })?;
+
+        if candles_array.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Convert all symbols' data to Candle structs
+        let mut candles = Vec::new();
+        for kline_data_value in candles_array {
+            let kline_data = kline_data_value.as_object().ok_or_else(|| {
+                RequestError::Other("Invalid response format: expected object".to_string())
+            })?;
+
+            // Extract symbol from the kline data
+            let symbol = kline_data
+                .get("symbol")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    RequestError::Other("Missing or invalid 'symbol' in response".to_string())
+                })?
+                .to_string();
+
+            // Extract the items array
+            let items = kline_data
+                .get("items")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| {
+                    RequestError::Other("Missing or invalid 'items' in response".to_string())
+                })?;
+
+            // Convert items to Candle structs
+            for item in items {
+                let item_obj = item.as_object().ok_or_else(|| {
+                    RequestError::Other("Invalid item format: expected object".to_string())
+                })?;
+
+                // Extract values with proper error handling
+                let open = item_obj
+                    .get("open")
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| {
+                        RequestError::Other("Missing or invalid 'open' value".to_string())
+                    })?;
+
+                let high = item_obj
+                    .get("high")
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| {
+                        RequestError::Other("Missing or invalid 'high' value".to_string())
+                    })?;
+
+                let low = item_obj
+                    .get("low")
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| RequestError::Other("Missing or invalid 'low' value".to_string()))?;
+
+                let close = item_obj
+                    .get("close")
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| {
+                        RequestError::Other("Missing or invalid 'close' value".to_string())
+                    })?;
+
+                let volume = item_obj
+                    .get("volume")
+                    .and_then(|v| v.as_f64())
+                    .map(|v| v as u32)
+                    .ok_or_else(|| {
+                        RequestError::Other("Missing or invalid 'volume' value".to_string())
+                    })?;
+
+                let timestamp = item_obj
+                    .get("time")
+                    .and_then(|v| v.as_f64())
+                    .map(|v| (v / 1000.0) as u32) // Convert milliseconds to seconds
+                    .ok_or_else(|| {
+                        RequestError::Other("Missing or invalid 'time' value".to_string())
+                    })?;
+
+                let candle = Candle {
+                    symbol: symbol.clone(),
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume,
+                    timestamp,
+                };
+
+                candles.push(candle);
+            }
+        }
+
+        Ok(candles)
     }
 
     // QueryOptionChain queries option chain data from the Tiger API for a given symbol.
-    pub async fn query_option_chain(&self, symbol: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn query_option_chain(&self, symbol: &str) -> Result<(), RequestError> {
         let biz_content = serde_json::json!({
             "option_basic": [{
                 "symbol": symbol,
@@ -101,7 +205,8 @@ impl Requester {
 
         let resp = self
             .execute_query(METHOD_OPTION_CHAIN, "3.0", Some(biz_content))
-            .await?;
+            .await
+            .map_err(|e| RequestError::Other(format!("Failed to execute query: {}", e)))?;
 
         println!("Option chain data: {:?}", resp.data);
         Ok(())
@@ -113,10 +218,13 @@ impl Requester {
         method: &str,
         version: &str,
         biz_content: Option<serde_json::Value>,
-    ) -> Result<Response, Box<dyn std::error::Error>> {
-        let tiger_id = env::var("TIGER_ID").map_err(|_| "Missing TIGER_ID environment variable")?;
-        let private_key =
-            env::var("TIGER_RSA").map_err(|_| "Missing TIGER_RSA environment variable")?;
+    ) -> Result<Response, RequestError> {
+        let tiger_id = env::var("TIGER_ID").map_err(|_| {
+            RequestError::Other("Missing TIGER_ID environment variable".to_string())
+        })?;
+        let private_key = env::var("TIGER_RSA").map_err(|_| {
+            RequestError::Other("Missing TIGER_RSA environment variable".to_string())
+        })?;
 
         // Format timestamp as "2006-01-02 15:04:05"
         let now = Local::now();
@@ -136,18 +244,20 @@ impl Requester {
         }
 
         if let Some(biz_content) = biz_content {
-            let biz_content_str = serde_json::to_string(&biz_content)
-                .map_err(|e| format!("Failed to marshal biz_content: {}", e))?;
+            let biz_content_str = serde_json::to_string(&biz_content).map_err(|e| {
+                RequestError::Other(format!("Failed to marshal biz_content: {}", e))
+            })?;
             data.insert(KEY_BIZ_CONTENT.to_string(), biz_content_str);
         }
 
         // Generate the signature
         let sign_content = get_sign_content(&data);
-        let sign = sign_with_rsa(&private_key, sign_content.as_bytes())?;
+        let sign = sign_with_rsa(&private_key, sign_content.as_bytes())
+            .map_err(|e| RequestError::Other(format!("Failed to sign request: {}", e)))?;
         data.insert(KEY_SIGN.to_string(), sign);
 
         let body = serde_json::to_string(&data)
-            .map_err(|e| format!("Failed to marshal request data: {}", e))?;
+            .map_err(|e| RequestError::Other(format!("Failed to marshal request data: {}", e)))?;
 
         let response = self
             .client
@@ -161,23 +271,25 @@ impl Requester {
             .body(body)
             .send()
             .await
-            .map_err(|e| format!("Request to Tiger API failed: {}", e))?;
+            .map_err(|e| RequestError::Other(format!("Request to Tiger API failed: {}", e)))?;
 
         if !response.status().is_success() {
-            return Err(format!("Unexpected response status: {}", response.status()).into());
+            return Err(RequestError::Other(format!(
+                "Unexpected response status: {}",
+                response.status()
+            )));
         }
 
         let result: Response = response
             .json()
             .await
-            .map_err(|e| format!("Failed to parse response: {}", e))?;
+            .map_err(|e| RequestError::Other(format!("Failed to parse response: {}", e)))?;
 
         if result.code != 0 {
-            return Err(format!(
+            return Err(RequestError::Other(format!(
                 "Tiger API error: code={}, message={}",
                 result.code, result.message
-            )
-            .into());
+            )));
         }
 
         Ok(result)
@@ -191,40 +303,37 @@ fn fill_private_key_marker(private_key: &str) -> String {
     if private_key.contains("-----BEGIN RSA PRIVATE KEY-----") {
         return private_key.to_string();
     }
-    
+
     // Format the Base64 content with 64-character lines
     let mut formatted_key = String::new();
     formatted_key.push_str("-----BEGIN RSA PRIVATE KEY-----\n");
-    
+
     // Break the Base64 string into 64-character lines
     let mut chars = private_key.chars().peekable();
     let mut line_count = 0;
-    
+
     while chars.peek().is_some() {
         let chunk: String = chars.by_ref().take(64).collect();
         formatted_key.push_str(&chunk);
         formatted_key.push('\n');
         line_count += 1;
-        
+
         // Safety check to avoid infinite loops
         if line_count > 1000 {
             break;
         }
     }
-    
+
     formatted_key.push_str("-----END RSA PRIVATE KEY-----\n");
     formatted_key
 }
 
-fn sign_with_rsa(
-    private_key: &str,
-    sign_content: &[u8],
-) -> Result<String, Box<dyn std::error::Error>> {
+fn sign_with_rsa(private_key: &str, sign_content: &[u8]) -> Result<String, RequestError> {
     let private_key_pem = fill_private_key_marker(private_key);
 
     // Parse the private key
     let private_key = RsaPrivateKey::from_pkcs1_pem(&private_key_pem)
-        .map_err(|e| format!("Failed to parse private key: {}", e))?;
+        .map_err(|e| RequestError::Other(format!("Failed to parse private key: {}", e)))?;
 
     // Create SHA1 hash of the content
     let mut hasher = Sha1::new();
@@ -234,7 +343,7 @@ fn sign_with_rsa(
     // Sign the hash with RSA
     let signature = private_key
         .sign(Pkcs1v15Sign::new::<sha1::Sha1>(), &hashed)
-        .map_err(|e| format!("Failed to sign content: {}", e))?;
+        .map_err(|e| RequestError::Other(format!("Failed to sign content: {}", e)))?;
 
     // Encode the signature as base64
     let encoded_signature = general_purpose::STANDARD.encode(&signature);

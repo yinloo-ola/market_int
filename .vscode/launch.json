@@ -10,8 +10,8 @@
             "name": "Debug",
             "program": "${workspaceFolder}/target/debug/market_int",
             "args": [
-                "pull-option-chain",
-                "/home/tianhai82/hobby/market_int/data/symbols.csv"
+                "test-tiger",
+                "AAPL"
             ],
             "cwd": "${workspaceFolder}"
         }
