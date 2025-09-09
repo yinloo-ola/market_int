@@ -22,6 +22,10 @@ mod option;
 mod sharpe;
 /// module to read symbols from symbol file
 mod symbols;
+// Tiger API client
+mod tiger {
+    pub mod api_caller;
+}
 // Data storage module.
 mod store {
     /// Candle data storage.
@@ -61,6 +65,8 @@ enum Commands {
     PerformAll { symbols_file_path: String },
     CalculateAtr { symbols_file_path: String },
     CalculateSharpeRatio { symbols_file_path: String },
+    // Test Tiger API
+    TestTiger { symbol: String },
 }
 
 #[tokio::main]
@@ -155,6 +161,27 @@ async fn main() {
             match option::publish_option_chains(&symbols_file_path, conn).await {
                 Ok(_) => log::info!("Successfully published option chains"),
                 Err(err) => log::error!("Error publishing option chains: {}", err),
+            }
+        }
+
+        Commands::TestTiger { symbol } => {
+            match tiger::api_caller::Requester::new().await {
+                Some(requester) => {
+                    log::info!("Successfully connected to Tiger API");
+
+                    // Test stock quotes
+                    match requester.query_stock_quotes(&symbol).await {
+                        Ok(_) => log::info!("Successfully queried stock quotes for {}", symbol),
+                        Err(err) => log::error!("Error querying stock quotes: {}", err),
+                    }
+
+                    // Test option chain
+                    match requester.query_option_chain(&symbol).await {
+                        Ok(_) => log::info!("Successfully queried option chain for {}", symbol),
+                        Err(err) => log::error!("Error querying option chain: {}", err),
+                    }
+                }
+                None => log::error!("Failed to initialize Tiger API requester"),
             }
         }
     }
