@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose, Engine as _};
 use chrono::Local;
 use reqwest;
-use rsa::{pkcs1::DecodeRsaPrivateKey, PaddingScheme, RsaPrivateKey};
+use rsa::{pkcs1::DecodeRsaPrivateKey, pkcs1v15::Pkcs1v15Sign, RsaPrivateKey};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use sha1::{Digest, Sha1};
@@ -186,23 +186,34 @@ impl Requester {
 
 // Helper functions
 
-fn add_start_end(key: &str, start_marker: &str, end_marker: &str) -> String {
-    let mut result = key.to_string();
-    if !result.contains(start_marker) {
-        result = format!("{}{}", start_marker, result);
-    }
-    if !result.contains(end_marker) {
-        result = format!("{}{}", result, end_marker);
-    }
-    result
-}
-
 fn fill_private_key_marker(private_key: &str) -> String {
-    add_start_end(
-        private_key,
-        "-----BEGIN RSA PRIVATE KEY-----\n",
-        "\n-----END RSA PRIVATE KEY-----",
-    )
+    // Check if it already has proper PEM formatting
+    if private_key.contains("-----BEGIN RSA PRIVATE KEY-----") {
+        return private_key.to_string();
+    }
+    
+    // Format the Base64 content with 64-character lines
+    let mut formatted_key = String::new();
+    formatted_key.push_str("-----BEGIN RSA PRIVATE KEY-----\n");
+    
+    // Break the Base64 string into 64-character lines
+    let mut chars = private_key.chars().peekable();
+    let mut line_count = 0;
+    
+    while chars.peek().is_some() {
+        let chunk: String = chars.by_ref().take(64).collect();
+        formatted_key.push_str(&chunk);
+        formatted_key.push('\n');
+        line_count += 1;
+        
+        // Safety check to avoid infinite loops
+        if line_count > 1000 {
+            break;
+        }
+    }
+    
+    formatted_key.push_str("-----END RSA PRIVATE KEY-----\n");
+    formatted_key
 }
 
 fn sign_with_rsa(
@@ -221,9 +232,8 @@ fn sign_with_rsa(
     let hashed = hasher.finalize();
 
     // Sign the hash with RSA
-    let padding = PaddingScheme::new_pkcs1v15_sign::<sha1::Sha1>();
     let signature = private_key
-        .sign(padding, &hashed)
+        .sign(Pkcs1v15Sign::new::<sha1::Sha1>(), &hashed)
         .map_err(|e| format!("Failed to sign content: {}", e))?;
 
     // Encode the signature as base64
