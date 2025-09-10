@@ -168,35 +168,37 @@ async fn main() {
         Commands::TestTiger { symbols } => {
             // Split the comma-separated symbols into a vector
             let symbol_list: Vec<&str> = symbols.split(',').map(|s| s.trim()).collect();
-            
+
             match tiger::api_caller::Requester::new().await {
                 Some(requester) => {
                     log::info!("Successfully connected to Tiger API");
 
-                    // Test stock quotes
-                    match requester
-                        .query_stock_quotes(
-                            &symbol_list,
-                            &Local::now(),
-                            constants::CANDLE_COUNT / 5,
-                            "week",
-                        )
-                        .await
-                    {
-                        Ok(candles) => {
-                            log::info!("Successfully queried stock quotes for {:?}", symbol_list);
-                            for candle in &candles {
-                                log::info!("Candle: {:?}", candle);
-                            }
-                        }
-                        Err(err) => log::error!("Error querying stock quotes: {}", err),
-                    }
+                    // // Test stock quotes
+                    // match requester
+                    //     .query_stock_quotes(
+                    //         &symbol_list,
+                    //         &Local::now(),
+                    //         constants::CANDLE_COUNT / 5,
+                    //         "week",
+                    //     )
+                    //     .await
+                    // {
+                    //     Ok(candles) => {
+                    //         log::info!("Successfully queried stock quotes for {:?}", symbol_list);
+                    //         for candle in &candles {
+                    //             log::info!("Candle: {:?}", candle);
+                    //         }
+                    //     }
+                    //     Err(err) => log::error!("Error querying stock quotes: {}", err),
+                    // }
 
                     // Test option chain
-                    // match requester.query_option_chain(&symbol).await {
-                    //     Ok(_) => log::info!("Successfully queried option chain for {}", symbol),
-                    //     Err(err) => log::error!("Error querying option chain: {}", err),
-                    // }
+                    match requester.query_option_chain(&symbol_list[0]).await {
+                        Ok(_) => {
+                            log::info!("Successfully queried option chain for {}", symbol_list[0])
+                        }
+                        Err(err) => log::error!("Error querying option chain: {}", err),
+                    }
                 }
                 None => log::error!("Failed to initialize Tiger API requester"),
             }

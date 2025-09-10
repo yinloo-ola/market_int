@@ -152,7 +152,9 @@ impl Requester {
                 let low = item_obj
                     .get("low")
                     .and_then(|v| v.as_f64())
-                    .ok_or_else(|| RequestError::Other("Missing or invalid 'low' value".to_string()))?;
+                    .ok_or_else(|| {
+                        RequestError::Other("Missing or invalid 'low' value".to_string())
+                    })?;
 
                 let close = item_obj
                     .get("close")
@@ -200,7 +202,14 @@ impl Requester {
             "option_basic": [{
                 "symbol": symbol,
                 "expiry": 1757649600000i64, // Example expiry timestamp
-            }]
+            }],
+            "option_filter":{
+                "in_the_money": false,
+                "open_interest":{
+                    "min": 2,
+                    "max": 1000000
+                }
+            }
         });
 
         let resp = self

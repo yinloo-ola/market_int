@@ -1,4 +1,4 @@
-pub const CANDLE_COUNT: u32 = 255;
+pub const CANDLE_COUNT: u32 = 300;
 pub const MIN_OPEN_INTEREST: u32 = 50;
 pub const PERCENTILE: f64 = 0.9;
 pub const SHARPE_MIN_CANDLES: usize = 14;
