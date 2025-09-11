@@ -50,6 +50,46 @@ use dotenv::dotenv;
 use crate::model::OptionChainSide;
 use crate::tiger::api_caller::Requester;
 
+// Helper function to calculate the target expiration date (next Friday + 7 days)
+fn calculate_target_expiration_date() -> chrono::DateTime<chrono_tz::Tz> {
+    // Calculate target date (next Friday + 7 days)
+    let mut target_expiration_date = Local::now();
+    while target_expiration_date.weekday() != chrono::Weekday::Fri {
+        target_expiration_date += chrono::Duration::days(1);
+    }
+    target_expiration_date += chrono::Duration::days(7);
+
+    // Convert target date to New York timezone
+    target_expiration_date.with_timezone(&New_York)
+}
+
+// Helper function to query option chain and log the results
+async fn query_and_log_option_chain(
+    requester: &Requester,
+    symbol_list: &[&str],
+    expiration_date_ny: &chrono::DateTime<chrono_tz::Tz>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Query option chain using the nearest expiration date
+    let option_chain = requester
+        .query_option_chain(
+            &[
+                (symbol_list[0], (225.0, 235.0)), // Example symbol with its strike range
+            ],
+            expiration_date_ny,
+            constants::MIN_OPEN_INTEREST,
+            &OptionChainSide::Put,
+        )
+        .await?;
+
+    log::info!("Successfully queried option chain for {:?}", symbol_list);
+    
+    // Serialize and log the output as JSON string
+    let json_str = serde_json::to_string_pretty(&option_chain)?;
+    log::info!("Option chain data: {}", json_str);
+    
+    Ok(())
+}
+
 // Command-line argument parser.
 #[derive(Parser, Debug)]
 #[command(about, long_about = None)]
@@ -173,85 +213,44 @@ async fn main() {
             // Split the comma-separated symbols into a vector
             let symbol_list: Vec<&str> = symbols.split(',').map(|s| s.trim()).collect();
 
-            match tiger::api_caller::Requester::new().await {
-                Some(requester) => {
-                    log::info!("Successfully connected to Tiger API");
-
-                    // // Test stock quotes
-                    // match requester
-                    //     .query_stock_quotes(
-                    //         &symbol_list,
-                    //         &Local::now(),
-                    //         constants::CANDLE_COUNT / 5,
-                    //         "week",
-                    //     )
-                    //     .await
-                    // {
-                    //     Ok(candles) => {
-                    //         log::info!("Successfully queried stock quotes for {:?}", symbol_list);
-                    //         for candle in &candles {
-                    //             log::info!("Candle: {:?}", candle);
-                    //         }
-                    //     }
-                    //     Err(err) => log::error!("Error querying stock quotes: {}", err),
-                    // }
-
-                    // Test option chain
-                    // Calculate target date (next Friday + 7 days)
-                    let mut target_expiration_date = Local::now();
-                    while target_expiration_date.weekday() != chrono::Weekday::Fri {
-                        target_expiration_date += chrono::Duration::days(1);
-                    }
-                    target_expiration_date += chrono::Duration::days(7);
-
-                    // Convert target date to New York timezone
-                    let target_expiration_date_ny = target_expiration_date.with_timezone(&New_York);
-                    
-                    // Get actual expiration dates from API and find the nearest one
-                    match requester.option_expiration(&symbol_list).await {
-                        Ok(expirations) => {
-                            // Find the nearest expiration date to our target
-                            if let Some(nearest_expiration) = Requester::find_nearest_expiration(&expirations, &target_expiration_date_ny) {
-                                log::info!("Using nearest expiration date: {:?}", nearest_expiration);
-                                let expiration_date_ny = nearest_expiration;
-                                
-                                // Continue with option chain query using the nearest expiration date
-                                match requester
-                                    .query_option_chain(
-                                        &[
-                                            (symbol_list[0], (225.0, 235.0)), // Example symbol with its strike range
-                                        ],
-                                        &expiration_date_ny,
-                                        constants::MIN_OPEN_INTEREST,
-                                        &OptionChainSide::Put,
-                                    )
-                                    .await
-                                {
-                                    Ok(option_chain) => {
-                                        log::info!("Successfully queried option chain for {:?}", symbol_list);
-                                        // Log the output as JSON string
-                                        match serde_json::to_string_pretty(&option_chain) {
-                                            Ok(json_str) => {
-                                                log::info!("Option chain data: {}", json_str);
-                                            }
-                                            Err(err) => {
-                                                log::error!(
-                                                    "Failed to serialize option chain to JSON: {}",
-                                                    err
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(err) => log::error!("Error querying option chain: {}", err),
-                                }
-                            } else {
-                                log::error!("Failed to find nearest expiration date");
-                            }
-                        }
-                        Err(err) => log::error!("Error fetching option expirations: {}", err),
-                    }
+            // Initialize Tiger API requester
+            let requester = match tiger::api_caller::Requester::new().await {
+                Some(requester) => requester,
+                None => {
+                    log::error!("Failed to initialize Tiger API requester");
+                    return;
                 }
-                None => log::error!("Failed to initialize Tiger API requester"),
+            };
+
+            log::info!("Successfully connected to Tiger API");
+
+            // Test option chain
+            // Calculate target expiration date
+            let target_expiration_date_ny = calculate_target_expiration_date();
+            
+            // Get actual expiration dates from API and find the nearest one
+            let expirations = match requester.option_expiration(&symbol_list).await {
+                Ok(expirations) => expirations,
+                Err(err) => {
+                    log::error!("Error fetching option expirations: {}", err);
+                    return;
+                }
+            };
+
+            // Find the nearest expiration date to our target
+            let nearest_expiration = match Requester::find_nearest_expiration(&expirations, &target_expiration_date_ny) {
+                Some(nearest_expiration) => nearest_expiration,
+                None => {
+                    log::error!("Failed to find nearest expiration date");
+                    return;
+                }
+            };
+
+            log::info!("Using nearest expiration date: {:?}", nearest_expiration);
+
+            // Query and log option chain data
+            if let Err(err) = query_and_log_option_chain(&requester, &symbol_list, &nearest_expiration).await {
+                log::error!("Error querying option chain: {}", err);
             }
         }
     }
