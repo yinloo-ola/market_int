@@ -301,11 +301,10 @@ impl Requester {
         all_timestamps.sort_by_key(|&timestamp| (timestamp - target_timestamp_ms).abs());
 
         // Convert the closest timestamp back to DateTime in New York timezone
-        if let Some(&closest_timestamp) = all_timestamps.first() {
-            if let Some(dt) = chrono::Utc.timestamp_millis_opt(closest_timestamp).single() {
+        if let Some(&closest_timestamp) = all_timestamps.first()
+            && let Some(dt) = chrono::Utc.timestamp_millis_opt(closest_timestamp).single() {
                 return Some(dt.with_timezone(&New_York));
             }
-        }
 
         None
     }
@@ -597,8 +596,8 @@ impl Requester {
         strike_range: (f64, f64),
         candles: &mut Vec<model::OptionStrikeCandle>,
     ) {
-        if let Some(option) = option_data {
-            if let Some(candle) = self.parse_option_strike_candle(
+        if let Some(option) = option_data
+            && let Some(candle) = self.parse_option_strike_candle(
                 option,
                 symbol,
                 expiry,
@@ -612,7 +611,6 @@ impl Requester {
                     candles.push(candle);
                 }
             }
-        }
     }
 }
 

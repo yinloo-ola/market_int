@@ -119,7 +119,7 @@ fn percentile(values: &[f64], percentile: f64) -> model::Result<f64> {
             "Not enough values for percentile calculation".to_string(),
         ));
     }
-    if percentile < 0.0 || percentile > 1.0 {
+    if !(0.0..=1.0).contains(&percentile) {
         return Err(model::QuotesError::NotEnoughCandlesForStatistics(
             "Percentile must be between 0 and 1".to_string(),
         ));

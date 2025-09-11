@@ -127,7 +127,7 @@ pub fn option_chain_to_csv_vec(
 
     // Write header row
     writer
-        .write_record(&[
+        .write_record([
             "underlying",
             "strike",
             "underlying_price",
@@ -155,7 +155,7 @@ pub fn option_chain_to_csv_vec(
         let sharpe_ratio = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
 
         writer
-            .write_record(&[
+            .write_record([
                 &chain.underlying,
                 &chain.strike.to_string(),
                 &chain.underlying_price.to_string(),

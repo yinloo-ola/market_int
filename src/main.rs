@@ -46,7 +46,6 @@ use chrono::{Datelike, Local};
 use chrono_tz::America::New_York;
 use clap::{Parser, Subcommand};
 use dotenv::dotenv;
-use serde_json;
 
 use crate::model::OptionChainSide;
 use crate::tiger::api_caller::Requester;
@@ -201,9 +200,9 @@ async fn main() {
                     // Calculate target date (next Friday + 7 days)
                     let mut target_expiration_date = Local::now();
                     while target_expiration_date.weekday() != chrono::Weekday::Fri {
-                        target_expiration_date = target_expiration_date + chrono::Duration::days(1);
+                        target_expiration_date += chrono::Duration::days(1);
                     }
-                    target_expiration_date = target_expiration_date + chrono::Duration::days(7);
+                    target_expiration_date += chrono::Duration::days(7);
 
                     // Convert target date to New York timezone
                     let target_expiration_date_ny = target_expiration_date.with_timezone(&New_York);

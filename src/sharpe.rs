@@ -13,7 +13,7 @@ pub fn calculate_and_save(
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
     for symbol in symbols {
-        let candles = store::candle::get_candles(conn, &symbol, constants::CANDLE_COUNT as u32)?;
+        let candles = store::candle::get_candles(conn, &symbol, constants::CANDLE_COUNT)?;
 
         if candles.len() < constants::SHARPE_MIN_CANDLES {
             return Err(model::QuotesError::InsufficientReturnData(
