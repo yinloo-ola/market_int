@@ -1,5 +1,7 @@
 use base64::{Engine as _, engine::general_purpose};
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, TimeZone};
+use chrono_tz;
+use chrono_tz::America::New_York;
 use reqwest;
 use rsa::{RsaPrivateKey, pkcs1::DecodeRsaPrivateKey, pkcs1v15::Pkcs1v15Sign};
 use serde::{Deserialize, Serialize};
@@ -10,7 +12,7 @@ use std::env;
 
 // Import necessary types
 use crate::http::client::RequestError;
-use crate::model::Candle;
+use crate::model::{self, Candle};
 
 // Constants for Tiger API request parameters
 const KEY_TIGER_ID: &str = "tiger_id"; // KeyTigerID is the key for tiger_id parameter
@@ -27,6 +29,7 @@ const KEY_DEVICE_ID: &str = "device_id"; // KeyDeviceID is the key for device_id
 const METHOD_GRAB_QUOTE_PERMISSION: &str = "grab_quote_permission"; // MethodGrabQuotePermission is the method to grab quote permission.
 const METHOD_KLINE: &str = "kline"; // MethodKline is the method for kline data.
 const METHOD_OPTION_CHAIN: &str = "option_chain"; // MethodOptionChain is the method for option chain data.
+const METHOD_OPTION_EXPIRATION: &str = "option_expiration"; // MethodOptionExpiration is the method for option expiration data.
 
 // Charset is the default charset for Tiger API requests
 const CHARSET: &str = "UTF-8";
@@ -196,19 +199,147 @@ impl Requester {
         Ok(candles)
     }
 
-    // QueryOptionChain queries option chain data from the Tiger API for a given symbol.
-    pub async fn query_option_chain(&self, symbol: &str) -> Result<(), RequestError> {
+    pub async fn option_expiration(
+        &self,
+        symbols: &[&str],
+    ) -> Result<Vec<model::OptionExpiration>, RequestError> {
         let biz_content = serde_json::json!({
-            "option_basic": [{
-                "symbol": symbol,
-                "expiry": 1757649600000i64, // Example expiry timestamp
-            }],
+            "symbols": symbols,
+        });
+
+        let resp = self
+            .execute_query(METHOD_OPTION_EXPIRATION, "3.0", Some(biz_content))
+            .await
+            .map_err(|e| RequestError::Other(format!("Failed to execute query: {}", e)))?;
+
+        // Parse the response data to extract option expiration information
+        let expirations_array = resp.data.as_array().ok_or_else(|| {
+            RequestError::Other("Invalid response format: expected array".to_string())
+        })?;
+
+        let mut expirations = Vec::new();
+        for expiration_data_value in expirations_array {
+            let expiration_data = expiration_data_value.as_object().ok_or_else(|| {
+                RequestError::Other("Invalid response format: expected object".to_string())
+            })?;
+
+            // Extract values with proper error handling
+            let symbol = expiration_data
+                .get("symbol")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    RequestError::Other("Missing or invalid 'symbol' in response".to_string())
+                })?
+                .to_string();
+
+            let count = expiration_data
+                .get("count")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .ok_or_else(|| {
+                    RequestError::Other("Missing or invalid 'count' value".to_string())
+                })?;
+
+            let dates = expiration_data
+                .get("dates")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| RequestError::Other("Missing or invalid 'dates' array".to_string()))?
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(|s| s.to_string())
+                        .ok_or_else(|| RequestError::Other("Invalid date string".to_string()))
+                })
+                .collect::<Result<Vec<String>, RequestError>>()?;
+
+            let timestamps = expiration_data
+                .get("timestamps")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| {
+                    RequestError::Other("Missing or invalid 'timestamps' array".to_string())
+                })?
+                .iter()
+                .map(|v| {
+                    v.as_u64()
+                        .ok_or_else(|| RequestError::Other("Invalid timestamp value".to_string()))
+                })
+                .collect::<Result<Vec<u64>, RequestError>>()?;
+
+            let expiration = model::OptionExpiration {
+                symbol,
+                count,
+                dates,
+                timestamps,
+            };
+
+            expirations.push(expiration);
+        }
+
+        Ok(expirations)
+    }
+
+    /// Find the nearest expiration date to the specified target date
+    /// Returns the DateTime in New York timezone
+    pub fn find_nearest_expiration(
+        expirations: &[model::OptionExpiration],
+        target_date: &DateTime<chrono_tz::Tz>,
+    ) -> Option<DateTime<chrono_tz::Tz>> {
+        let target_timestamp_ms = target_date.timestamp_millis();
+        
+        // Collect all timestamps from all symbols
+        let mut all_timestamps: Vec<i64> = Vec::new();
+        for expiration in expirations {
+            for &timestamp in &expiration.timestamps {
+                all_timestamps.push(timestamp as i64);
+            }
+        }
+        
+        // Find the timestamp that is closest to our target
+        all_timestamps.sort_by_key(|&timestamp| (timestamp - target_timestamp_ms).abs());
+        
+        // Convert the closest timestamp back to DateTime in New York timezone
+        if let Some(&closest_timestamp) = all_timestamps.first() {
+            if let Some(dt) = chrono::Utc
+                .timestamp_millis_opt(closest_timestamp)
+                .single() {
+                return Some(dt.with_timezone(&New_York));
+            }
+        }
+        
+        None
+    }
+
+    // QueryOptionChain queries option chain data from the Tiger API for a given symbol.
+    pub async fn query_option_chain(
+        &self,
+        symbol_strike_ranges: &[(&str, (f64, f64))], // Stock symbols paired with their strike price ranges (min, max) inclusive.
+        expiration_date: &DateTime<chrono_tz::Tz>,   // Expiration date.
+        min_open_interest: u32,                     // Minimum open interest.
+        side: &model::OptionChainSide,
+    ) -> Result<Vec<model::OptionStrikeCandle>, RequestError> {
+        // Extract symbols from the combined structure
+        let symbols: Vec<&str> = symbol_strike_ranges.iter().map(|(symbol, _)| *symbol).collect();
+
+        // Create option_basic array for all symbols
+        let option_basic: Vec<serde_json::Value> = symbols
+            .iter()
+            .map(|&symbol| {
+                serde_json::json!({
+                    "symbol": symbol,
+                    "expiry": expiration_date.timestamp_millis(),
+                })
+            })
+            .collect();
+
+        let biz_content = serde_json::json!({
+            "option_basic": option_basic,
             "option_filter":{
                 "in_the_money": false,
                 "open_interest":{
-                    "min": 2,
+                    "min": min_open_interest,
                     "max": 1000000
                 }
+                
             }
         });
 
@@ -217,8 +348,190 @@ impl Requester {
             .await
             .map_err(|e| RequestError::Other(format!("Failed to execute query: {}", e)))?;
 
-        println!("Option chain data: {:?}", resp.data);
-        Ok(())
+        // Parse the response and return actual OptionStrikeCandle objects
+        let mut candles: Vec<model::OptionStrikeCandle> = Vec::new();
+
+        // The response data should be an array of objects with symbol, expiry, and items
+        if let Some(data_array) = resp.data.as_array() {
+            for symbol_data in data_array {
+                // Extract symbol
+                let symbol = symbol_data["symbol"].as_str().unwrap_or("").to_string();
+
+                // Find the strike range for this symbol
+                let strike_range = symbol_strike_ranges
+                    .iter()
+                    .find(|(s, _)| *s == symbol.as_str())
+                    .map(|(_, strike_range)| *strike_range);
+                
+                if strike_range.is_none() {
+                    // Skip symbols not in our original request
+                    continue;
+                }
+                let strike_range = strike_range.unwrap();
+
+                // Extract expiry timestamp
+                let expiry_timestamp = symbol_data["expiry"].as_i64().unwrap_or(0);
+
+                // Convert expiry timestamp to string format
+                let expiry = if expiry_timestamp > 0 {
+                    // Convert timestamp to datetime string
+                    if let Some(expiry_dt) = chrono::Local
+                        .timestamp_millis_opt(expiry_timestamp)
+                        .single()
+                    {
+                        expiry_dt.format("%Y-%m-%d").to_string()
+                    } else {
+                        "Unknown".to_string()
+                    }
+                } else {
+                    "Unknown".to_string()
+                };
+
+                // Process items (option strikes)
+                if let Some(items_array) = symbol_data["items"].as_array() {
+                    for item in items_array {
+                        // Process call option if side is Call or side is not specified
+                        if matches!(side, model::OptionChainSide::Call) {
+                            if let Some(call_option) = item["call"].as_object() {
+                                if let Some(candle) = self.parse_option_strike_candle(
+                                    call_option,
+                                    &symbol,
+                                    &expiry,
+                                    model::OptionChainSide::Call,
+                                    expiration_date,
+                                    strike_range,
+                                ) {
+                                    // Filter by strike range for this symbol
+                                    let (min_strike, max_strike) = strike_range;
+                                    if candle.strike >= min_strike && candle.strike <= max_strike {
+                                        candles.push(candle);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Process put option if side is Put or side is not specified
+                        if matches!(side, model::OptionChainSide::Put) {
+                            if let Some(put_option) = item["put"].as_object() {
+                                if let Some(candle) = self.parse_option_strike_candle(
+                                    put_option,
+                                    &symbol,
+                                    &expiry,
+                                    model::OptionChainSide::Put,
+                                    expiration_date,
+                                    strike_range,
+                                ) {
+                                    // Filter by strike range for this symbol
+                                    let (min_strike, max_strike) = strike_range;
+                                    if candle.strike >= min_strike && candle.strike <= max_strike {
+                                        candles.push(candle);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(candles)
+    }
+
+    // Helper function to parse an option strike into an OptionStrikeCandle
+    fn parse_option_strike_candle(
+        &self,
+        option_data: &serde_json::Map<String, serde_json::Value>,
+        symbol: &str,
+        expiry: &str,
+        side: model::OptionChainSide,
+        expiration_date: &DateTime<chrono_tz::Tz>,
+        strike_range: (f64, f64),
+    ) -> Option<model::OptionStrikeCandle> {
+        // Extract required fields
+        let strike_str = option_data.get("strike")?.as_str()?;
+        let strike: f64 = strike_str.parse().ok()?;
+
+        let bid = option_data
+            .get("bidPrice")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let ask = option_data
+            .get("askPrice")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let last = option_data
+            .get("latestPrice")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let bid_size = option_data
+            .get("bidSize")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let ask_size = option_data
+            .get("askSize")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let volume = option_data
+            .get("volume")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let open_interest = option_data
+            .get("openInterest")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        // Calculate mid price
+        let mid = if bid > 0.0 && ask > 0.0 {
+            (bid + ask) / 2.0
+        } else if bid > 0.0 {
+            bid
+        } else if ask > 0.0 {
+            ask
+        } else {
+            last
+        };
+
+        // Calculate days to expiration
+        let now = chrono::Utc::now();
+        // Convert expiration_date to UTC for comparison
+        let expiration_utc = expiration_date.with_timezone(&chrono::Utc);
+        let dte = (expiration_utc - now).num_days() as u32;
+
+        // For now, we'll set some default values for fields we can't easily derive
+        // In a real implementation, these might come from additional API calls or calculations
+        let underlying_price = 0.0; // This would need to come from a separate quote
+        let rate_of_return = format!(
+            "{:.3}",
+            mid / strike / num_of_weeks(dte) * 52.0
+        )
+        .parse()
+        .unwrap();
+        let strike_from = strike_range.0;
+        let strike_to = strike_range.1;
+
+        // Create timestamp strings
+        let updated = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+        Some(model::OptionStrikeCandle {
+            underlying: symbol.to_string(),
+            strike,
+            underlying_price,
+            side,
+            bid,
+            mid,
+            ask,
+            bid_size,
+            ask_size,
+            last,
+            expiration: expiry.to_string(),
+            updated,
+            dte,
+            volume,
+            open_interest,
+            rate_of_return,
+            strike_from,
+            strike_to,
+        })
     }
 
     // executeQuery executes a query to the Tiger API.
@@ -376,4 +689,15 @@ fn get_sign_content(params: &HashMap<String, String>) -> String {
     }
 
     sign_content
+}
+
+// Calculates the number of weeks given the days to expiration.
+
+// Calculates the number of weeks given the days to expiration.
+fn num_of_weeks(dte: u32) -> f64 {
+    if (5..=7).contains(&dte) {
+        1.0
+    } else {
+        (dte / 7) as f64 + (dte % 7) as f64 / 5.0
+    }
 }

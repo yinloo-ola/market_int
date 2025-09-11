@@ -42,9 +42,14 @@ mod store {
 // module storing defaults
 mod constants;
 
-use chrono::Local;
+use chrono::{Datelike, Local};
+use chrono_tz::America::New_York;
 use clap::{Parser, Subcommand};
 use dotenv::dotenv;
+use serde_json;
+
+use crate::model::OptionChainSide;
+use crate::tiger::api_caller::Requester;
 
 // Command-line argument parser.
 #[derive(Parser, Debug)]
@@ -193,11 +198,58 @@ async fn main() {
                     // }
 
                     // Test option chain
-                    match requester.query_option_chain(&symbol_list[0]).await {
-                        Ok(_) => {
-                            log::info!("Successfully queried option chain for {}", symbol_list[0])
+                    // Calculate target date (next Friday + 7 days)
+                    let mut target_expiration_date = Local::now();
+                    while target_expiration_date.weekday() != chrono::Weekday::Fri {
+                        target_expiration_date = target_expiration_date + chrono::Duration::days(1);
+                    }
+                    target_expiration_date = target_expiration_date + chrono::Duration::days(7);
+
+                    // Convert target date to New York timezone
+                    let target_expiration_date_ny = target_expiration_date.with_timezone(&New_York);
+                    
+                    // Get actual expiration dates from API and find the nearest one
+                    match requester.option_expiration(&symbol_list).await {
+                        Ok(expirations) => {
+                            // Find the nearest expiration date to our target
+                            if let Some(nearest_expiration) = Requester::find_nearest_expiration(&expirations, &target_expiration_date_ny) {
+                                log::info!("Using nearest expiration date: {:?}", nearest_expiration);
+                                let expiration_date_ny = nearest_expiration;
+                                
+                                // Continue with option chain query using the nearest expiration date
+                                match requester
+                                    .query_option_chain(
+                                        &[
+                                            (symbol_list[0], (225.0, 235.0)), // Example symbol with its strike range
+                                        ],
+                                        &expiration_date_ny,
+                                        constants::MIN_OPEN_INTEREST,
+                                        &OptionChainSide::Put,
+                                    )
+                                    .await
+                                {
+                                    Ok(option_chain) => {
+                                        log::info!("Successfully queried option chain for {:?}", symbol_list);
+                                        // Log the output as JSON string
+                                        match serde_json::to_string_pretty(&option_chain) {
+                                            Ok(json_str) => {
+                                                log::info!("Option chain data: {}", json_str);
+                                            }
+                                            Err(err) => {
+                                                log::error!(
+                                                    "Failed to serialize option chain to JSON: {}",
+                                                    err
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(err) => log::error!("Error querying option chain: {}", err),
+                                }
+                            } else {
+                                log::error!("Failed to find nearest expiration date");
+                            }
                         }
-                        Err(err) => log::error!("Error querying option chain: {}", err),
+                        Err(err) => log::error!("Error fetching option expirations: {}", err),
                     }
                 }
                 None => log::error!("Failed to initialize Tiger API requester"),

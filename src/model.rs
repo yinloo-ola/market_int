@@ -8,10 +8,10 @@ use std::{
 
 use csv::Writer;
 use rusqlite::{
-    types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef},
     ToSql,
+    types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use telegram_bot_api::bot::APIResponseError;
 
 use crate::http::client;
@@ -84,6 +84,15 @@ impl FromSql for OptionChainSide {
             _ => Err(FromSqlError::InvalidType),
         }
     }
+}
+
+/// Structure representing option expiration data.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OptionExpiration {
+    pub symbol: String,
+    pub count: u32,
+    pub dates: Vec<String>,
+    pub timestamps: Vec<u64>,
 }
 
 /// Structure representing a candle for an option strike.
