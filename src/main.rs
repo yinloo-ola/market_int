@@ -82,11 +82,11 @@ async fn query_and_log_option_chain(
         .await?;
 
     log::info!("Successfully queried option chain for {:?}", symbol_list);
-    
+
     // Serialize and log the output as JSON string
     let json_str = serde_json::to_string_pretty(&option_chain)?;
     log::info!("Option chain data: {}", json_str);
-    
+
     Ok(())
 }
 
@@ -227,7 +227,7 @@ async fn main() {
             // Test option chain
             // Calculate target expiration date
             let target_expiration_date_ny = calculate_target_expiration_date();
-            
+
             // Get actual expiration dates from API and find the nearest one
             let expirations = match requester.option_expiration(&symbol_list).await {
                 Ok(expirations) => expirations,
@@ -238,7 +238,10 @@ async fn main() {
             };
 
             // Find the nearest expiration date to our target
-            let nearest_expiration = match Requester::find_nearest_expiration(&expirations, &target_expiration_date_ny) {
+            let nearest_expiration = match Requester::find_nearest_expiration(
+                &expirations,
+                &target_expiration_date_ny,
+            ) {
                 Some(nearest_expiration) => nearest_expiration,
                 None => {
                     log::error!("Failed to find nearest expiration date");
@@ -249,7 +252,9 @@ async fn main() {
             log::info!("Using nearest expiration date: {:?}", nearest_expiration);
 
             // Query and log option chain data
-            if let Err(err) = query_and_log_option_chain(&requester, &symbol_list, &nearest_expiration).await {
+            if let Err(err) =
+                query_and_log_option_chain(&requester, &symbol_list, &nearest_expiration).await
+            {
                 log::error!("Error querying option chain: {}", err);
             }
         }

@@ -302,9 +302,10 @@ impl Requester {
 
         // Convert the closest timestamp back to DateTime in New York timezone
         if let Some(&closest_timestamp) = all_timestamps.first()
-            && let Some(dt) = chrono::Utc.timestamp_millis_opt(closest_timestamp).single() {
-                return Some(dt.with_timezone(&New_York));
-            }
+            && let Some(dt) = chrono::Utc.timestamp_millis_opt(closest_timestamp).single()
+        {
+            return Some(dt.with_timezone(&New_York));
+        }
 
         None
     }
@@ -604,13 +605,14 @@ impl Requester {
                 side,
                 expiration_date,
                 strike_range,
-            ) {
-                // Filter by strike range for this symbol
-                let (min_strike, max_strike) = strike_range;
-                if candle.strike >= min_strike && candle.strike <= max_strike {
-                    candles.push(candle);
-                }
+            )
+        {
+            // Filter by strike range for this symbol
+            let (min_strike, max_strike) = strike_range;
+            if candle.strike >= min_strike && candle.strike <= max_strike {
+                candles.push(candle);
             }
+        }
     }
 }
 

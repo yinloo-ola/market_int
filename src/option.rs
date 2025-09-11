@@ -2,6 +2,7 @@ use core::str;
 use std::env;
 
 use chrono::{DateTime, Datelike, Days, Local, Timelike, Weekday};
+use chrono_tz::America::New_York;
 use rusqlite::Connection;
 use std::collections::HashMap;
 use telegram_bot_api::{
@@ -11,11 +12,13 @@ use telegram_bot_api::{
 
 use crate::{
     constants,
-    marketdata::api_caller,
+    http::client,
     model::{self, QuotesError},
     store::{candle, option_chain, sharpe_ratio, true_range},
     symbols,
+    tiger::api_caller::Requester,
 };
+use tokio::time::{Duration, sleep};
 
 /// Pulls option chains from the API based on ranges of symbols from the database.
 pub async fn retrieve_option_chains_base_on_ranges(
@@ -28,29 +31,92 @@ pub async fn retrieve_option_chains_base_on_ranges(
     // Initialize the option_strike table in the database.
     option_chain::create_table(&conn)?;
 
+    // Initialize Tiger API requester
+    let requester = match Requester::new().await {
+        Some(requester) => requester,
+        None => {
+            log::error!("Failed to initialize Tiger API requester");
+            return Err(model::QuotesError::HttpError(client::RequestError::Other(
+                "Failed to initialize Tiger API requester".into(),
+            )));
+        }
+    };
+
     let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
 
-    for symbol in &symbols {
-        let true_range_ratio = true_range::get_true_range(&conn, symbol)?;
-        let latest_candle = &candle::get_candles(&conn, symbol, 1)?[0];
-        let safety_range =
-            (true_range_ratio.percentile_range - true_range_ratio.ema_range).abs() * 0.1;
-        let v1 = latest_candle.close * (1.0 - true_range_ratio.ema_range);
-        let v2 = latest_candle.close * (1.0 - true_range_ratio.percentile_range);
-        let mut strike_range = match v1 < v2 {
-            true => (v1, v2),
-            false => (v2, v1),
-        }; // (smaller,bigger)
-        strike_range.1 *= 1.0 - safety_range; // decrement bigger value by safety_range
+    // Process symbols in batches of 10 (Tiger API limit)
+    for chunk in symbols.chunks(10) {
+        // Prepare symbol-strike range pairs for this batch
+        let mut symbol_strike_ranges: Vec<(&str, (f64, f64))> = Vec::new();
 
-        let chains = api_caller::option_chain(
-            symbol,
-            strike_range,
-            &get_expiration_date_range(),
-            constants::MIN_OPEN_INTEREST,
-            side,
-        )
-        .await;
+        // Collect strike ranges for all symbols in this batch
+        for symbol in chunk {
+            let true_range_ratio = true_range::get_true_range(&conn, symbol)?;
+            let latest_candle = &candle::get_candles(&conn, symbol, 1)?[0];
+            let safety_range =
+                (true_range_ratio.percentile_range - true_range_ratio.ema_range).abs() * 0.1;
+            let v1 = latest_candle.close * (1.0 - true_range_ratio.ema_range);
+            let v2 = latest_candle.close * (1.0 - true_range_ratio.percentile_range);
+            let mut strike_range = match v1 < v2 {
+                true => (v1, v2),
+                false => (v2, v1),
+            }; // (smaller,bigger)
+            strike_range.1 *= 1.0 - safety_range; // decrement bigger value by safety_range
+            symbol_strike_ranges.push((symbol, strike_range));
+        }
+
+        // Get expiration date range and convert to New York timezone
+        let expiration_date_range = get_expiration_date_range();
+        // Use the option_expiration API to get the next expiry date that is at least 4 days from now
+        let target_date = expiration_date_range.0 + chrono::Duration::days(4);
+        let target_date_ny = target_date.with_timezone(&New_York);
+
+        // Get all eligible expiry dates for symbols in this batch
+        let symbols_for_expiry: Vec<&str> = symbol_strike_ranges
+            .iter()
+            .map(|&(symbol, _)| symbol)
+            .collect();
+        let expirations = match requester.option_expiration(&symbols_for_expiry).await {
+            Ok(expirations) => expirations,
+            Err(e) => {
+                log::error!("Failed to get option expirations for batch. Err: {}", e);
+                // Log which symbols failed
+                for symbol in &symbols_for_expiry {
+                    log::error!("Failed symbol in batch: {}", symbol);
+                }
+                continue; // Skip this batch and continue with the next one
+            }
+        };
+
+        // Add a 1-second sleep between API calls to avoid overwhelming the Tiger API
+        sleep(Duration::from_secs(1)).await;
+
+        // Find the nearest expiration date to our target date (4 days from now)
+        let expiration_date_ny =
+            match Requester::find_nearest_expiration(&expirations, &target_date_ny) {
+                Some(expiration_date) => expiration_date,
+                None => {
+                    log::error!("Failed to find nearest expiration date for batch");
+                    // Log which symbols failed
+                    for symbol in &symbols_for_expiry {
+                        log::error!("Failed symbol in batch: {}", symbol);
+                    }
+                    continue; // Skip this batch and continue with the next one
+                }
+            };
+
+        // Query Tiger API for option chains
+        let chains = requester
+            .query_option_chain(
+                &symbol_strike_ranges,
+                &expiration_date_ny,
+                constants::MIN_OPEN_INTEREST,
+                side,
+            )
+            .await;
+
+        // Add a 1-second sleep between API calls to avoid overwhelming the Tiger API
+        sleep(Duration::from_secs(1)).await;
 
         match chains {
             Ok(chains) => {
@@ -59,7 +125,11 @@ pub async fn retrieve_option_chains_base_on_ranges(
                 all_chains.extend(chains);
             }
             Err(e) => {
-                log::error!("Fail to retrieve option chain for {}. Err: {}", symbol, e);
+                log::error!("Fail to retrieve option chain for batch. Err: {}", e);
+                // Log which symbols failed
+                for (symbol, _) in &symbol_strike_ranges {
+                    log::error!("Failed symbol in batch: {}", symbol);
+                }
             }
         }
     }
