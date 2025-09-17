@@ -174,7 +174,7 @@ pub fn option_chain_to_csv_vec(
                 &chain.rate_of_return.to_string(),
                 &chain.strike_from.to_string(),
                 &chain.strike_to.to_string(),
-                &sharpe_ratio.to_string(),
+                &format!("{:.3}", sharpe_ratio),
             ])
             .map_err(QuotesError::CsvError)?;
     }

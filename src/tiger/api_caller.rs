@@ -475,8 +475,8 @@ impl Requester {
         let rate_of_return = format!("{:.3}", mid / strike / num_of_weeks(dte) * 52.0)
             .parse()
             .unwrap();
-        let strike_from = strike_range.0;
-        let strike_to = strike_range.1;
+        let strike_from = format!("{:.3}", strike_range.0).parse().unwrap();
+        let strike_to = format!("{:.3}", strike_range.1).parse().unwrap();
 
         // Create timestamp strings
         let updated = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -735,7 +735,7 @@ fn num_of_weeks(dte: u32) -> f64 {
 // Helper function to calculate mid price
 fn calculate_mid_price(bid: f64, ask: f64, last: f64) -> f64 {
     if bid > 0.0 && ask > 0.0 {
-        (bid + ask) / 2.0
+        format!("{:.3}", (bid + ask) / 2.0).parse().unwrap()
     } else if bid > 0.0 {
         bid
     } else if ask > 0.0 {
