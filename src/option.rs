@@ -124,9 +124,28 @@ pub async fn retrieve_option_chains_base_on_ranges(
 
         match chains {
             Ok(chains) => {
+                // Filter out chains with bid_size or ask_size equals to 0
+                // or bid and ask separated by more than 25%
+                let filtered_chains: Vec<_> = chains
+                    .into_iter()
+                    .filter(|chain| {
+                        // Check if bid_size or ask_size is 0
+                        if chain.bid_size < 3 || chain.ask_size < 3 {
+                            return false;
+                        }
+                        if chain.volume < 3 || chain.open_interest < 3 {
+                            return false;
+                        }
+                        if chain.bid < 0.03 || chain.ask < 0.05 {
+                            return false;
+                        }
+                        true
+                    })
+                    .collect();
+
                 // save to DB
-                option_chain::save_option_strike(&mut conn, &chains)?;
-                all_chains.extend(chains);
+                option_chain::save_option_strike(&mut conn, &filtered_chains)?;
+                all_chains.extend(filtered_chains);
             }
             Err(e) => {
                 log::error!("Fail to retrieve option chain for batch. Err: {}", e);
