@@ -48,11 +48,14 @@ pub async fn retrieve_option_chains_base_on_ranges(
     for chunk in symbols.chunks(10) {
         // Prepare symbol-strike range pairs for this batch
         let mut symbol_strike_ranges: Vec<(&str, (f64, f64))> = Vec::new();
+        let mut underlying_prices: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
 
         // Collect strike ranges for all symbols in this batch
         for symbol in chunk {
             let true_range_ratio = true_range::get_true_range(&conn, symbol)?;
             let latest_candle = &candle::get_candles(&conn, symbol, 1)?[0];
+            underlying_prices.insert(symbol.to_string(), latest_candle.close);
             let safety_range =
                 (true_range_ratio.percentile_range - true_range_ratio.ema_range).abs() * 0.1;
             let v1 = latest_candle.close * (1.0 - true_range_ratio.ema_range);
@@ -109,6 +112,7 @@ pub async fn retrieve_option_chains_base_on_ranges(
         let chains = requester
             .query_option_chain(
                 &symbol_strike_ranges,
+                &underlying_prices,
                 &expiration_date_ny,
                 constants::MIN_OPEN_INTEREST,
                 side,

@@ -69,12 +69,19 @@ async fn query_and_log_option_chain(
     symbol_list: &[&str],
     expiration_date_ny: &chrono::DateTime<chrono_tz::Tz>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Create a simple HashMap with underlying prices for the test symbols
+    let mut underlying_prices: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
+
+    underlying_prices.insert(symbol_list[0].to_string(), 0.0);
+
     // Query option chain using the nearest expiration date
     let option_chain = requester
         .query_option_chain(
             &[
                 (symbol_list[0], (225.0, 235.0)), // Example symbol with its strike range
             ],
+            &underlying_prices,
             expiration_date_ny,
             constants::MIN_OPEN_INTEREST,
             &OptionChainSide::Put,

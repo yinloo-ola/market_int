@@ -314,6 +314,7 @@ impl Requester {
     pub async fn query_option_chain(
         &self,
         symbol_strike_ranges: &[(&str, (f64, f64))], // Stock symbols paired with their strike price ranges (min, max) inclusive.
+        underlying_prices: &HashMap<String, f64>,    // Underlying prices for each symbol.
         expiration_date: &DateTime<chrono_tz::Tz>,   // Expiration date.
         min_open_interest: u32,                      // Minimum open interest.
         side: &model::OptionChainSide,
@@ -392,6 +393,7 @@ impl Requester {
                                 model::OptionChainSide::Call,
                                 expiration_date,
                                 strike_range,
+                                underlying_prices.get(&symbol).copied().unwrap_or(0.0),
                                 &mut candles,
                             );
                         }
@@ -406,6 +408,7 @@ impl Requester {
                                 model::OptionChainSide::Put,
                                 expiration_date,
                                 strike_range,
+                                underlying_prices.get(&symbol).copied().unwrap_or(0.0),
                                 &mut candles,
                             );
                         }
@@ -426,6 +429,7 @@ impl Requester {
         side: model::OptionChainSide,
         expiration_date: &DateTime<chrono_tz::Tz>,
         strike_range: (f64, f64),
+        underlying_price: f64,
     ) -> Option<model::OptionStrikeCandle> {
         // Extract required fields
         let strike_str = option_data.get("strike")?.as_str()?;
@@ -471,7 +475,6 @@ impl Requester {
 
         // For now, we'll set some default values for fields we can't easily derive
         // In a real implementation, these might come from additional API calls or calculations
-        let underlying_price = 0.0; // This would need to come from a separate quote
         let rate_of_return = format!("{:.3}", mid / strike / num_of_weeks(dte) * 52.0)
             .parse()
             .unwrap();
@@ -595,6 +598,7 @@ impl Requester {
         side: model::OptionChainSide,
         expiration_date: &DateTime<chrono_tz::Tz>,
         strike_range: (f64, f64),
+        underlying_price: f64,
         candles: &mut Vec<model::OptionStrikeCandle>,
     ) {
         if let Some(option) = option_data
@@ -605,6 +609,7 @@ impl Requester {
                 side,
                 expiration_date,
                 strike_range,
+                underlying_price,
             )
         {
             // Filter by strike range for this symbol
