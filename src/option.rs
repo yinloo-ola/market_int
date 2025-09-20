@@ -140,6 +140,10 @@ pub async fn retrieve_option_chains_base_on_ranges(
                         if chain.bid < 0.03 || chain.ask < 0.05 {
                             return false;
                         }
+                        // check if ask is more than 5 times of bid
+                        if chain.ask > 5.0 * chain.bid {
+                            return false;
+                        }
                         true
                     })
                     .collect();
