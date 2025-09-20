@@ -124,18 +124,19 @@ pub async fn retrieve_option_chains_base_on_ranges(
 
         match chains {
             Ok(chains) => {
-                // Filter out chains with bid_size or ask_size equals to 0
-                // or bid and ask separated by more than 25%
+                // Filter out low quality chains
                 let filtered_chains: Vec<_> = chains
                     .into_iter()
                     .filter(|chain| {
-                        // Check if bid_size or ask_size is 0
+                        // Check if bid_size or ask_size is smaller than 3
                         if chain.bid_size < 3 || chain.ask_size < 3 {
                             return false;
                         }
+                        // Check if volume or open_interest is smaller than 3
                         if chain.volume < 3 || chain.open_interest < 3 {
                             return false;
                         }
+                        // Check if bid is smaller than 0.03 or ask is smaller than 0.05
                         if chain.bid < 0.03 || chain.ask < 0.05 {
                             return false;
                         }
