@@ -16,6 +16,8 @@ mod model;
 mod quotes;
 // Average True Range (ATR) calculation.
 mod atr;
+// Maximum drop calculation.
+mod maxdrop;
 /// Pull option chains from API based on ATR retrieved from database.
 mod option;
 // Sharpe ratio calculation and storage.
@@ -30,6 +32,8 @@ mod tiger {
 mod store {
     /// Candle data storage.
     pub mod candle;
+    /// max drop storage.
+    pub mod max_drop;
     /// option range storage.
     pub mod option_chain;
     /// Sharpe ratio storage.
@@ -116,6 +120,7 @@ enum Commands {
     PublishOptionChain { symbols_file_path: String },
     PerformAll { symbols_file_path: String },
     CalculateAtr { symbols_file_path: String },
+    CalculateMaxDrop { symbols_file_path: String },
     CalculateSharpeRatio { symbols_file_path: String },
     // Test Tiger API
     TestTiger { symbols: String },
@@ -156,6 +161,13 @@ async fn main() {
             }
         }
 
+        Commands::CalculateMaxDrop { symbols_file_path } => {
+            match maxdrop::calculate_and_save(&symbols_file_path, &mut conn) {
+                Ok(_) => log::info!("Successfully calculated Max Drop and saved to DB"),
+                Err(err) => log::error!("Error calculating Max Drop: {}", err),
+            }
+        }
+
         Commands::PullOptionChain { symbols_file_path } => {
             match option::retrieve_option_chains_base_on_ranges(
                 &symbols_file_path,
@@ -188,6 +200,10 @@ async fn main() {
             match atr::calculate_and_save(&symbols_file_path, &mut conn) {
                 Ok(_) => log::info!("Successfully calculated ATR and saved to DB"),
                 Err(err) => log::error!("Error calculating ATR: {}", err),
+            }
+            match maxdrop::calculate_and_save(&symbols_file_path, &mut conn) {
+                Ok(_) => log::info!("Successfully calculated Max Drop and saved to DB"),
+                Err(err) => log::error!("Error calculating Max Drop: {}", err),
             }
             match sharpe::calculate_and_save(
                 &symbols_file_path,

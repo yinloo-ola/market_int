@@ -44,6 +44,14 @@ pub struct TrueRange {
     pub timestamp: u32,
 }
 
+#[derive(Debug)]
+pub struct MaxDrop {
+    pub symbol: String, // Symbol of the asset.
+    pub percentile_drop: f64,
+    pub ema_drop: f64,
+    pub timestamp: u32,
+}
+
 /// Represents the side of an option (call or put).
 #[derive(Debug, Serialize)]
 pub enum OptionChainSide {

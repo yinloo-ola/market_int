@@ -14,7 +14,7 @@ use crate::{
     constants,
     http::client,
     model::{self, QuotesError},
-    store::{candle, option_chain, sharpe_ratio, true_range},
+    store::{candle, max_drop, option_chain, sharpe_ratio},
     symbols,
     tiger::api_caller::Requester,
 };
@@ -53,13 +53,13 @@ pub async fn retrieve_option_chains_base_on_ranges(
 
         // Collect strike ranges for all symbols in this batch
         for symbol in chunk {
-            let true_range_ratio = true_range::get_true_range(&conn, symbol)?;
+            let max_drop_ratio = max_drop::get_max_drops(&conn, symbol)?;
             let latest_candle = &candle::get_candles(&conn, symbol, 1)?[0];
             underlying_prices.insert(symbol.to_string(), latest_candle.close);
             let safety_range =
-                (true_range_ratio.percentile_range - true_range_ratio.ema_range).abs() * 0.1;
-            let v1 = latest_candle.close * (1.0 - true_range_ratio.ema_range);
-            let v2 = latest_candle.close * (1.0 - true_range_ratio.percentile_range);
+                (max_drop_ratio.percentile_drop - max_drop_ratio.ema_drop).abs() * 0.1;
+            let v1 = latest_candle.close * (1.0 - max_drop_ratio.ema_drop);
+            let v2 = latest_candle.close * (1.0 - max_drop_ratio.percentile_drop);
             let mut strike_range = match v1 < v2 {
                 true => (v1, v2),
                 false => (v2, v1),

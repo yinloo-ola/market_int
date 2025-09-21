@@ -98,7 +98,7 @@ fn ema(prev: f64, current: f64, multiplier: f64) -> f64 {
     current * multiplier + prev * (1.0 - multiplier)
 }
 
-fn exponential_moving_average(array: &[f64], period: u32) -> model::Result<f64> {
+pub fn exponential_moving_average(array: &[f64], period: u32) -> model::Result<f64> {
     if array.len() < period as usize {
         return Err(model::QuotesError::NotEnoughCandlesForStatistics(format!(
             "Not enough candles for EMA calculation (period: {})",
@@ -113,7 +113,7 @@ fn exponential_moving_average(array: &[f64], period: u32) -> model::Result<f64> 
     Ok(ema_value)
 }
 
-fn percentile(values: &[f64], percentile: f64) -> model::Result<f64> {
+pub fn percentile(values: &[f64], percentile: f64) -> model::Result<f64> {
     if values.is_empty() {
         return Err(model::QuotesError::NotEnoughCandlesForStatistics(
             "Not enough values for percentile calculation".to_string(),
