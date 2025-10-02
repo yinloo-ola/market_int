@@ -14,10 +14,10 @@ pub fn create_table(conn: &Connection) -> Result<()> {
         [],
     )?;
     match conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_symbol ON max_drop (symbol);",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_max_drop_symbol ON max_drop (symbol);",
         [],
     ) {
-        Ok(_) => log::info!("Successfully created unique index idx_symbol on max_drop.symbol"),
+        Ok(_) => log::info!("Successfully created unique index idx_max_drop_symbol on max_drop.symbol"),
         Err(e) => {
             log::error!("Failed to create unique index on max_drop.symbol: {}", e);
             return Err(e);

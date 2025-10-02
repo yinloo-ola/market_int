@@ -13,8 +13,9 @@ pub fn create_table(conn: &Connection) -> Result<()> {
         );",
         [],
     )?;
+    conn.execute("DROP INDEX IF EXISTS idx_symbol;", [])?;
     conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_symbol ON true_range (symbol);",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_true_range_symbol ON true_range (symbol);",
         [],
     )?;
     Ok(())

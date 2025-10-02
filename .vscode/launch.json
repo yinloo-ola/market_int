@@ -10,9 +10,12 @@
             "name": "Debug",
             "program": "${workspaceFolder}/target/debug/market_int",
             "args": [
-                "test-tiger",
-                "AAPL,GOOG"
+                "perform-all",
+                "data/symbols.csv"
             ],
+            "env": {
+                "RUST_LOG": "debug",
+            },
             "cwd": "${workspaceFolder}"
         }
     ]
