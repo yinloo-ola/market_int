@@ -1,6 +1,6 @@
 ## Building Docker Image
 
-- docker build -t us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:x.x.x .
+- docker build --platform linux/amd64 -t us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:x.x.x .
 
 ## Pushing Docker Image
 
