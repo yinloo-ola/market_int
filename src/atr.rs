@@ -60,7 +60,7 @@ pub fn calculate_and_save(
 
         // Calculate the ATR for the candles.
         let trs = true_ranges_ratio(&weekly_candles);
-        let ema_atr = exponential_moving_average(&trs, 4)?;
+        let ema_atr = exponential_moving_average(&trs, 5);
         let percentile_atr = percentile(&trs, constants::PERCENTILE)?;
 
         true_range_vec.push(model::TrueRange {
@@ -98,19 +98,21 @@ fn ema(prev: f64, current: f64, multiplier: f64) -> f64 {
     current * multiplier + prev * (1.0 - multiplier)
 }
 
-pub fn exponential_moving_average(array: &[f64], period: u32) -> model::Result<f64> {
+pub fn exponential_moving_average(array: &[f64], period: u32) -> f64 {
+    if array.is_empty() {
+        return 0.0;
+    }
     if array.len() < period as usize {
-        return Err(model::QuotesError::NotEnoughCandlesForStatistics(format!(
-            "Not enough candles for EMA calculation (period: {})",
-            period
-        )));
+        // return avg of the array if not enough data points
+        let sum: f64 = array.iter().sum();
+        return sum / array.len() as f64;
     }
     let multiplier = 2.0 / (period as f64 + 1.0);
     let mut ema_value = array[0]; // Initialize with the first value
     for i in 1..array.len() {
         ema_value = ema(ema_value, array[i], multiplier);
     }
-    Ok(ema_value)
+    ema_value
 }
 
 pub fn percentile(values: &[f64], percentile: f64) -> model::Result<f64> {

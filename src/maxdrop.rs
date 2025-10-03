@@ -24,6 +24,7 @@ pub fn calculate_and_save(
         let max_drops: Vec<f64> = candles
             .chunks(5)
             .map(|chunk| calculate_max_drop(chunk))
+            .filter(|&drop| drop > 0.0)
             .collect();
 
         // Need at least 4 chunks (20 candles) for meaningful statistics
@@ -35,7 +36,7 @@ pub fn calculate_and_save(
             continue;
         }
 
-        let ema_drop = atr::exponential_moving_average(&max_drops, 4)?;
+        let ema_drop = atr::exponential_moving_average(&max_drops, 5);
         let percentile_drop = atr::percentile(&max_drops, constants::PERCENTILE)?;
 
         max_drop_vec.push(model::MaxDrop {
