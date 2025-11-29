@@ -5,8 +5,6 @@ use crate::{
 };
 use rusqlite::Connection;
 
-
-
 pub fn calculate_and_save(
     symbols_file_path: &str, // Path to the file containing symbols.
     conn: &mut Connection,   // Database connection.
@@ -49,18 +47,33 @@ pub fn calculate_and_save(
             let percentile_drop = atr::percentile(&max_drops, constants::PERCENTILE)?;
 
             // Save the specific period data
-            store::max_drop::save_max_drop_period(conn, &symbol, period, percentile_drop, ema_drop, timestamp)?;
-            
-            log::info!("Calculated {}-day max drop for {}: percentile={:.4}, ema={:.4}", 
-                      period, symbol, percentile_drop, ema_drop);
+            store::max_drop::save_max_drop_period(
+                conn,
+                &symbol,
+                period,
+                percentile_drop,
+                ema_drop,
+                timestamp,
+            )?;
+
+            log::info!(
+                "Calculated {}-day max drop for {}: percentile={:.4}, ema={:.4}",
+                period,
+                symbol,
+                percentile_drop,
+                ema_drop
+            );
         } else {
             log::warn!(
                 "Not enough {}-day chunks for {}, need at least 2 chunks, found {} chunks",
-                period, symbol, max_drops.len()
+                period,
+                symbol,
+                max_drops.len()
             );
         }
     }
 
+    log::info!("Completed max drop calculation for period {}", period);
     Ok(())
 }
 
