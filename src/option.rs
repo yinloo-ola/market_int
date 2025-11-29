@@ -13,6 +13,7 @@ use telegram_bot_api::{
 use crate::{
     constants,
     http::client,
+    maxdrop,
     model::{self, QuotesError},
     store::{candle, max_drop, option_chain, sharpe_ratio},
     symbols,
@@ -20,11 +21,19 @@ use crate::{
 };
 use tokio::time::{Duration, sleep};
 
-/// Pulls option chains from the API based on ranges of symbols from the database.
-pub async fn retrieve_option_chains_base_on_ranges(
+/// Enum to represent different option expiry timeframes
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExpiryTimeframe {
+    Short,  // ~5 days (1 week)
+    Medium, // ~20 days (4 weeks)
+}
+
+/// Pulls option chains with configurable expiry timeframe
+pub async fn retrieve_option_chains_with_expiry(
     symbols_file_path: &str, // Path to the file containing symbols.
     side: &model::OptionChainSide,
-    mut conn: Connection, // Database connection.
+    conn: &mut Connection, // Database connection.
+    expiry_timeframe: ExpiryTimeframe,
 ) -> model::Result<()> {
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
@@ -53,12 +62,17 @@ pub async fn retrieve_option_chains_base_on_ranges(
 
         // Collect strike ranges for all symbols in this batch
         for symbol in chunk {
-            let (percentile_drop_5, ema_drop_5) = max_drop::get_max_drop(&conn, symbol, 5)?;
+            let period = if expiry_timeframe == ExpiryTimeframe::Medium {
+                20
+            } else {
+                5
+            };
+            let (percentile_drop, ema_drop) = max_drop::get_max_drop(&conn, symbol, period)?;
             let latest_candle = &candle::get_candles(&conn, symbol, 1)?[0];
             underlying_prices.insert(symbol.to_string(), latest_candle.close);
-            let safety_range = (percentile_drop_5 - ema_drop_5).abs() * 0.1;
-            let v1 = latest_candle.close * (1.0 - ema_drop_5);
-            let v2 = latest_candle.close * (1.0 - percentile_drop_5);
+            let safety_range = (percentile_drop - ema_drop).abs() * 0.1;
+            let v1 = latest_candle.close * (1.0 - ema_drop);
+            let v2 = latest_candle.close * (1.0 - percentile_drop);
             let mut strike_range = match v1 < v2 {
                 true => (v1, v2),
                 false => (v2, v1),
@@ -67,10 +81,9 @@ pub async fn retrieve_option_chains_base_on_ranges(
             symbol_strike_ranges.push((symbol, strike_range));
         }
 
-        // Get expiration date range and convert to New York timezone
-        let expiration_date_range = get_expiration_date_range();
-        // Use the option_expiration API to get the next expiry date that is at least 4 days from now
-        let target_date = expiration_date_range.0 + chrono::Duration::days(4);
+        // Get expiration date range based on timeframe and convert to New York timezone
+        let expiration_date = get_expiration_date(expiry_timeframe);
+        let target_date = expiration_date;
         let target_date_ny = target_date.with_timezone(&New_York);
 
         // Get all eligible expiry dates for symbols in this batch
@@ -148,7 +161,7 @@ pub async fn retrieve_option_chains_base_on_ranges(
                     .collect();
 
                 // save to DB
-                option_chain::save_option_strike(&mut conn, &filtered_chains)?;
+                option_chain::save_option_strike(conn, &filtered_chains)?;
                 all_chains.extend(filtered_chains);
             }
             Err(e) => {
@@ -180,19 +193,37 @@ pub async fn retrieve_option_chains_base_on_ranges(
     publish_to_telegram(&all_chains, &sharpe_ratios).await
 }
 
-/// Calculates the range of expiration dates to use when fetching option chains.
-/// The range is determined based on the current day of the week.
-/// Returns a tuple containing the start and end dates of the expiration date range.
-fn get_expiration_date_range() -> (DateTime<Local>, DateTime<Local>) {
+/// Calculates the expiration date based on the specified timeframe.
+/// For Short timeframe: returns date for ~1 week expiry (5-7 days)
+/// For Medium timeframe: returns date for ~4 weeks expiry (20-28 days)
+fn get_expiration_date(timeframe: ExpiryTimeframe) -> DateTime<Local> {
     let now = Local::now().with_hour(12).unwrap();
-    match now.weekday() {
-        Weekday::Mon => (now + Days::new(3), now + Days::new(3 + 2)), // Thur to Sat
-        Weekday::Tue => (now + Days::new(2), now + Days::new(2 + 7)), // Thur to next Sat
-        Weekday::Wed => (now + Days::new(1 + 7), now + Days::new(1 + 7 + 2)), // Next Thur to next Sat
-        Weekday::Thu => (now + Days::new(7), now + Days::new(7 + 2)), // Next Thur to next Sat
-        Weekday::Fri => (now + Days::new(6), now + Days::new(6 + 2)), // Next Thur to next Sat
-        Weekday::Sat => (now + Days::new(5), now + Days::new(5 + 2)), // Next Thur to next Sat
-        Weekday::Sun => (now + Days::new(4), now + Days::new(4 + 2)), // Next Thur to next Sat
+
+    match timeframe {
+        ExpiryTimeframe::Short => {
+            // For short timeframe (~5 days/1 week), use current logic
+            match now.weekday() {
+                Weekday::Mon => now + Days::new(5),
+                Weekday::Tue => now + Days::new(4),
+                Weekday::Wed => now + Days::new(3 + 7),
+                Weekday::Thu => now + Days::new(2 + 7),
+                Weekday::Fri => now + Days::new(1 + 7),
+                Weekday::Sat => now + Days::new(7),
+                Weekday::Sun => now + Days::new(6),
+            }
+        }
+        ExpiryTimeframe::Medium => {
+            // For medium timeframe (~20 days/4 weeks), look further ahead
+            match now.weekday() {
+                Weekday::Mon => now + Days::new(5 + 3 * 7),
+                Weekday::Tue => now + Days::new(4 + 3 * 7),
+                Weekday::Wed => now + Days::new(3 + 4 * 7),
+                Weekday::Thu => now + Days::new(2 + 4 * 7),
+                Weekday::Fri => now + Days::new(1 + 4 * 7),
+                Weekday::Sat => now + Days::new(0 + 4 * 7),
+                Weekday::Sun => now + Days::new(4 * 7 - 1),
+            }
+        }
     }
 }
 

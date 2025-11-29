@@ -52,6 +52,7 @@ use clap::{Parser, Subcommand};
 use dotenv::dotenv;
 
 use crate::model::OptionChainSide;
+use crate::option::ExpiryTimeframe;
 use crate::tiger::api_caller::Requester;
 
 // Helper function to calculate the target expiration date (next Friday + 7 days)
@@ -116,8 +117,12 @@ enum Commands {
     PullQuotes {
         symbols_file_path: String,
     },
-    // Pull option chain data.
-    PullOptionChain {
+    // Pull option chain data with 5-day expiry.
+    PullOptionChain5Day {
+        symbols_file_path: String,
+    },
+    // Pull option chain data with 20-day expiry.
+    PullOptionChain20Day {
         symbols_file_path: String,
     },
     // Publish option chain to telegram.
@@ -199,16 +204,31 @@ async fn main() {
             }
         },
 
-        Commands::PullOptionChain { symbols_file_path } => {
-            match option::retrieve_option_chains_base_on_ranges(
+        Commands::PullOptionChain5Day { symbols_file_path } => {
+            match option::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
                 &model::OptionChainSide::Put,
-                conn,
+                &mut conn,
+                ExpiryTimeframe::Short,
             )
             .await
             {
-                Ok(_) => log::info!("Successfully pulled and saved option chains"),
-                Err(err) => log::error!("Error pulling option chains: {}", err),
+                Ok(_) => log::info!("Successfully pulled and saved 5-day option chains"),
+                Err(err) => log::error!("Error pulling 5-day option chains: {}", err),
+            }
+        }
+
+        Commands::PullOptionChain20Day { symbols_file_path } => {
+            match option::retrieve_option_chains_with_expiry(
+                &symbols_file_path,
+                &model::OptionChainSide::Put,
+                &mut conn,
+                ExpiryTimeframe::Medium,
+            )
+            .await
+            {
+                Ok(_) => log::info!("Successfully pulled and saved 20-day option chains"),
+                Err(err) => log::error!("Error pulling 20-day option chains: {}", err),
             }
         }
 
@@ -246,15 +266,30 @@ async fn main() {
                 Ok(_) => log::info!("Successfully calculated and saved Sharpe ratios"),
                 Err(err) => log::error!("Error calculating Sharpe ratios: {}", err),
             }
-            match option::retrieve_option_chains_base_on_ranges(
+            // Pull option chains with 5-day expiry (short timeframe)
+            match option::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
                 &model::OptionChainSide::Put,
-                conn,
+                &mut conn,
+                ExpiryTimeframe::Short,
             )
             .await
             {
-                Ok(_) => log::info!("Successfully pulled and saved option chains"),
-                Err(err) => log::error!("Error pulling option chains: {}", err),
+                Ok(_) => log::info!("Successfully pulled and saved 5-day option chains"),
+                Err(err) => log::error!("Error pulling 5-day option chains: {}", err),
+            }
+
+            // Pull option chains with 20-day expiry (medium timeframe) - reuse the same connection
+            match option::retrieve_option_chains_with_expiry(
+                &symbols_file_path,
+                &model::OptionChainSide::Put,
+                &mut conn,
+                ExpiryTimeframe::Medium,
+            )
+            .await
+            {
+                Ok(_) => log::info!("Successfully pulled and saved 20-day option chains"),
+                Err(err) => log::error!("Error pulling 20-day option chains: {}", err),
             }
         }
 
