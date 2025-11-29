@@ -45,8 +45,9 @@ pub struct TrueRange {
 }
 
 #[derive(Debug)]
-pub struct MaxDrop {
-    pub symbol: String, // Symbol of the asset.
+pub struct MaxDropPeriod {
+    pub symbol: String,
+    pub period: usize,
     pub percentile_drop: f64,
     pub ema_drop: f64,
     pub timestamp: u32,

@@ -113,17 +113,34 @@ struct Args {
 #[derive(Subcommand, Debug)]
 enum Commands {
     // Pull quotes for specified symbols.
-    PullQuotes { symbols_file_path: String },
+    PullQuotes {
+        symbols_file_path: String,
+    },
     // Pull option chain data.
-    PullOptionChain { symbols_file_path: String },
+    PullOptionChain {
+        symbols_file_path: String,
+    },
     // Publish option chain to telegram.
-    PublishOptionChain { symbols_file_path: String },
-    PerformAll { symbols_file_path: String },
-    CalculateAtr { symbols_file_path: String },
-    CalculateMaxDrop { symbols_file_path: String },
-    CalculateSharpeRatio { symbols_file_path: String },
+    PublishOptionChain {
+        symbols_file_path: String,
+    },
+    PerformAll {
+        symbols_file_path: String,
+    },
+    CalculateAtr {
+        symbols_file_path: String,
+    },
+    CalculateMaxDrop {
+        symbols_file_path: String,
+        period: String, // "5" or "20"
+    },
+    CalculateSharpeRatio {
+        symbols_file_path: String,
+    },
     // Test Tiger API
-    TestTiger { symbols: String },
+    TestTiger {
+        symbols: String,
+    },
 }
 
 #[tokio::main]
@@ -161,12 +178,26 @@ async fn main() {
             }
         }
 
-        Commands::CalculateMaxDrop { symbols_file_path } => {
-            match maxdrop::calculate_and_save(&symbols_file_path, &mut conn) {
-                Ok(_) => log::info!("Successfully calculated Max Drop and saved to DB"),
-                Err(err) => log::error!("Error calculating Max Drop: {}", err),
+        Commands::CalculateMaxDrop {
+            symbols_file_path,
+            period,
+        } => match period.parse::<usize>() {
+            Ok(period_num) => {
+                match maxdrop::calculate_and_save(&symbols_file_path, &mut conn, period_num) {
+                    Ok(_) => log::info!(
+                        "Successfully calculated {}-day Max Drop and saved to DB",
+                        period_num
+                    ),
+                    Err(err) => log::error!("Error calculating Max Drop: {}", err),
+                }
             }
-        }
+            Err(_) => {
+                log::error!(
+                    "Invalid period: {}. Use a positive integer (e.g., 5, 10, 20)",
+                    period
+                );
+            }
+        },
 
         Commands::PullOptionChain { symbols_file_path } => {
             match option::retrieve_option_chains_base_on_ranges(
@@ -197,13 +228,15 @@ async fn main() {
                 Ok(_) => log::info!("Successfully pulled and saved quotes"),
                 Err(err) => log::error!("Error pulling and saving quotes: {}", err),
             }
-            match atr::calculate_and_save(&symbols_file_path, &mut conn) {
-                Ok(_) => log::info!("Successfully calculated ATR and saved to DB"),
-                Err(err) => log::error!("Error calculating ATR: {}", err),
+            // Calculate 5-day max drops
+            match maxdrop::calculate_and_save(&symbols_file_path, &mut conn, 5) {
+                Ok(_) => log::info!("Successfully calculated 5-day Max Drop and saved to DB"),
+                Err(err) => log::error!("Error calculating 5-day Max Drop: {}", err),
             }
-            match maxdrop::calculate_and_save(&symbols_file_path, &mut conn) {
-                Ok(_) => log::info!("Successfully calculated Max Drop and saved to DB"),
-                Err(err) => log::error!("Error calculating Max Drop: {}", err),
+            // Calculate 20-day max drops
+            match maxdrop::calculate_and_save(&symbols_file_path, &mut conn, 20) {
+                Ok(_) => log::info!("Successfully calculated 20-day Max Drop and saved to DB"),
+                Err(err) => log::error!("Error calculating 20-day Max Drop: {}", err),
             }
             match sharpe::calculate_and_save(
                 &symbols_file_path,

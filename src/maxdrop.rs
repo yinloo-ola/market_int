@@ -1,54 +1,66 @@
 use crate::{
     atr, constants, model,
-    store::{self, candle, max_drop},
+    store::{self, candle},
     symbols,
 };
 use rusqlite::Connection;
 
+
+
 pub fn calculate_and_save(
     symbols_file_path: &str, // Path to the file containing symbols.
-    conn: &mut Connection,   // Database connection.)
+    conn: &mut Connection,   // Database connection.
+    period: usize,           // Period for max drop calculation (5, 10, 20, etc.).
 ) -> model::Result<()> {
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
-    // Initialize the candle table in the database.
+    // Initialize the max_drop tables in the database.
     store::max_drop::create_table(conn)?;
 
-    let mut max_drop_vec: Vec<model::MaxDrop> = Vec::with_capacity(symbols.len() * 5);
     // Iterate over each symbol.
     for symbol in symbols {
         // Fetch candle data for the current symbol from the database.
-        let candles = candle::get_candles(conn, symbol.as_str(), constants::CANDLE_COUNT)?;
+        let candles = match candle::get_candles(conn, symbol.as_str(), constants::CANDLE_COUNT) {
+            Ok(candles) => candles,
+            Err(_) => {
+                log::warn!("No candles found for {}, skipping", symbol);
+                continue;
+            }
+        };
 
-        // Split candles into chunks of 5 and calculate max drop for each chunk
+        if candles.is_empty() {
+            log::warn!("No candles found for {}, skipping", symbol);
+            continue;
+        }
+
+        let timestamp = candles.last().unwrap().timestamp;
+
+        // Calculate max drop for the specified period
         let max_drops: Vec<f64> = candles
-            .chunks(5)
+            .chunks(period)
             .map(|chunk| calculate_max_drop(chunk))
             .filter(|&drop| drop > 0.0)
             .collect();
 
-        // Need at least 4 chunks (20 candles) for meaningful statistics
-        if max_drops.len() < 4 {
+        // Need at least 2 chunks for meaningful statistics
+        if max_drops.len() >= 2 {
+            let ema_window = std::cmp::min(5, max_drops.len()) as u32; // Use smaller window if not enough data
+            let ema_drop = atr::exponential_moving_average(&max_drops, ema_window);
+            let percentile_drop = atr::percentile(&max_drops, constants::PERCENTILE)?;
+
+            // Save the specific period data
+            store::max_drop::save_max_drop_period(conn, &symbol, period, percentile_drop, ema_drop, timestamp)?;
+            
+            log::info!("Calculated {}-day max drop for {}: percentile={:.4}, ema={:.4}", 
+                      period, symbol, percentile_drop, ema_drop);
+        } else {
             log::warn!(
-                "Not enough candles for {}, skipping max drop calculation",
-                symbol
+                "Not enough {}-day chunks for {}, need at least 2 chunks, found {} chunks",
+                period, symbol, max_drops.len()
             );
-            continue;
         }
-
-        let ema_drop = atr::exponential_moving_average(&max_drops, 5);
-        let percentile_drop = atr::percentile(&max_drops, constants::PERCENTILE)?;
-
-        max_drop_vec.push(model::MaxDrop {
-            symbol: symbol.clone(),
-            percentile_drop,
-            ema_drop,
-            timestamp: candles.last().unwrap().timestamp,
-        });
     }
 
-    // Save the max drops to the database.
-    max_drop::save_max_drops(conn, &max_drop_vec)?;
     Ok(())
 }
 
