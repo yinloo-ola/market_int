@@ -53,13 +53,12 @@ pub async fn retrieve_option_chains_base_on_ranges(
 
         // Collect strike ranges for all symbols in this batch
         for symbol in chunk {
-            let max_drop_ratio = max_drop::get_max_drops(&conn, symbol)?;
+            let (percentile_drop_5, ema_drop_5) = max_drop::get_max_drop(&conn, symbol, 5)?;
             let latest_candle = &candle::get_candles(&conn, symbol, 1)?[0];
             underlying_prices.insert(symbol.to_string(), latest_candle.close);
-            let safety_range =
-                (max_drop_ratio.percentile_drop - max_drop_ratio.ema_drop).abs() * 0.1;
-            let v1 = latest_candle.close * (1.0 - max_drop_ratio.ema_drop);
-            let v2 = latest_candle.close * (1.0 - max_drop_ratio.percentile_drop);
+            let safety_range = (percentile_drop_5 - ema_drop_5).abs() * 0.1;
+            let v1 = latest_candle.close * (1.0 - ema_drop_5);
+            let v2 = latest_candle.close * (1.0 - percentile_drop_5);
             let mut strike_range = match v1 < v2 {
                 true => (v1, v2),
                 false => (v2, v1),

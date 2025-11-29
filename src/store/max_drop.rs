@@ -1,66 +1,80 @@
 use rusqlite::{Connection, Result, params};
 
-use crate::model;
-
-/// Initializes the candle table in the SQLite database.
+/// Initializes the max_drop_periods table with flexible period support.
 pub fn create_table(conn: &Connection) -> Result<()> {
+    // Drop old table if it exists (we don't need old data)
+    conn.execute("DROP TABLE IF EXISTS max_drop;", []).ok();
+    conn.execute("DROP TABLE IF EXISTS max_drop_configs;", []).ok();
+    conn.execute("DROP TABLE IF EXISTS max_drop_periods;", []).ok();
+    
+    // Create single flexible periods table
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS max_drop (
+        "CREATE TABLE IF NOT EXISTS max_drop_periods (
             symbol TEXT NOT NULL,
+            period INTEGER NOT NULL,
             percentile_drop REAL NOT NULL,
             ema_drop REAL NOT NULL,
-            timestamp INTEGER NOT NULL
+            timestamp INTEGER NOT NULL,
+            PRIMARY KEY (symbol, period)
         );",
         [],
     )?;
+    
+    // Create indexes for better performance
     match conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_max_drop_symbol ON max_drop (symbol);",
+        "CREATE INDEX IF NOT EXISTS idx_max_drop_periods_symbol ON max_drop_periods (symbol);",
         [],
     ) {
-        Ok(_) => log::info!("Successfully created unique index idx_max_drop_symbol on max_drop.symbol"),
+        Ok(_) => log::info!("Successfully created index on max_drop_periods.symbol"),
         Err(e) => {
-            log::error!("Failed to create unique index on max_drop.symbol: {}", e);
+            log::error!("Failed to create index on max_drop_periods.symbol: {}", e);
             return Err(e);
         }
     }
+    
+    match conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_max_drop_periods_period ON max_drop_periods (period);",
+        [],
+    ) {
+        Ok(_) => log::info!("Successfully created index on max_drop_periods.period"),
+        Err(e) => {
+            log::error!("Failed to create index on max_drop_periods.period: {}", e);
+            return Err(e);
+        }
+    }
+    
     Ok(())
 }
 
-/// Saves a vector of candles to the candle table.  Uses REPLACE to update existing entries.
-pub fn save_max_drops(conn: &mut Connection, max_drops: &[model::MaxDrop]) -> Result<()> {
-    let transaction = conn.transaction()?;
-    {
-        let mut stmt = transaction.prepare(
-            "INSERT OR REPLACE INTO max_drop (symbol, percentile_drop, ema_drop, timestamp)
-             VALUES (?1, ?2, ?3, ?4)",
-        )?;
-        for max_drop in max_drops {
-            stmt.execute(params![
-                max_drop.symbol,
-                max_drop.percentile_drop,
-                max_drop.ema_drop,
-                max_drop.timestamp,
-            ])
-            .map_err(|e| {
-                log::error!("Error inserting max_drop for symbol {}: {}", max_drop.symbol, e);
-                e
-            })?; // Don't ignore errors - they indicate real problems
-        }
-    }
-    transaction.commit()
+/// Saves max drop data for a specific period.
+pub fn save_max_drop_period(conn: &mut Connection, symbol: &str, period: usize, percentile_drop: f64, ema_drop: f64, timestamp: u32) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO max_drop_periods (symbol, period, percentile_drop, ema_drop, timestamp) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![symbol, period, percentile_drop, ema_drop, timestamp],
+    )?;
+    Ok(())
 }
 
-pub fn get_max_drops(conn: &Connection, symbol: &str) -> Result<model::MaxDrop> {
+/// Gets max drop data for a specific period.
+pub fn get_max_drop(conn: &Connection, symbol: &str, period: usize) -> Result<(f64, f64)> {
     conn.query_row(
-        "SELECT symbol,percentile_drop,ema_drop,timestamp FROM max_drop where symbol = ?1",
-        [symbol],
+        "SELECT percentile_drop, ema_drop FROM max_drop_periods WHERE symbol = ?1 AND period = ?2",
+        params![symbol, period],
         |row| {
-            Ok(model::MaxDrop {
-                symbol: row.get(0)?,
-                percentile_drop: row.get(1)?,
-                ema_drop: row.get(2)?,
-                timestamp: row.get(3)?,
-            })
+            Ok((row.get(0)?, row.get(1)?))
         },
     )
+}
+
+/// Gets all periods for a symbol.
+pub fn get_all_periods(conn: &Connection, symbol: &str) -> Result<Vec<(usize, f64, f64, u32)>> {
+    let mut stmt = conn.prepare(
+        "SELECT period, percentile_drop, ema_drop, timestamp FROM max_drop_periods WHERE symbol = ?1 ORDER BY period"
+    )?;
+    
+    let periods = stmt.query_map(params![symbol], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    })?;
+    
+    periods.collect()
 }
