@@ -294,7 +294,7 @@ async fn main() {
         }
 
         Commands::PublishOptionChain { symbols_file_path } => {
-            match option::publish_option_chains(&symbols_file_path, conn).await {
+            match option::publish_option_chains(&symbols_file_path, conn, 5).await {
                 Ok(_) => log::info!("Successfully published option chains"),
                 Err(err) => log::error!("Error publishing option chains: {}", err),
             }
