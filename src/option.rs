@@ -1,8 +1,8 @@
 use core::str;
-use std::env;
+use std::{env, usize};
 
 use chrono::{DateTime, Datelike, Days, Local, Timelike, Weekday};
-use chrono_tz::America::New_York;
+use chrono_tz::{America::New_York, Asia::Singapore};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use telegram_bot_api::{
@@ -13,7 +13,6 @@ use telegram_bot_api::{
 use crate::{
     constants,
     http::client,
-    maxdrop,
     model::{self, QuotesError},
     store::{candle, max_drop, option_chain, sharpe_ratio},
     symbols,
@@ -51,6 +50,12 @@ pub async fn retrieve_option_chains_with_expiry(
         }
     };
 
+    let period = if expiry_timeframe == ExpiryTimeframe::Medium {
+        20
+    } else {
+        5
+    };
+
     let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
 
     // Process symbols in batches of 10 (Tiger API limit)
@@ -62,11 +67,6 @@ pub async fn retrieve_option_chains_with_expiry(
 
         // Collect strike ranges for all symbols in this batch
         for symbol in chunk {
-            let period = if expiry_timeframe == ExpiryTimeframe::Medium {
-                20
-            } else {
-                5
-            };
             let (percentile_drop, ema_drop) = max_drop::get_max_drop(&conn, symbol, period)?;
             let latest_candle = &candle::get_candles(&conn, symbol, 1)?[0];
             underlying_prices.insert(symbol.to_string(), latest_candle.close);
@@ -190,7 +190,7 @@ pub async fn retrieve_option_chains_with_expiry(
         }
     }
 
-    publish_to_telegram(&all_chains, &sharpe_ratios).await
+    publish_to_telegram(&all_chains, &sharpe_ratios, period).await
 }
 
 /// Calculates the expiration date based on the specified timeframe.
@@ -230,6 +230,7 @@ fn get_expiration_date(timeframe: ExpiryTimeframe) -> DateTime<Local> {
 pub async fn publish_option_chains(
     symbols_file_path: &str, // Path to the file containing symbols.
     mut conn: Connection,    // Database connection.
+    period: usize,
 ) -> model::Result<()> {
     option_chain::create_table(&conn)?;
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
@@ -261,19 +262,20 @@ pub async fn publish_option_chains(
         }
     }
 
-    publish_to_telegram(&all_chains, &sharpe_ratios).await
+    publish_to_telegram(&all_chains, &sharpe_ratios, period).await
 }
 
 pub async fn publish_to_telegram(
     all_chains: &[model::OptionStrikeCandle],
     sharpe_ratios: &HashMap<String, f64>,
+    period: usize,
 ) -> model::Result<()> {
     // Save all_chains to a csv file and upload it to dropbox
     let csv = model::option_chain_to_csv_vec(all_chains, sharpe_ratios)?;
 
-    let now = Local::now();
-    let formatted_date = now.format("%Y%m%d_%H%M").to_string();
-    let filename = format!("/{}.csv", formatted_date);
+    let now_singapore = Local::now().with_timezone(&Singapore);
+    let formatted_date = now_singapore.format("%d%b_%H%M").to_string();
+    let filename = format!("/{}_{}day.csv", formatted_date, period);
 
     let token = env::var("telegram_bot_token")?;
     let chat_id = env::var("telegram_chat_id")?
