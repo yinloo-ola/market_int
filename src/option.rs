@@ -70,7 +70,7 @@ pub async fn retrieve_option_chains_with_expiry(
             let (percentile_drop, ema_drop) = max_drop::get_max_drop(&conn, symbol, period)?;
             let latest_candle = &candle::get_candles(&conn, symbol, 1)?[0];
             underlying_prices.insert(symbol.to_string(), latest_candle.close);
-            let safety_range = (percentile_drop - ema_drop).abs() * 0.1;
+            let safety_range = (percentile_drop - ema_drop).abs() * 0.02;
             let v1 = latest_candle.close * (1.0 - ema_drop);
             let v2 = latest_candle.close * (1.0 - percentile_drop);
             let mut strike_range = match v1 < v2 {

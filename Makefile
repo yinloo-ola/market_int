@@ -65,9 +65,10 @@ clean:
 
 # Docker operations
 docker-build:
-	docker build -t us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:$(tag) .
+	docker build --platform linux/amd64 -t us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:$(tag) .
 	docker push us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:$(tag)
-	@echo "remember to update job.yaml!!"
+	sed -i.bak 's|us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:[0-9.]*|us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:'$(tag)'|' job.yaml && rm -f job.yaml.bak
+	@echo "Updated job.yaml with tag $(tag)"
 
 # Google Cloud operations
 gcloud-job:
