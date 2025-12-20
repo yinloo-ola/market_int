@@ -75,17 +75,78 @@ fn calculate_adjusted_strike_range(
     (min_strike, adjusted_max_strike)
 }
 
+/// Configuration for option chain filtering
+#[derive(Debug)]
+struct OptionChainFilterConfig {
+    min_open_interest: u32,
+    min_bid_size: u32,
+    min_ask_size: u32,
+    min_volume: u32,
+    min_open_interest_value: u32,
+    min_bid_price: f64,
+    min_ask_price: f64,
+    max_ask_bid_ratio: f64,
+}
+
+impl Default for OptionChainFilterConfig {
+    fn default() -> Self {
+        Self {
+            min_open_interest: constants::MIN_OPEN_INTEREST,
+            min_bid_size: 3,
+            min_ask_size: 3,
+            min_volume: 3,
+            min_open_interest_value: 3,
+            min_bid_price: 0.03,
+            min_ask_price: 0.05,
+            max_ask_bid_ratio: 5.0,
+        }
+    }
+}
+
+/// Filters option chains based on quality criteria
+fn filter_option_chains(
+    chains: Vec<model::OptionStrikeCandle>,
+    config: &OptionChainFilterConfig,
+) -> Vec<model::OptionStrikeCandle> {
+    chains
+        .into_iter()
+        .filter(|chain| {
+            // Check size requirements
+            if chain.bid_size < config.min_bid_size || chain.ask_size < config.min_ask_size {
+                return false;
+            }
+            
+            // Check volume and open interest
+            if chain.volume < config.min_volume || chain.open_interest < config.min_open_interest_value {
+                return false;
+            }
+            
+            // Check price requirements
+            if chain.bid < config.min_bid_price || chain.ask < config.min_ask_price {
+                return false;
+            }
+            
+            // Check bid-ask spread ratio
+            if chain.ask > config.max_ask_bid_ratio * chain.bid {
+                return false;
+            }
+            
+            true
+        })
+        .collect()
+}
+
 /// Pulls option chains with configurable expiry timeframe
 pub async fn retrieve_option_chains_with_expiry(
-    symbols_file_path: &str, // Path to the file containing symbols.
+    symbols_file_path: &str,
     side: &model::OptionChainSide,
-    conn: &mut Connection, // Database connection.
+    conn: &mut Connection,
     expiry_timeframe: ExpiryTimeframe,
 ) -> model::Result<()> {
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
     // Initialize the option_strike table in the database.
-    option_chain::create_table(&conn)?;
+    option_chain::create_table(conn)?;
 
     // Initialize Tiger API requester
     let requester = match Requester::new().await {
@@ -152,13 +213,12 @@ pub async fn retrieve_option_chains_with_expiry(
 
         // Prepare symbol-strike range pairs for this batch with adjusted ranges
         let mut symbol_strike_ranges: Vec<(&str, (f64, f64))> = Vec::new();
-        let mut underlying_prices: std::collections::HashMap<String, f64> =
-            std::collections::HashMap::new();
+        let mut underlying_prices: HashMap<String, f64> = HashMap::new();
 
         // Collect adjusted strike ranges for all symbols in this batch
         for symbol in chunk {
-            let (percentile_drop, ema_drop) = max_drop::get_max_drop(&conn, symbol, period)?;
-            let latest_candle = &candle::get_candles(&conn, symbol, 1)?[0];
+            let (percentile_drop, ema_drop) = max_drop::get_max_drop(conn, symbol, period)?;
+            let latest_candle = &candle::get_candles(conn, symbol, 1)?[0];
             underlying_prices.insert(symbol.to_string(), latest_candle.close);
             
             let (min_strike, max_strike) = calculate_adjusted_strike_range(
@@ -189,28 +249,7 @@ pub async fn retrieve_option_chains_with_expiry(
         match chains {
             Ok(chains) => {
                 // Filter out low quality chains
-                let filtered_chains: Vec<_> = chains
-                    .into_iter()
-                    .filter(|chain| {
-                        // Check if bid_size or ask_size is smaller than 3
-                        if chain.bid_size < 3 || chain.ask_size < 3 {
-                            return false;
-                        }
-                        // Check if volume or open_interest is smaller than 3
-                        if chain.volume < 3 || chain.open_interest < 3 {
-                            return false;
-                        }
-                        // Check if bid is smaller than 0.03 or ask is smaller than 0.05
-                        if chain.bid < 0.03 || chain.ask < 0.05 {
-                            return false;
-                        }
-                        // check if ask is more than 5 times of bid
-                        if chain.ask > 5.0 * chain.bid {
-                            return false;
-                        }
-                        true
-                    })
-                    .collect();
+                let filtered_chains = filter_option_chains(chains, &OptionChainFilterConfig::default());
 
                 // save to DB
                 option_chain::save_option_strike(conn, &filtered_chains)?;
@@ -229,7 +268,7 @@ pub async fn retrieve_option_chains_with_expiry(
     // Collect Sharpe ratios for all symbols
     let mut sharpe_ratios: HashMap<String, f64> = HashMap::new();
     for symbol in &symbols {
-        match sharpe_ratio::get_sharpe_ratio(&conn, symbol) {
+        match sharpe_ratio::get_sharpe_ratio(conn, symbol) {
             Ok(Some(ratio)) => {
                 sharpe_ratios.insert(symbol.clone(), ratio);
             }
@@ -279,9 +318,10 @@ fn get_expiration_date(timeframe: ExpiryTimeframe) -> DateTime<Local> {
     }
 }
 
+/// Publishes option chains for already retrieved data
 pub async fn publish_option_chains(
-    symbols_file_path: &str, // Path to the file containing symbols.
-    mut conn: Connection,    // Database connection.
+    symbols_file_path: &str,
+    mut conn: Connection,
     period: usize,
 ) -> model::Result<()> {
     option_chain::create_table(&conn)?;
@@ -317,6 +357,7 @@ pub async fn publish_option_chains(
     publish_to_telegram(&all_chains, &sharpe_ratios, period).await
 }
 
+/// Publishes option chain data to Telegram
 pub async fn publish_to_telegram(
     all_chains: &[model::OptionStrikeCandle],
     sharpe_ratios: &HashMap<String, f64>,
@@ -353,6 +394,7 @@ pub async fn publish_to_telegram(
             reply_markup: None,
         })
         .await;
+    
     match resp {
         Ok(_) => log::info!("telegram send doc ok"),
         Err(err) => {
