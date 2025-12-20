@@ -27,6 +27,54 @@ pub enum ExpiryTimeframe {
     Medium, // ~20 days (4 weeks)
 }
 
+type NewYorkDateTime = DateTime<chrono_tz::Tz>;
+
+/// Calculates trading days between two dates, excluding weekends
+fn calculate_trading_days_to_expiry(from_date: NewYorkDateTime, to_date: NewYorkDateTime) -> u32 {
+    let mut current = from_date;
+    let mut trading_days = 0;
+    
+    while current < to_date {
+        let weekday = current.weekday();
+        // Weekday numbering: Mon=1, Tue=2, ..., Sat=6, Sun=0
+        if weekday != Weekday::Sat && weekday != Weekday::Sun {
+            trading_days += 1;
+        }
+        current = current + Days::new(1);
+    }
+    
+    trading_days
+}
+
+/// Calculates adjusted strike range based on DTE and period
+fn calculate_adjusted_strike_range(
+    underlying_price: f64,
+    percentile_drop: f64,
+    ema_drop: f64,
+    dte: u32,
+    period: usize,
+) -> (f64, f64) {
+    // Ensure minimum DTE of 1 to avoid division by zero
+    let effective_dte = dte.max(1);
+    let adjustment_factor = effective_dte as f64 / period as f64;
+    
+    // Apply adjustment to drop values
+    let adjusted_percentile_drop = percentile_drop * adjustment_factor;
+    let adjusted_ema_drop = ema_drop * adjustment_factor;
+    
+    // Calculate strike prices
+    let v1 = underlying_price * (1.0 - adjusted_ema_drop);
+    let v2 = underlying_price * (1.0 - adjusted_percentile_drop);
+    
+    let (min_strike, max_strike) = if v1 < v2 { (v1, v2) } else { (v2, v1) };
+    
+    // Apply safety range adjustment
+    let safety_range = (adjusted_percentile_drop - adjusted_ema_drop).abs() * 0.02;
+    let adjusted_max_strike = max_strike * (1.0 - safety_range);
+    
+    (min_strike, adjusted_max_strike)
+}
+
 /// Pulls option chains with configurable expiry timeframe
 pub async fn retrieve_option_chains_with_expiry(
     symbols_file_path: &str, // Path to the file containing symbols.
@@ -60,37 +108,9 @@ pub async fn retrieve_option_chains_with_expiry(
 
     // Process symbols in batches of 10 (Tiger API limit)
     for chunk in symbols.chunks(10) {
-        // Prepare symbol-strike range pairs for this batch
-        let mut symbol_strike_ranges: Vec<(&str, (f64, f64))> = Vec::new();
-        let mut underlying_prices: std::collections::HashMap<String, f64> =
-            std::collections::HashMap::new();
-
-        // Collect strike ranges for all symbols in this batch
-        for symbol in chunk {
-            let (percentile_drop, ema_drop) = max_drop::get_max_drop(&conn, symbol, period)?;
-            let latest_candle = &candle::get_candles(&conn, symbol, 1)?[0];
-            underlying_prices.insert(symbol.to_string(), latest_candle.close);
-            let safety_range = (percentile_drop - ema_drop).abs() * 0.02;
-            let v1 = latest_candle.close * (1.0 - ema_drop);
-            let v2 = latest_candle.close * (1.0 - percentile_drop);
-            let mut strike_range = match v1 < v2 {
-                true => (v1, v2),
-                false => (v2, v1),
-            }; // (smaller,bigger)
-            strike_range.1 *= 1.0 - safety_range; // decrement bigger value by safety_range
-            symbol_strike_ranges.push((symbol, strike_range));
-        }
-
-        // Get expiration date range based on timeframe and convert to New York timezone
-        let expiration_date = get_expiration_date(expiry_timeframe);
-        let target_date = expiration_date;
-        let target_date_ny = target_date.with_timezone(&New_York);
-
+        let symbols_for_expiry: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
+        
         // Get all eligible expiry dates for symbols in this batch
-        let symbols_for_expiry: Vec<&str> = symbol_strike_ranges
-            .iter()
-            .map(|&(symbol, _)| symbol)
-            .collect();
         let expirations = match requester.option_expiration(&symbols_for_expiry).await {
             Ok(expirations) => expirations,
             Err(e) => {
@@ -103,10 +123,15 @@ pub async fn retrieve_option_chains_with_expiry(
             }
         };
 
+        // Get expiration date range based on timeframe and convert to New York timezone
+        let expiration_date = get_expiration_date(expiry_timeframe);
+        let target_date = expiration_date;
+        let target_date_ny = target_date.with_timezone(&New_York);
+
         // Add a 1-second sleep between API calls to avoid overwhelming the Tiger API
         sleep(Duration::from_secs(1)).await;
 
-        // Find the nearest expiration date to our target date (4 days from now)
+        // Find the nearest expiration date to our target date
         let expiration_date_ny =
             match Requester::find_nearest_expiration(&expirations, &target_date_ny) {
                 Some(expiration_date) => expiration_date,
@@ -119,6 +144,33 @@ pub async fn retrieve_option_chains_with_expiry(
                     continue; // Skip this batch and continue with the next one
                 }
             };
+
+        // Calculate trading days to expiry
+        let current_date_ny = Local::now().with_timezone(&New_York);
+        let dte = calculate_trading_days_to_expiry(current_date_ny, expiration_date_ny);
+        log::debug!("Trading days to expiry: {} for timeframe: {:?}", dte, expiry_timeframe);
+
+        // Prepare symbol-strike range pairs for this batch with adjusted ranges
+        let mut symbol_strike_ranges: Vec<(&str, (f64, f64))> = Vec::new();
+        let mut underlying_prices: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
+
+        // Collect adjusted strike ranges for all symbols in this batch
+        for symbol in chunk {
+            let (percentile_drop, ema_drop) = max_drop::get_max_drop(&conn, symbol, period)?;
+            let latest_candle = &candle::get_candles(&conn, symbol, 1)?[0];
+            underlying_prices.insert(symbol.to_string(), latest_candle.close);
+            
+            let (min_strike, max_strike) = calculate_adjusted_strike_range(
+                latest_candle.close,
+                percentile_drop,
+                ema_drop,
+                dte,
+                period
+            );
+            
+            symbol_strike_ranges.push((symbol, (min_strike, max_strike)));
+        }
 
         // Query Tiger API for option chains
         let chains = requester
