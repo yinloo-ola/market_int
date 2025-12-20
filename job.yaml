@@ -21,7 +21,7 @@ spec:
                   bucketName: opt-intel
           containers:
             - name: market-int-1
-              image: us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:0.4.4
+              image: us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:0.5.0
               command:
                 - /market_int/market_int
               args:
