@@ -205,11 +205,19 @@ async fn main() {
         },
 
         Commands::PullOptionChain5Day { symbols_file_path } => {
+            let mut requester = match tiger::api_caller::Requester::new().await {
+                Some(r) => r,
+                None => {
+                    log::error!("Failed to initialize Tiger API requester");
+                    return;
+                }
+            };
             match option::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
                 &model::OptionChainSide::Put,
                 &mut conn,
                 ExpiryTimeframe::Short,
+                &mut requester,
             )
             .await
             {
@@ -219,11 +227,19 @@ async fn main() {
         }
 
         Commands::PullOptionChain20Day { symbols_file_path } => {
+            let mut requester = match tiger::api_caller::Requester::new().await {
+                Some(r) => r,
+                None => {
+                    log::error!("Failed to initialize Tiger API requester");
+                    return;
+                }
+            };
             match option::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
                 &model::OptionChainSide::Put,
                 &mut conn,
                 ExpiryTimeframe::Medium,
+                &mut requester,
             )
             .await
             {
@@ -266,12 +282,21 @@ async fn main() {
                 Ok(_) => log::info!("Successfully calculated and saved Sharpe ratios"),
                 Err(err) => log::error!("Error calculating Sharpe ratios: {}", err),
             }
+            // Initialize Tiger API requester once to cache option expiration data
+            let mut requester = match tiger::api_caller::Requester::new().await {
+                Some(r) => r,
+                None => {
+                    log::error!("Failed to initialize Tiger API requester");
+                    return;
+                }
+            };
             // Pull option chains with 5-day expiry (short timeframe)
             match option::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
                 &model::OptionChainSide::Put,
                 &mut conn,
                 ExpiryTimeframe::Short,
+                &mut requester,
             )
             .await
             {
@@ -285,6 +310,7 @@ async fn main() {
                 &model::OptionChainSide::Put,
                 &mut conn,
                 ExpiryTimeframe::Medium,
+                &mut requester,
             )
             .await
             {
@@ -305,7 +331,7 @@ async fn main() {
             let symbol_list: Vec<&str> = symbols.split(',').map(|s| s.trim()).collect();
 
             // Initialize Tiger API requester
-            let requester = match tiger::api_caller::Requester::new().await {
+            let mut requester = match tiger::api_caller::Requester::new().await {
                 Some(requester) => requester,
                 None => {
                     log::error!("Failed to initialize Tiger API requester");

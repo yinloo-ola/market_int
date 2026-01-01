@@ -96,7 +96,7 @@ impl FromSql for OptionChainSide {
 }
 
 /// Structure representing option expiration data.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptionExpiration {
     pub symbol: String,
     pub count: u32,

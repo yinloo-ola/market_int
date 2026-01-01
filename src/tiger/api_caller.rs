@@ -9,6 +9,7 @@ use serde_json;
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 use std::env;
+use std::time::{Duration, Instant};
 
 // Import necessary types
 use crate::http::client::RequestError;
@@ -52,9 +53,18 @@ pub struct Response {
     pub timestamp: i64,
 }
 
+// Cache entry for option expiration data
+#[derive(Debug, Clone)]
+struct OptionExpirationCacheEntry {
+    data: Vec<model::OptionExpiration>,
+    timestamp: Instant,
+}
+
 // Requester represents a requester for Tiger API operations.
 pub struct Requester {
     client: reqwest::Client,
+    option_expiration_cache: HashMap<String, OptionExpirationCacheEntry>,
+    cache_ttl: Duration,
 }
 
 impl Requester {
@@ -65,7 +75,11 @@ impl Requester {
             .build()
             .ok()?;
 
-        let requester = Requester { client };
+        let requester = Requester { 
+            client,
+            option_expiration_cache: HashMap::new(),
+            cache_ttl: Duration::from_secs(300), // 5 minutes cache TTL
+        };
 
         // Try to grab quote permission to test the connection
         let result = requester
@@ -78,6 +92,18 @@ impl Requester {
         }
 
         Some(requester)
+    }
+
+    /// Generate cache key from symbols slice
+    fn generate_cache_key(&self, symbols: &[&str]) -> String {
+        let mut symbols_vec = symbols.to_vec();
+        symbols_vec.sort();
+        symbols_vec.join(",")
+    }
+
+    /// Check if cache entry is still valid
+    fn is_cache_valid(&self, entry: &OptionExpirationCacheEntry) -> bool {
+        entry.timestamp.elapsed() < self.cache_ttl
     }
 
     // QueryStockQuotes queries stock quotes from the Tiger API for given symbols.
@@ -203,9 +229,22 @@ impl Requester {
     }
 
     pub async fn option_expiration(
-        &self,
+        &mut self,
         symbols: &[&str],
     ) -> Result<Vec<model::OptionExpiration>, RequestError> {
+        let cache_key = self.generate_cache_key(symbols);
+        
+        // Check if we have a valid cached entry
+        if let Some(cached_entry) = self.option_expiration_cache.get(&cache_key) {
+            if self.is_cache_valid(cached_entry) {
+                log::debug!("Using cached option expiration data for symbols: {}", cache_key);
+                return Ok(cached_entry.data.clone());
+            }
+        }
+
+        // Cache miss or expired, make API call
+        log::debug!("Fetching fresh option expiration data for symbols: {}", cache_key);
+        
         let biz_content = serde_json::json!({
             "symbols": symbols,
         });
@@ -277,6 +316,13 @@ impl Requester {
 
             expirations.push(expiration);
         }
+
+        // Cache the result
+        let cache_entry = OptionExpirationCacheEntry {
+            data: expirations.clone(),
+            timestamp: Instant::now(),
+        };
+        self.option_expiration_cache.insert(cache_key, cache_entry);
 
         Ok(expirations)
     }

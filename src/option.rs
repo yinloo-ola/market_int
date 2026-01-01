@@ -12,7 +12,6 @@ use telegram_bot_api::{
 
 use crate::{
     constants,
-    http::client,
     model::{self, QuotesError},
     store::{candle, max_drop, option_chain, sharpe_ratio},
     symbols,
@@ -33,7 +32,7 @@ type NewYorkDateTime = DateTime<chrono_tz::Tz>;
 fn calculate_trading_days_to_expiry(from_date: NewYorkDateTime, to_date: NewYorkDateTime) -> u32 {
     let mut current = from_date;
     let mut trading_days = 0;
-    
+
     while current < to_date {
         let weekday = current.weekday();
         // Weekday numbering: Mon=1, Tue=2, ..., Sat=6, Sun=0
@@ -42,7 +41,7 @@ fn calculate_trading_days_to_expiry(from_date: NewYorkDateTime, to_date: NewYork
         }
         current = current + Days::new(1);
     }
-    
+
     trading_days
 }
 
@@ -57,21 +56,21 @@ fn calculate_adjusted_strike_range(
     // Ensure minimum DTE of 1 to avoid division by zero
     let effective_dte = dte.max(1);
     let adjustment_factor = effective_dte as f64 / period as f64;
-    
+
     // Apply adjustment to drop values
     let adjusted_percentile_drop = percentile_drop * adjustment_factor;
     let adjusted_ema_drop = ema_drop * adjustment_factor;
-    
+
     // Calculate strike prices
     let v1 = underlying_price * (1.0 - adjusted_ema_drop);
     let v2 = underlying_price * (1.0 - adjusted_percentile_drop);
-    
+
     let (min_strike, max_strike) = if v1 < v2 { (v1, v2) } else { (v2, v1) };
-    
+
     // Apply safety range adjustment
     let safety_range = (adjusted_percentile_drop - adjusted_ema_drop).abs() * 0.02;
     let adjusted_max_strike = max_strike * (1.0 - safety_range);
-    
+
     (min_strike, adjusted_max_strike)
 }
 
@@ -115,22 +114,24 @@ fn filter_option_chains(
             if chain.bid_size < config.min_bid_size || chain.ask_size < config.min_ask_size {
                 return false;
             }
-            
+
             // Check volume and open interest
-            if chain.volume < config.min_volume || chain.open_interest < config.min_open_interest_value {
+            if chain.volume < config.min_volume
+                || chain.open_interest < config.min_open_interest_value
+            {
                 return false;
             }
-            
+
             // Check price requirements
             if chain.bid < config.min_bid_price || chain.ask < config.min_ask_price {
                 return false;
             }
-            
+
             // Check bid-ask spread ratio
             if chain.ask > config.max_ask_bid_ratio * chain.bid {
                 return false;
             }
-            
+
             true
         })
         .collect()
@@ -142,22 +143,12 @@ pub async fn retrieve_option_chains_with_expiry(
     side: &model::OptionChainSide,
     conn: &mut Connection,
     expiry_timeframe: ExpiryTimeframe,
+    requester: &mut Requester,
 ) -> model::Result<()> {
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
     // Initialize the option_strike table in the database.
     option_chain::create_table(conn)?;
-
-    // Initialize Tiger API requester
-    let requester = match Requester::new().await {
-        Some(requester) => requester,
-        None => {
-            log::error!("Failed to initialize Tiger API requester");
-            return Err(model::QuotesError::HttpError(client::RequestError::Other(
-                "Failed to initialize Tiger API requester".into(),
-            )));
-        }
-    };
 
     let period = if expiry_timeframe == ExpiryTimeframe::Medium {
         20
@@ -170,7 +161,7 @@ pub async fn retrieve_option_chains_with_expiry(
     // Process symbols in batches of 10 (Tiger API limit)
     for chunk in symbols.chunks(10) {
         let symbols_for_expiry: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
-        
+
         // Get all eligible expiry dates for symbols in this batch
         let expirations = match requester.option_expiration(&symbols_for_expiry).await {
             Ok(expirations) => expirations,
@@ -209,7 +200,11 @@ pub async fn retrieve_option_chains_with_expiry(
         // Calculate trading days to expiry
         let current_date_ny = Local::now().with_timezone(&New_York);
         let dte = calculate_trading_days_to_expiry(current_date_ny, expiration_date_ny);
-        log::debug!("Trading days to expiry: {} for timeframe: {:?}", dte, expiry_timeframe);
+        log::debug!(
+            "Trading days to expiry: {} for timeframe: {:?}",
+            dte,
+            expiry_timeframe
+        );
 
         // Prepare symbol-strike range pairs for this batch with adjusted ranges
         let mut symbol_strike_ranges: Vec<(&str, (f64, f64))> = Vec::new();
@@ -220,15 +215,15 @@ pub async fn retrieve_option_chains_with_expiry(
             let (percentile_drop, ema_drop) = max_drop::get_max_drop(conn, symbol, period)?;
             let latest_candle = &candle::get_candles(conn, symbol, 1)?[0];
             underlying_prices.insert(symbol.to_string(), latest_candle.close);
-            
+
             let (min_strike, max_strike) = calculate_adjusted_strike_range(
                 latest_candle.close,
                 percentile_drop,
                 ema_drop,
                 dte,
-                period
+                period,
             );
-            
+
             symbol_strike_ranges.push((symbol, (min_strike, max_strike)));
         }
 
@@ -249,7 +244,8 @@ pub async fn retrieve_option_chains_with_expiry(
         match chains {
             Ok(chains) => {
                 // Filter out low quality chains
-                let filtered_chains = filter_option_chains(chains, &OptionChainFilterConfig::default());
+                let filtered_chains =
+                    filter_option_chains(chains, &OptionChainFilterConfig::default());
 
                 // save to DB
                 option_chain::save_option_strike(conn, &filtered_chains)?;
@@ -295,7 +291,7 @@ fn get_expiration_date(timeframe: ExpiryTimeframe) -> DateTime<Local> {
             // For short timeframe (~5 days/1 week), use current logic
             match now.weekday() {
                 Weekday::Mon => now + Days::new(5),
-                Weekday::Tue => now + Days::new(4),
+                Weekday::Tue => now + Days::new(4 + 7),
                 Weekday::Wed => now + Days::new(3 + 7),
                 Weekday::Thu => now + Days::new(2 + 7),
                 Weekday::Fri => now + Days::new(1 + 7),
@@ -394,7 +390,7 @@ pub async fn publish_to_telegram(
             reply_markup: None,
         })
         .await;
-    
+
     match resp {
         Ok(_) => log::info!("telegram send doc ok"),
         Err(err) => {
