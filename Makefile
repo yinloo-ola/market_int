@@ -3,43 +3,47 @@
 
 # Pull quotes for specified symbols
 pull-quotes:
-	RUST_LOG=debug cargo run -- pull-quotes /home/tianhai82/hobby/market_int/data/symbols.csv
+	RUST_LOG=debug cargo run -- pull-quotes /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
 # Calculate Average True Range (ATR)
 calculate-atr:
-	RUST_LOG=debug cargo run -- calculate-atr /home/tianhai82/hobby/market_int/data/symbols.csv
+	RUST_LOG=debug cargo run -- calculate-atr /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
 # Calculate Maximum Drop for 5-day period
 calculate-maxdrop-5:
-	RUST_LOG=debug cargo run -- calculate-max-drop /home/tianhai82/hobby/market_int/data/symbols.csv 5
+	RUST_LOG=debug cargo run -- calculate-max-drop /Volumes/Ext/code/personal/market_int/data/symbols.csv 5
 
 # Calculate Maximum Drop for 20-day period
 calculate-maxdrop-20:
-	RUST_LOG=debug cargo run -- calculate-max-drop /home/tianhai82/hobby/market_int/data/symbols.csv 20
+	RUST_LOG=debug cargo run -- calculate-max-drop /Volumes/Ext/code/personal/market_int/data/symbols.csv 20
 
 # Calculate Sharpe Ratio
 calculate-sharpe:
-	RUST_LOG=debug cargo run -- calculate-sharpe-ratio /home/tianhai82/hobby/market_int/data/symbols.csv
+	RUST_LOG=debug cargo run -- calculate-sharpe-ratio /Volumes/Ext/code/personal/market_int/data/symbols.csv
+
+# Calculate Price Percentile
+calculate-price-percentile:
+	RUST_LOG=debug cargo run -- calculate-price-percentile /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
 # Pull option chain data with 5-day expiry
 pull-option-chain-5day:
-	RUST_LOG=debug cargo run -- pull-option-chain5-day /home/tianhai82/hobby/market_int/data/symbols.csv
+	RUST_LOG=debug cargo run -- pull-option-chain5-day /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
 # Pull option chain data with 20-day expiry
 pull-option-chain-20day:
-	RUST_LOG=debug cargo run -- pull-option-chain20-day /home/tianhai82/hobby/market_int/data/symbols.csv
+	RUST_LOG=debug cargo run -- pull-option-chain20-day /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
 # Legacy target - maps to 5-day option chain
 pull-option-chain:
-	RUST_LOG=debug cargo run -- pull-option-chain5-day /home/tianhai82/hobby/market_int/data/symbols.csv
+	RUST_LOG=debug cargo run -- pull-option-chain5-day /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
 # Publish option chain to telegram
 publish-option-chain:
-	RUST_LOG=debug cargo run -- publish-option-chain /home/tianhai82/hobby/market_int/data/symbols.csv
+	RUST_LOG=debug cargo run -- publish-option-chain /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
 # Perform all operations (quotes, ATR, Sharpe, option chains)
 perform-all:
-	RUST_LOG=debug cargo run -- perform-all /home/tianhai82/hobby/market_int/data/symbols.csv
+	RUST_LOG=debug cargo run -- perform-all /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
 # Test Tiger API with comma-separated symbols (e.g., make test-tiger SYMBOLS="AAPL,MSFT,GOOGL")
 test-tiger:
@@ -81,7 +85,8 @@ help:
 	@echo "  calculate-atr        - Calculate ATR"
 	@echo "  calculate-maxdrop-5  - Calculate 5-day max drop"
 	@echo "  calculate-maxdrop-20 - Calculate 20-day max drop"
-	@echo "  calculate-sharpe     - Calculate Sharpe ratio"
+	@echo "  calculate-sharpe       - Calculate Sharpe ratio"
+	@echo "  calculate-price-percentile - Calculate price percentile"
 	@echo "  pull-option-chain-5day  - Pull 5-day option chains"
 	@echo "  pull-option-chain-20day - Pull 20-day option chains"
 	@echo "  pull-option-chain    - Legacy: same as pull-option-chain-5day"

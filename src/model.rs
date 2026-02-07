@@ -8,8 +8,8 @@ use std::{
 
 use csv::Writer;
 use rusqlite::{
-    ToSql,
     types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef},
+    ToSql,
 };
 use serde::{Deserialize, Serialize};
 use telegram_bot_api::bot::APIResponseError;
@@ -50,6 +50,13 @@ pub struct MaxDropPeriod {
     pub period: usize,
     pub percentile_drop: f64,
     pub ema_drop: f64,
+    pub timestamp: u32,
+}
+
+#[derive(Debug)]
+pub struct PricePercentile {
+    pub symbol: String,
+    pub percentile: f64,
     pub timestamp: u32,
 }
 
@@ -130,6 +137,7 @@ pub struct OptionStrikeCandle {
 pub fn option_chain_to_csv_vec(
     all_chains: &[OptionStrikeCandle],
     sharpe_ratios: &HashMap<String, f64>,
+    price_percentiles: &HashMap<String, f64>,
 ) -> Result<Vec<u8>> {
     let buf = BufWriter::new(Vec::new());
     let mut writer = Writer::from_writer(buf);
@@ -156,12 +164,17 @@ pub fn option_chain_to_csv_vec(
             "strike_from",
             "strike_to",
             "sharpe_ratio",
+            "price_percentile",
         ])
         .map_err(QuotesError::CsvError)?;
 
     // Write the data rows.
     for chain in all_chains {
         let sharpe_ratio = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
+        let price_percentile = price_percentiles
+            .get(&chain.underlying)
+            .copied()
+            .unwrap_or(0.0);
 
         writer
             .write_record([
@@ -184,6 +197,7 @@ pub fn option_chain_to_csv_vec(
                 &chain.strike_from.to_string(),
                 &chain.strike_to.to_string(),
                 &format!("{:.3}", sharpe_ratio),
+                &format!("{:.3}", price_percentile),
             ])
             .map_err(QuotesError::CsvError)?;
     }

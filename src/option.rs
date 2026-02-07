@@ -13,7 +13,7 @@ use telegram_bot_api::{
 use crate::{
     constants,
     model::{self, QuotesError},
-    store::{candle, max_drop, option_chain, sharpe_ratio},
+    store::{candle, max_drop, option_chain, price_percentile, sharpe_ratio},
     symbols,
     tiger::api_caller::Requester,
 };
@@ -277,7 +277,23 @@ pub async fn retrieve_option_chains_with_expiry(
         }
     }
 
-    publish_to_telegram(&all_chains, &sharpe_ratios, period).await
+    // Collect price percentiles for all symbols
+    let mut price_percentiles: HashMap<String, f64> = HashMap::new();
+    for symbol in &symbols {
+        match price_percentile::get_price_percentile(conn, symbol) {
+            Ok(Some(percentile)) => {
+                price_percentiles.insert(symbol.clone(), percentile);
+            }
+            Ok(None) => {
+                log::warn!("No price percentile found for symbol: {}", symbol);
+            }
+            Err(err) => {
+                log::error!("Failed to get price percentile for {}: {}", symbol, err);
+            }
+        }
+    }
+
+    publish_to_telegram(&all_chains, &sharpe_ratios, &price_percentiles, period).await
 }
 
 /// Calculates the expiration date based on the specified timeframe.
@@ -325,6 +341,7 @@ pub async fn publish_option_chains(
 
     let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
     let mut sharpe_ratios: HashMap<String, f64> = HashMap::new();
+    let mut price_percentiles: HashMap<String, f64> = HashMap::new();
 
     for symbol in &symbols {
         let chains = option_chain::retrieve_option_chain(&mut conn, symbol);
@@ -348,19 +365,33 @@ pub async fn publish_option_chains(
                 log::error!("Failed to get Sharpe ratio for {}: {}", symbol, err);
             }
         }
+
+        // Get price percentile for this symbol
+        match price_percentile::get_price_percentile(&conn, symbol) {
+            Ok(Some(percentile)) => {
+                price_percentiles.insert(symbol.clone(), percentile);
+            }
+            Ok(None) => {
+                log::warn!("No price percentile found for symbol: {}", symbol);
+            }
+            Err(err) => {
+                log::error!("Failed to get price percentile for {}: {}", symbol, err);
+            }
+        }
     }
 
-    publish_to_telegram(&all_chains, &sharpe_ratios, period).await
+    publish_to_telegram(&all_chains, &sharpe_ratios, &price_percentiles, period).await
 }
 
 /// Publishes option chain data to Telegram
 pub async fn publish_to_telegram(
     all_chains: &[model::OptionStrikeCandle],
     sharpe_ratios: &HashMap<String, f64>,
+    price_percentiles: &HashMap<String, f64>,
     period: usize,
 ) -> model::Result<()> {
     // Save all_chains to a csv file and upload it to dropbox
-    let csv = model::option_chain_to_csv_vec(all_chains, sharpe_ratios)?;
+    let csv = model::option_chain_to_csv_vec(all_chains, sharpe_ratios, price_percentiles)?;
 
     let now_singapore = Local::now().with_timezone(&Singapore);
     let formatted_date = now_singapore.format("%d%b_%H%M").to_string();
