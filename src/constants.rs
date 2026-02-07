@@ -3,3 +3,4 @@ pub const MIN_OPEN_INTEREST: u32 = 50;
 pub const PERCENTILE: f64 = 0.9;
 pub const SHARPE_MIN_CANDLES: usize = 14;
 pub const DEFAULT_RISK_FREE_RATE: f64 = 0.0; // use 0
+pub const PRICE_PERCENTILE_DAYS: u32 = 20;

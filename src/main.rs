@@ -22,6 +22,8 @@ mod maxdrop;
 mod option;
 // Sharpe ratio calculation and storage.
 mod sharpe;
+// Price percentile calculation and storage.
+mod price_percentile;
 /// module to read symbols from symbol file
 mod symbols;
 // Tiger API client
@@ -36,6 +38,8 @@ mod store {
     pub mod max_drop;
     /// option range storage.
     pub mod option_chain;
+    /// price percentile storage.
+    pub mod price_percentile;
     /// Sharpe ratio storage.
     pub mod sharpe_ratio;
     /// SQLite database interaction.
@@ -140,6 +144,9 @@ enum Commands {
         period: String, // "5" or "20"
     },
     CalculateSharpeRatio {
+        symbols_file_path: String,
+    },
+    CalculatePricePercentile {
         symbols_file_path: String,
     },
     // Test Tiger API
@@ -259,6 +266,13 @@ async fn main() {
             }
         }
 
+        Commands::CalculatePricePercentile { symbols_file_path } => {
+            match price_percentile::calculate_and_save(&symbols_file_path, &mut conn) {
+                Ok(_) => log::info!("Successfully calculated and saved price percentiles"),
+                Err(err) => log::error!("Error calculating price percentiles: {}", err),
+            }
+        }
+
         Commands::PerformAll { symbols_file_path } => {
             match quotes::pull_and_save(&symbols_file_path, &mut conn).await {
                 Ok(_) => log::info!("Successfully pulled and saved quotes"),
@@ -281,6 +295,10 @@ async fn main() {
             ) {
                 Ok(_) => log::info!("Successfully calculated and saved Sharpe ratios"),
                 Err(err) => log::error!("Error calculating Sharpe ratios: {}", err),
+            }
+            match price_percentile::calculate_and_save(&symbols_file_path, &mut conn) {
+                Ok(_) => log::info!("Successfully calculated and saved price percentiles"),
+                Err(err) => log::error!("Error calculating price percentiles: {}", err),
             }
             // Initialize Tiger API requester once to cache option expiration data
             let mut requester = match tiger::api_caller::Requester::new().await {
