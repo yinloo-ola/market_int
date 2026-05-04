@@ -91,7 +91,7 @@ pub fn calculate_put_score(
     rate_of_return: f64,
 ) -> Option<f64> {
     // Pre-filters
-    if rate_of_return < 0.25 || rate_of_return > 0.60 {
+    if rate_of_return < 0.20 || rate_of_return > 0.65 {
         return None;
     }
     if sharpe <= 0.0 {
