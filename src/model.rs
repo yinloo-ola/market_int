@@ -60,6 +60,54 @@ pub struct PricePercentile {
     pub timestamp: u32,
 }
 
+/// Stores the 20-day price range for a symbol (for strike percentile calculation).
+#[derive(Debug, Clone)]
+pub struct PutPriceRange {
+    pub min: f64,
+    pub max: f64,
+}
+
+/// Calculates the percentile of a strike price within a [min, max] range.
+/// Returns 0.5 if min == max.
+pub fn calculate_strike_percentile(strike: f64, min: f64, max: f64) -> f64 {
+    if max == min {
+        return 0.5;
+    }
+    (strike - min) / (max - min)
+}
+
+/// Calculates a composite score [0, 1] for a put option.
+/// Returns None if the option fails any pre-filter.
+///
+/// Pre-filters:
+///   - rate_of_return in [0.25, 0.60]
+///   - sharpe > 0
+///   - strike_percentile <= 0.40
+///
+/// Score = 0.30 * sharpe_norm + 0.40 * safety_norm + 0.30 * return_norm
+pub fn calculate_put_score(
+    sharpe: f64,
+    strike_percentile: f64,
+    rate_of_return: f64,
+) -> Option<f64> {
+    // Pre-filters
+    if rate_of_return < 0.25 || rate_of_return > 0.60 {
+        return None;
+    }
+    if sharpe <= 0.0 {
+        return None;
+    }
+    if strike_percentile > 0.40 {
+        return None;
+    }
+
+    let sharpe_norm = (sharpe / 2.0).clamp(0.0, 1.0);
+    let safety_norm = 1.0 - strike_percentile.max(0.0);
+    let return_norm = (1.0 - (rate_of_return - 0.35).abs() / 0.20).clamp(0.0, 1.0);
+
+    Some(0.30 * sharpe_norm + 0.40 * safety_norm + 0.30 * return_norm)
+}
+
 /// Represents the side of an option (call or put).
 #[derive(Debug, Serialize)]
 pub enum OptionChainSide {
@@ -266,5 +314,114 @@ impl From<client::RequestError> for QuotesError {
 impl From<APIResponseError> for QuotesError {
     fn from(value: APIResponseError) -> Self {
         Self::TelegramError(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strike_percentile_at_min() {
+        assert!((calculate_strike_percentile(100.0, 100.0, 200.0) - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_strike_percentile_at_max() {
+        assert!((calculate_strike_percentile(200.0, 100.0, 200.0) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_strike_percentile_mid() {
+        assert!((calculate_strike_percentile(150.0, 100.0, 200.0) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_strike_percentile_below_min() {
+        let result = calculate_strike_percentile(80.0, 100.0, 200.0);
+        assert!(result < 0.0);
+    }
+
+    #[test]
+    fn test_strike_percentile_above_max() {
+        let result = calculate_strike_percentile(250.0, 100.0, 200.0);
+        assert!(result > 1.0);
+    }
+
+    #[test]
+    fn test_strike_percentile_equal_range() {
+        assert!((calculate_strike_percentile(100.0, 100.0, 100.0) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_put_score_good_option() {
+        // sharpe=1.8, percentile=0.10, return=0.32
+        // sharpe_norm=0.9, safety_norm=0.9, return_norm=0.85
+        // score = 0.30*0.9 + 0.40*0.9 + 0.30*0.85 = 0.27 + 0.36 + 0.255 = 0.885
+        let score = calculate_put_score(1.8, 0.10, 0.32).unwrap();
+        assert!((score - 0.885).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_put_score_filtered_low_return() {
+        assert!(calculate_put_score(1.5, 0.10, 0.20).is_none());
+    }
+
+    #[test]
+    fn test_put_score_filtered_high_return() {
+        assert!(calculate_put_score(1.5, 0.10, 0.70).is_none());
+    }
+
+    #[test]
+    fn test_put_score_filtered_negative_sharpe() {
+        assert!(calculate_put_score(-0.5, 0.10, 0.35).is_none());
+    }
+
+    #[test]
+    fn test_put_score_filtered_zero_sharpe() {
+        assert!(calculate_put_score(0.0, 0.10, 0.35).is_none());
+    }
+
+    #[test]
+    fn test_put_score_filtered_high_percentile() {
+        assert!(calculate_put_score(1.5, 0.50, 0.35).is_none());
+    }
+
+    #[test]
+    fn test_put_score_boundary_return_low() {
+        assert!(calculate_put_score(1.0, 0.10, 0.25).is_some());
+    }
+
+    #[test]
+    fn test_put_score_boundary_return_high() {
+        assert!(calculate_put_score(1.0, 0.10, 0.60).is_some());
+    }
+
+    #[test]
+    fn test_put_score_boundary_percentile() {
+        assert!(calculate_put_score(1.0, 0.40, 0.35).is_some());
+    }
+
+    #[test]
+    fn test_put_score_clamps_negative_percentile() {
+        // strike below 20-day min -> negative percentile -> should clamp to 0.0
+        let score = calculate_put_score(2.0, -0.10, 0.35).unwrap();
+        assert!((score - 1.0).abs() < 1e-9); // same as percentile=0.0
+    }
+
+    #[test]
+    fn test_put_score_high_sharpe_clamps() {
+        // sharpe > 2.0 should clamp sharpe_norm to 1.0
+        let score = calculate_put_score(5.0, 0.0, 0.35).unwrap();
+        assert!((score - 1.0).abs() < 1e-9); // same as sharpe=2.0
+    }
+
+    #[test]
+    fn test_put_score_peak_return() {
+        // return exactly at 0.35 -> return_norm = 1.0
+        // sharpe=2.0 -> sharpe_norm=1.0, percentile=0.0 -> safety_norm=1.0
+        // score = 0.30 + 0.40 + 0.30 = 1.0
+        let score = calculate_put_score(2.0, 0.0, 0.35).unwrap();
+        assert!((score - 1.0).abs() < 1e-9);
     }
 }
