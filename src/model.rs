@@ -185,7 +185,7 @@ pub struct OptionStrikeCandle {
 pub fn option_chain_to_csv_vec(
     all_chains: &[OptionStrikeCandle],
     sharpe_ratios: &HashMap<String, f64>,
-    price_percentiles: &HashMap<String, f64>,
+    price_ranges: &HashMap<String, PutPriceRange>,
 ) -> Result<Vec<u8>> {
     let buf = BufWriter::new(Vec::new());
     let mut writer = Writer::from_writer(buf);
@@ -212,17 +212,25 @@ pub fn option_chain_to_csv_vec(
             "strike_from",
             "strike_to",
             "sharpe_ratio",
-            "price_percentile",
+            "strike_percentile",
+            "score",
         ])
         .map_err(QuotesError::CsvError)?;
 
     // Write the data rows.
     for chain in all_chains {
         let sharpe_ratio = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
-        let price_percentile = price_percentiles
-            .get(&chain.underlying)
-            .copied()
-            .unwrap_or(0.0);
+
+        let (strike_percentile_str, score_str) = match price_ranges.get(&chain.underlying) {
+            Some(range) => {
+                let sp = calculate_strike_percentile(chain.strike, range.min, range.max);
+                let score = calculate_put_score(sharpe_ratio, sp, chain.rate_of_return);
+                let sp_str = format!("{:.3}", sp);
+                let score_str = score.map(|s| format!("{:.3}", s)).unwrap_or_default();
+                (sp_str, score_str)
+            }
+            None => (String::new(), String::new()),
+        };
 
         writer
             .write_record([
@@ -245,7 +253,8 @@ pub fn option_chain_to_csv_vec(
                 &chain.strike_from.to_string(),
                 &chain.strike_to.to_string(),
                 &format!("{:.3}", sharpe_ratio),
-                &format!("{:.3}", price_percentile),
+                &strike_percentile_str,
+                &score_str,
             ])
             .map_err(QuotesError::CsvError)?;
     }
