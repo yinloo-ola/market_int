@@ -97,7 +97,7 @@ pub fn calculate_put_score(
     if sharpe <= 0.0 {
         return None;
     }
-    if strike_percentile > 0.40 {
+    if strike_percentile > 0.5 {
         return None;
     }
 
