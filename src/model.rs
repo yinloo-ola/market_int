@@ -89,9 +89,9 @@ pub fn calculate_strike_percentile(strike: f64, min: f64, max: f64) -> f64 {
 /// Returns None if the option fails any pre-filter.
 ///
 /// Pre-filters:
-///   - rate_of_return in [0.25, 0.60]
+///   - rate_of_return in [0.25, 0.65]
 ///   - sharpe > 0
-///   - strike_percentile <= 0.40
+///   - strike_percentile <= 0.60
 ///
 /// Score = 0.30 * sharpe_norm + 0.40 * safety_norm + 0.30 * return_norm
 pub fn calculate_put_score(
@@ -100,13 +100,13 @@ pub fn calculate_put_score(
     rate_of_return: f64,
 ) -> Option<f64> {
     // Pre-filters
-    if rate_of_return < 0.20 || rate_of_return > 0.65 {
+    if rate_of_return < 0.25 || rate_of_return > 0.65 {
         return None;
     }
     if sharpe <= 0.0 {
         return None;
     }
-    if strike_percentile > 0.5 {
+    if strike_percentile > 0.60 {
         return None;
     }
 
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn test_put_score_filtered_low_return() {
-        assert!(calculate_put_score(1.5, 0.10, 0.15).is_none());
+        assert!(calculate_put_score(1.5, 0.10, 0.20).is_none());
     }
 
     #[test]
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_put_score_filtered_high_percentile() {
-        assert!(calculate_put_score(1.5, 0.55, 0.35).is_none());
+        assert!(calculate_put_score(1.5, 0.61, 0.35).is_none());
     }
 
     #[test]
@@ -406,12 +406,32 @@ mod tests {
 
     #[test]
     fn test_put_score_boundary_return_high() {
-        assert!(calculate_put_score(1.0, 0.10, 0.60).is_some());
+        assert!(calculate_put_score(1.0, 0.10, 0.65).is_some());
     }
 
     #[test]
     fn test_put_score_boundary_percentile() {
-        assert!(calculate_put_score(1.0, 0.40, 0.35).is_some());
+        assert!(calculate_put_score(1.0, 0.60, 0.35).is_some());
+    }
+
+    #[test]
+    fn test_put_score_just_below_return_floor() {
+        assert!(calculate_put_score(1.0, 0.10, 0.24).is_none());
+    }
+
+    #[test]
+    fn test_put_score_at_return_floor() {
+        assert!(calculate_put_score(1.0, 0.10, 0.25).is_some());
+    }
+
+    #[test]
+    fn test_put_score_at_strike_percentile_boundary() {
+        assert!(calculate_put_score(1.0, 0.60, 0.35).is_some());
+    }
+
+    #[test]
+    fn test_put_score_above_strike_percentile_boundary() {
+        assert!(calculate_put_score(1.0, 0.61, 0.35).is_none());
     }
 
     #[test]
