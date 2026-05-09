@@ -263,8 +263,9 @@ pub async fn retrieve_option_chains_with_expiry(
     let sharpe_ratios = collect_sharpe_ratios(conn, &symbols);
     let price_ranges = collect_price_ranges(conn, &symbols);
     let earnings_map = HashMap::new();
+    let price_percentiles = HashMap::new();
 
-    publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, &earnings_map, period).await
+    publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, &earnings_map, &price_percentiles, period).await
 }
 
 /// Days to add from each weekday for Short and Medium timeframes.
@@ -308,8 +309,9 @@ pub async fn publish_option_chains(
     let sharpe_ratios = collect_sharpe_ratios(&conn, &symbols);
     let price_ranges = collect_price_ranges(&conn, &symbols);
     let earnings_map = HashMap::new();
+    let price_percentiles = HashMap::new();
 
-    publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, &earnings_map, period).await
+    publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, &earnings_map, &price_percentiles, period).await
 }
 
 /// Collects Sharpe ratios for the given symbols from the database.
@@ -344,17 +346,70 @@ fn collect_price_ranges(
     ranges
 }
 
+/// Formats a Telegram caption from top picks.
+fn format_telegram_caption(top_picks: &[model::TopPick], period: usize) -> String {
+    let now_singapore = Local::now().with_timezone(&Singapore);
+    let date_str = now_singapore.format("%d%b").to_string();
+
+    let mut caption = format!("🏆 Top 3 Puts — {} {}-day\n\n", date_str, period);
+
+    for pick in top_picks {
+        let momentum_warning = if pick.momentum_flag == "EXTENDED" || pick.momentum_flag == "HIGH" {
+            format!(" {} ⚠️", pick.momentum_flag)
+        } else {
+            String::new()
+        };
+
+        caption.push_str(&format!(
+            "{}. ${strike:.0}P | Bid: ${bid:.2} / Ask: ${ask:.2} | Return: {:.0}%\n   Score: {:.2} | Sharpe: {:.1}{momentum}\n\n",
+            pick.rank,
+            pick.rate_of_return * 100.0,
+            pick.score,
+            pick.sharpe,
+            strike = pick.strike,
+            bid = pick.bid,
+            ask = pick.ask,
+            momentum = momentum_warning,
+        ));
+    }
+
+    // Earnings warnings
+    let earnings_warnings: Vec<_> = top_picks
+        .iter()
+        .filter(|p| p.earnings.is_some())
+        .map(|p| {
+            let e = p.earnings.as_ref().unwrap();
+            format!(
+                "{} {} ({})",
+                p.underlying,
+                e.report_date,
+                match e.report_time.as_str() {
+                    "盘前" => "BMO",
+                    "盘后" => "AMC",
+                    other => other,
+                }
+            )
+        })
+        .collect();
+
+    if !earnings_warnings.is_empty() {
+        caption.push_str(&format!("⚠️ Earnings: {}\n", earnings_warnings.join(", ")));
+    }
+
+    caption
+}
+
 /// Publishes option chain data to Telegram
 pub async fn publish_to_telegram(
     all_chains: &[model::OptionStrikeCandle],
     sharpe_ratios: &HashMap<String, f64>,
     price_ranges: &HashMap<String, model::PutPriceRange>,
     _earnings_map: &HashMap<String, model::EarningsInfo>,
+    price_percentiles: &HashMap<String, f64>,
     period: usize,
 ) -> model::Result<()> {
     // Save all_chains to a csv file and upload it to dropbox
-    let price_percentiles = HashMap::new();
-    let (csv, _top_picks) = model::option_chain_to_csv_vec(all_chains, sharpe_ratios, price_ranges, &price_percentiles, _earnings_map)?;
+    let (csv, top_picks) = model::option_chain_to_csv_vec(all_chains, sharpe_ratios, price_ranges, price_percentiles, _earnings_map)?;
 
     let now_singapore = Local::now().with_timezone(&Singapore);
     let formatted_date = now_singapore.format("%d%b_%H%M").to_string();
@@ -373,7 +428,7 @@ pub async fn publish_to_telegram(
             chat_id: ChatId::IntType(chat_id),
             document: InputFile::FileBytes(filename, csv),
             thumb: None,
-            caption: None,
+            caption: Some(format_telegram_caption(&top_picks, period)),
             parse_mode: None,
             caption_entities: None,
             disable_content_type_detection: None,
