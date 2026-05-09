@@ -30,6 +30,11 @@ pub fn create_table(conn: &Connection) -> Result<()> {
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_underlying_strike_side_expiration_updated ON option_strike (underlying, strike, side, expiration,updated);",
         [],
     )?;
+    // Migration: add earnings_before_expiry column if it doesn't exist
+    conn.execute(
+        "ALTER TABLE option_strike ADD COLUMN earnings_before_expiry TEXT",
+        [],
+    ).ok(); // Ignore error if column already exists
     Ok(())
 }
 

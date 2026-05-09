@@ -354,22 +354,20 @@ fn format_telegram_caption(top_picks: &[model::TopPick], period: usize) -> Strin
     let mut caption = format!("🏆 Top 3 Puts — {} {}-day\n\n", date_str, period);
 
     for pick in top_picks {
-        let momentum_warning = if pick.momentum_flag == "EXTENDED" || pick.momentum_flag == "HIGH" {
-            format!(" {} ⚠️", pick.momentum_flag)
-        } else {
-            String::new()
-        };
+        let pctl = pick.price_percentile
+            .map(|p| format!(" | Pctl: {:.0}%", p * 100.0))
+            .unwrap_or_default();
 
         caption.push_str(&format!(
-            "{}. ${strike:.0}P | Bid: ${bid:.2} / Ask: ${ask:.2} | Return: {:.0}%\n   Score: {:.2} | Sharpe: {:.1}{momentum}\n\n",
+            "{}. {} ${strike:.0}P | Bid: ${bid:.2} / Ask: ${ask:.2} | Return: {:.0}%\n   Score: {:.2} | Sharpe: {:.1}{pctl}\n\n",
             pick.rank,
+            pick.underlying,
             pick.rate_of_return * 100.0,
             pick.score,
             pick.sharpe,
             strike = pick.strike,
             bid = pick.bid,
             ask = pick.ask,
-            momentum = momentum_warning,
         ));
     }
 
@@ -438,12 +436,14 @@ pub async fn publish_to_telegram(
 
     log::debug!("chat_id {chat_id}");
 
+    let caption = format_telegram_caption(&top_picks, period);
+
     let resp = bot
         .send_document(telegram_bot_api::methods::SendDocument {
             chat_id: ChatId::IntType(chat_id),
             document: InputFile::FileBytes(filename, csv),
             thumb: None,
-            caption: Some(format_telegram_caption(&top_picks, period)),
+            caption: None,
             parse_mode: None,
             caption_entities: None,
             disable_content_type_detection: None,
@@ -462,5 +462,30 @@ pub async fn publish_to_telegram(
             return Err(model::QuotesError::TelegramError(err));
         }
     }
+
+    // Send caption as a separate message (multipart upload escapes newlines in caption)
+    let msg_resp = bot
+        .send_message(telegram_bot_api::methods::SendMessage {
+            chat_id: ChatId::IntType(chat_id),
+            text: caption,
+            parse_mode: None,
+            entities: None,
+            disable_web_page_preview: None,
+            disable_notification: Some(true),
+            protect_content: None,
+            reply_to_message_id: None,
+            allow_sending_without_reply: None,
+            reply_markup: None,
+        })
+        .await;
+
+    match msg_resp {
+        Ok(_) => log::info!("telegram send caption ok"),
+        Err(err) => {
+            log::error!("telegram send caption failed: {:?}", err);
+            return Err(model::QuotesError::TelegramError(err));
+        }
+    }
+
     Ok(())
 }
