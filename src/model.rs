@@ -60,6 +60,15 @@ pub struct PricePercentile {
     pub timestamp: u32,
 }
 
+/// Earnings calendar entry from Tiger corporate_action API.
+#[derive(Debug, Clone)]
+pub struct EarningsCalendarEntry {
+    pub symbol: String,
+    pub report_date: String,
+    pub report_time: String,
+    pub expected_eps: Option<f64>,
+}
+
 /// Stores the 20-day price range for a symbol (for strike percentile calculation).
 #[derive(Debug, Clone)]
 pub struct PutPriceRange {
