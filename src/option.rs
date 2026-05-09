@@ -262,8 +262,9 @@ pub async fn retrieve_option_chains_with_expiry(
 
     let sharpe_ratios = collect_sharpe_ratios(conn, &symbols);
     let price_ranges = collect_price_ranges(conn, &symbols);
+    let earnings_map = HashMap::new();
 
-    publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, period).await
+    publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, &earnings_map, period).await
 }
 
 /// Days to add from each weekday for Short and Medium timeframes.
@@ -306,8 +307,9 @@ pub async fn publish_option_chains(
 
     let sharpe_ratios = collect_sharpe_ratios(&conn, &symbols);
     let price_ranges = collect_price_ranges(&conn, &symbols);
+    let earnings_map = HashMap::new();
 
-    publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, period).await
+    publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, &earnings_map, period).await
 }
 
 /// Collects Sharpe ratios for the given symbols from the database.
@@ -347,6 +349,7 @@ pub async fn publish_to_telegram(
     all_chains: &[model::OptionStrikeCandle],
     sharpe_ratios: &HashMap<String, f64>,
     price_ranges: &HashMap<String, model::PutPriceRange>,
+    _earnings_map: &HashMap<String, model::EarningsInfo>,
     period: usize,
 ) -> model::Result<()> {
     // Save all_chains to a csv file and upload it to dropbox

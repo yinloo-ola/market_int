@@ -21,7 +21,8 @@ pub fn create_table(conn: &Connection) -> Result<()> {
             open_interest INTEGER NOT NULL,
             rate_of_return REAL NOT NULL,
             strike_from REAL NOT NULL,
-            strike_to REAL NOT NULL
+            strike_to REAL NOT NULL,
+            earnings_before_expiry TEXT
     );",
         [],
     )?;
@@ -46,7 +47,7 @@ pub fn retrieve_option_chain(
 ) -> Result<Vec<model::OptionStrikeCandle>> {
     let last_update_time = get_latest_updated_time(conn, symbol)?;
     let mut stmt =
-        conn.prepare("SELECT * FROM option_strike WHERE underlying = ?1 AND updated = ?2")?;
+        conn.prepare("SELECT underlying, strike, underlying_price, side, bid, mid, ask, bid_size, ask_size, last, expiration, updated, dte, volume, open_interest, rate_of_return, strike_from, strike_to FROM option_strike WHERE underlying = ?1 AND updated = ?2")?;
     let rows: Vec<_> = stmt
         .query_map(params![symbol, last_update_time], |row| {
             Ok(model::OptionStrikeCandle {
@@ -104,9 +105,10 @@ pub fn save_option_strike(
     open_interest,
     rate_of_return,
     strike_from,
-    strike_to
+    strike_to,
+    earnings_before_expiry
 ) VALUES (
-    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
 );",
         )?;
         for strike in strikes {
@@ -129,6 +131,7 @@ pub fn save_option_strike(
                 strike.rate_of_return,
                 strike.strike_from,
                 strike.strike_to,
+                None::<String>, // earnings_before_expiry: populated later
             ])
             .err(); // Ignore errors during individual inserts; transaction will handle overall success/failure.
         }
