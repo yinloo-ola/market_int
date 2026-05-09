@@ -94,6 +94,50 @@ impl Requester {
         Some(requester)
     }
 
+    /// Query earnings calendar from Tiger corporate_action API.
+    pub async fn query_earnings_calendar(
+        &self,
+        market: &str,
+        begin_date: &DateTime<chrono_tz::Tz>,
+        end_date: &DateTime<chrono_tz::Tz>,
+    ) -> Result<Vec<model::EarningsCalendarEntry>, RequestError> {
+        let biz_content = serde_json::json!({
+            "market": market,
+            "action_type": "earning",
+            "begin_date": begin_date.timestamp_millis(),
+            "end_date": end_date.timestamp_millis(),
+        });
+
+        let resp = self
+            .execute_query("corporate_action", "2.0", Some(biz_content))
+            .await
+            .map_err(|e| RequestError::Other(format!("Failed to query earnings calendar: {}", e)))?;
+
+        let mut entries = Vec::new();
+
+        // Response is a map keyed by date strings, each value is an array of entries
+        if let Some(data_map) = resp.data.as_object() {
+            for (_date_key, items) in data_map {
+                if let Some(items_array) = items.as_array() {
+                    for item in items_array {
+                        let symbol = item["symbol"].as_str().unwrap_or("").to_string();
+                        let report_date = item["reportDate"].as_str().unwrap_or("").to_string();
+                        let report_time = item["reportTime"].as_str().unwrap_or("").to_string();
+                        let expected_eps = item["expectedEps"].as_f64();
+                        entries.push(model::EarningsCalendarEntry {
+                            symbol,
+                            report_date,
+                            report_time,
+                            expected_eps,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(entries)
+    }
+
     /// Generate cache key from symbols slice
     fn generate_cache_key(&self, symbols: &[&str]) -> String {
         let mut symbols_vec = symbols.to_vec();
