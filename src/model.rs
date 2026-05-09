@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use telegram_bot_api::bot::APIResponseError;
 
 use crate::http::client;
+use crate::constants;
 
 /// Represents the market status.
 #[derive(Debug)]
@@ -69,6 +70,14 @@ pub struct EarningsCalendarEntry {
     pub expected_eps: Option<f64>,
 }
 
+/// Earnings info for a symbol, derived from the calendar.
+#[derive(Debug, Clone)]
+pub struct EarningsInfo {
+    pub report_date: String,
+    pub report_time: String,
+    pub expected_eps: Option<f64>,
+}
+
 /// Stores the 20-day price range for a symbol (for strike percentile calculation).
 #[derive(Debug, Clone)]
 pub struct PutPriceRange {
@@ -89,9 +98,9 @@ pub fn calculate_strike_percentile(strike: f64, min: f64, max: f64) -> f64 {
 /// Returns None if the option fails any pre-filter.
 ///
 /// Pre-filters:
-///   - rate_of_return in [0.25, 0.65]
+///   - rate_of_return in [MIN_RATE_OF_RETURN, MAX_RATE_OF_RETURN]
 ///   - sharpe > 0
-///   - strike_percentile <= 0.60
+///   - strike_percentile <= MAX_STRIKE_PERCENTILE
 ///
 /// Score = 0.30 * sharpe_norm + 0.40 * safety_norm + 0.30 * return_norm
 pub fn calculate_put_score(
@@ -100,13 +109,13 @@ pub fn calculate_put_score(
     rate_of_return: f64,
 ) -> Option<f64> {
     // Pre-filters
-    if rate_of_return < 0.25 || rate_of_return > 0.65 {
+    if rate_of_return < constants::MIN_RATE_OF_RETURN || rate_of_return > constants::MAX_RATE_OF_RETURN {
         return None;
     }
     if sharpe <= 0.0 {
         return None;
     }
-    if strike_percentile > 0.60 {
+    if strike_percentile > constants::MAX_STRIKE_PERCENTILE {
         return None;
     }
 
@@ -119,13 +128,9 @@ pub fn calculate_put_score(
 
 /// Returns a momentum flag based on price percentile.
 pub fn momentum_flag(price_percentile: f64) -> &'static str {
-    if price_percentile > 0.90 {
-        "EXTENDED"
-    } else if price_percentile > 0.80 {
-        "HIGH"
-    } else {
-        "NORMAL"
-    }
+    if price_percentile > constants::MOMENTUM_EXTENDED_THRESHOLD { "EXTENDED" }
+    else if price_percentile > constants::MOMENTUM_HIGH_THRESHOLD { "HIGH" }
+    else { "NORMAL" }
 }
 
 /// Represents the side of an option (call or put).
