@@ -1,5 +1,4 @@
-use core::str;
-use std::{env, usize};
+use std::env;
 
 use chrono::{DateTime, Datelike, Days, Local, Timelike, Weekday};
 use chrono_tz::{America::New_York, Asia::Singapore};
@@ -261,72 +260,27 @@ pub async fn retrieve_option_chains_with_expiry(
         }
     }
 
-    // Collect Sharpe ratios for all symbols
-    let mut sharpe_ratios: HashMap<String, f64> = HashMap::new();
-    for symbol in &symbols {
-        match sharpe_ratio::get_sharpe_ratio(conn, symbol) {
-            Ok(Some(ratio)) => {
-                sharpe_ratios.insert(symbol.clone(), ratio);
-            }
-            Ok(None) => {
-                log::warn!("No Sharpe ratio found for symbol: {}", symbol);
-            }
-            Err(err) => {
-                log::error!("Failed to get Sharpe ratio for {}: {}", symbol, err);
-            }
-        }
-    }
-
-    // Collect 20-day price ranges for all symbols
-    let mut price_ranges: HashMap<String, model::PutPriceRange> = HashMap::new();
-    for symbol in &symbols {
-        match candle::get_candles(conn, symbol, constants::PRICE_PERCENTILE_DAYS) {
-            Ok(candles) if !candles.is_empty() => {
-                let min_price = candles.iter().map(|c| c.close).fold(f64::INFINITY, f64::min);
-                let max_price = candles.iter().map(|c| c.close).fold(f64::NEG_INFINITY, f64::max);
-                price_ranges.insert(symbol.clone(), model::PutPriceRange { min: min_price, max: max_price });
-            }
-            _ => {
-                log::warn!("No 20-day candles found for symbol: {}", symbol);
-            }
-        }
-    }
+    let sharpe_ratios = collect_sharpe_ratios(conn, &symbols);
+    let price_ranges = collect_price_ranges(conn, &symbols);
 
     publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, period).await
 }
+
+/// Days to add from each weekday for Short and Medium timeframes.
+/// Indexed by `weekday.num_days_from_sunday()` (Sun=0 .. Sat=6).
+const SHORT_DAYS: [u64; 7] = [6, 5, 11, 10, 9, 8, 7];
+const MEDIUM_DAYS: [u64; 7] = [27, 26, 25, 31, 30, 29, 28];
 
 /// Calculates the expiration date based on the specified timeframe.
 /// For Short timeframe: returns date for ~1 week expiry (5-7 days)
 /// For Medium timeframe: returns date for ~4 weeks expiry (20-28 days)
 fn get_expiration_date(timeframe: ExpiryTimeframe) -> DateTime<Local> {
     let now = Local::now().with_hour(12).unwrap();
-
-    match timeframe {
-        ExpiryTimeframe::Short => {
-            // For short timeframe (~5 days/1 week), use current logic
-            match now.weekday() {
-                Weekday::Mon => now + Days::new(5),
-                Weekday::Tue => now + Days::new(4 + 7),
-                Weekday::Wed => now + Days::new(3 + 7),
-                Weekday::Thu => now + Days::new(2 + 7),
-                Weekday::Fri => now + Days::new(1 + 7),
-                Weekday::Sat => now + Days::new(7),
-                Weekday::Sun => now + Days::new(6),
-            }
-        }
-        ExpiryTimeframe::Medium => {
-            // For medium timeframe (~20 days/4 weeks), look further ahead
-            match now.weekday() {
-                Weekday::Mon => now + Days::new(5 + 3 * 7),
-                Weekday::Tue => now + Days::new(4 + 3 * 7),
-                Weekday::Wed => now + Days::new(3 + 4 * 7),
-                Weekday::Thu => now + Days::new(2 + 4 * 7),
-                Weekday::Fri => now + Days::new(1 + 4 * 7),
-                Weekday::Sat => now + Days::new(0 + 4 * 7),
-                Weekday::Sun => now + Days::new(4 * 7 - 1),
-            }
-        }
-    }
+    let table = match timeframe {
+        ExpiryTimeframe::Short => &SHORT_DAYS,
+        ExpiryTimeframe::Medium => &MEDIUM_DAYS,
+    };
+    now + Days::new(table[now.weekday().num_days_from_sunday() as usize])
 }
 
 /// Publishes option chains for already retrieved data
@@ -339,46 +293,53 @@ pub async fn publish_option_chains(
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
     let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
-    let mut sharpe_ratios: HashMap<String, f64> = HashMap::new();
-    let mut price_ranges: HashMap<String, model::PutPriceRange> = HashMap::new();
 
     for symbol in &symbols {
-        let chains = option_chain::retrieve_option_chain(&mut conn, symbol);
-        match chains {
+        match option_chain::retrieve_option_chain(&mut conn, symbol) {
             Ok(chains) => all_chains.extend(chains),
             Err(err) => {
                 log::error!("fail to retrieve chain for {}. Error: {}.", symbol, err);
                 continue;
             }
         };
+    }
 
-        // Get Sharpe ratio for this symbol
-        match sharpe_ratio::get_sharpe_ratio(&conn, symbol) {
-            Ok(Some(ratio)) => {
-                sharpe_ratios.insert(symbol.clone(), ratio);
-            }
-            Ok(None) => {
-                log::warn!("No Sharpe ratio found for symbol: {}", symbol);
-            }
-            Err(err) => {
-                log::error!("Failed to get Sharpe ratio for {}: {}", symbol, err);
-            }
+    let sharpe_ratios = collect_sharpe_ratios(&conn, &symbols);
+    let price_ranges = collect_price_ranges(&conn, &symbols);
+
+    publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, period).await
+}
+
+/// Collects Sharpe ratios for the given symbols from the database.
+fn collect_sharpe_ratios(conn: &Connection, symbols: &[String]) -> HashMap<String, f64> {
+    let mut ratios = HashMap::new();
+    for symbol in symbols {
+        match sharpe_ratio::get_sharpe_ratio(conn, symbol) {
+            Ok(Some(ratio)) => { ratios.insert(symbol.clone(), ratio); }
+            Ok(None) => log::warn!("No Sharpe ratio found for symbol: {}", symbol),
+            Err(err) => log::error!("Failed to get Sharpe ratio for {}: {}", symbol, err),
         }
+    }
+    ratios
+}
 
-        // Get 20-day price range for this symbol
-        match candle::get_candles(&conn, symbol, constants::PRICE_PERCENTILE_DAYS) {
+/// Collects 20-day price ranges for the given symbols from the database.
+fn collect_price_ranges(
+    conn: &Connection,
+    symbols: &[String],
+) -> HashMap<String, model::PutPriceRange> {
+    let mut ranges = HashMap::new();
+    for symbol in symbols {
+        match candle::get_candles(conn, symbol, constants::PRICE_PERCENTILE_DAYS) {
             Ok(candles) if !candles.is_empty() => {
                 let min_price = candles.iter().map(|c| c.close).fold(f64::INFINITY, f64::min);
                 let max_price = candles.iter().map(|c| c.close).fold(f64::NEG_INFINITY, f64::max);
-                price_ranges.insert(symbol.clone(), model::PutPriceRange { min: min_price, max: max_price });
+                ranges.insert(symbol.clone(), model::PutPriceRange { min: min_price, max: max_price });
             }
-            _ => {
-                log::warn!("No 20-day candles found for symbol: {}", symbol);
-            }
+            _ => log::warn!("No 20-day candles found for symbol: {}", symbol),
         }
     }
-
-    publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, period).await
+    ranges
 }
 
 /// Publishes option chain data to Telegram

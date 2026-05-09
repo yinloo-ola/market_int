@@ -676,23 +676,13 @@ fn fill_private_key_marker(private_key: &str) -> String {
     }
 
     // Format the Base64 content with 64-character lines
-    let mut formatted_key = String::new();
-    formatted_key.push_str("-----BEGIN RSA PRIVATE KEY-----\n");
+    let mut formatted_key = String::from("-----BEGIN RSA PRIVATE KEY-----\n");
 
-    // Break the Base64 string into 64-character lines
     let mut chars = private_key.chars().peekable();
-    let mut line_count = 0;
-
     while chars.peek().is_some() {
         let chunk: String = chars.by_ref().take(64).collect();
         formatted_key.push_str(&chunk);
         formatted_key.push('\n');
-        line_count += 1;
-
-        // Safety check to avoid infinite loops
-        if line_count > 1000 {
-            break;
-        }
     }
 
     formatted_key.push_str("-----END RSA PRIVATE KEY-----\n");
@@ -725,19 +715,10 @@ fn get_sign_content(params: &HashMap<String, String>) -> String {
     let mut keys: Vec<&String> = params.keys().collect();
     keys.sort();
 
-    let mut sign_content = String::new();
-    for key in keys {
-        if let Some(value) = params.get(key) {
-            sign_content.push_str(&format!("&{}={}", key, value));
-        }
-    }
-
-    // Remove the leading '&'
-    if !sign_content.is_empty() {
-        sign_content.remove(0);
-    }
-
-    sign_content
+    keys.iter()
+        .filter_map(|key| params.get(*key).map(|value| format!("{}={}", key, value)))
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 // Helper function to parse response data as an array
@@ -763,12 +744,10 @@ fn parse_value_as_object<'a>(
 // Helper function to convert expiry timestamp to string format
 fn format_expiry_timestamp(timestamp: i64) -> String {
     if timestamp > 0 {
-        // Convert timestamp to datetime string
-        if let Some(expiry_dt) = chrono::Local.timestamp_millis_opt(timestamp).single() {
-            expiry_dt.format("%Y-%m-%d").to_string()
-        } else {
-            "Unknown".to_string()
-        }
+        chrono::Local.timestamp_millis_opt(timestamp)
+            .single()
+            .map(|dt| dt.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "Unknown".to_string())
     } else {
         "Unknown".to_string()
     }

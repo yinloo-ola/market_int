@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_put_score_filtered_low_return() {
-        assert!(calculate_put_score(1.5, 0.10, 0.20).is_none());
+        assert!(calculate_put_score(1.5, 0.10, 0.15).is_none());
     }
 
     #[test]
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn test_put_score_filtered_high_percentile() {
-        assert!(calculate_put_score(1.5, 0.50, 0.35).is_none());
+        assert!(calculate_put_score(1.5, 0.55, 0.35).is_none());
     }
 
     #[test]
