@@ -262,8 +262,29 @@ pub async fn retrieve_option_chains_with_expiry(
 
     let sharpe_ratios = collect_sharpe_ratios(conn, &symbols);
     let price_ranges = collect_price_ranges(conn, &symbols);
-    let earnings_map = HashMap::new();
     let price_percentiles = collect_price_percentiles(conn, &symbols);
+
+    // Fetch earnings calendar from now to the end of the option period
+    let today_ny = Local::now().with_timezone(&New_York);
+    let end_date_ny = today_ny + chrono::Duration::days(period as i64 + 7);
+    let earnings_map = match requester.query_earnings_calendar("US", &today_ny, &end_date_ny).await {
+        Ok(entries) => {
+            let mut map = HashMap::new();
+            for entry in entries {
+                map.insert(entry.symbol.clone(), model::EarningsInfo {
+                    report_date: entry.report_date,
+                    report_time: entry.report_time,
+                    expected_eps: entry.expected_eps,
+                });
+            }
+            log::info!("Earnings calendar: {} symbols with earnings before {}", map.len(), end_date_ny.format("%Y-%m-%d"));
+            map
+        }
+        Err(e) => {
+            log::warn!("Failed to fetch earnings calendar, proceeding without: {}", e);
+            HashMap::new()
+        }
+    };
 
     publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, &earnings_map, &price_percentiles, period).await
 }
