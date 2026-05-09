@@ -217,7 +217,7 @@ pub struct TopPick {
     pub rate_of_return: f64,
     pub score: f64,
     pub sharpe: f64,
-    pub momentum_flag: String,
+    pub price_percentile: Option<f64>,
     pub earnings: Option<EarningsInfo>,
 }
 
@@ -273,7 +273,7 @@ pub fn option_chain_to_csv_vec(
             None => (String::new(), String::new()),
         };
 
-        let momentum = price_percentile.map(|p| momentum_flag(p).to_string()).unwrap_or_default();
+        let momentum = price_percentile.map(|p| format!("{:.0}%", p * 100.0)).unwrap_or_default();
 
         let earnings_str = match earnings_map.get(&chain.underlying) {
             Some(info) => {
@@ -346,7 +346,7 @@ pub fn option_chain_to_csv_vec(
                 rate_of_return: chain.rate_of_return,
                 score: *score,
                 sharpe,
-                momentum_flag: pp.map(|p| momentum_flag(p).to_string()).unwrap_or_default(),
+                price_percentile: pp,
                 earnings: earnings_map.get(&chain.underlying).cloned(),
             }
         })
