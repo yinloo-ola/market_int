@@ -252,7 +252,7 @@ pub fn option_chain_to_csv_vec(
             "sharpe_ratio",
             "strike_percentile",
             "score",
-            "momentum_flag",
+            "price_percentile",
             "earnings_before_expiry",
         ])
         .map_err(QuotesError::CsvError)?;
