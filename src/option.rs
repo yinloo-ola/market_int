@@ -12,7 +12,7 @@ use telegram_bot_api::{
 use crate::{
     constants,
     model::{self, QuotesError},
-    store::{candle, max_drop, option_chain, sharpe_ratio},
+    store::{candle, max_drop, option_chain, price_percentile, sharpe_ratio},
     symbols,
     tiger::api_caller::Requester,
 };
@@ -263,7 +263,7 @@ pub async fn retrieve_option_chains_with_expiry(
     let sharpe_ratios = collect_sharpe_ratios(conn, &symbols);
     let price_ranges = collect_price_ranges(conn, &symbols);
     let earnings_map = HashMap::new();
-    let price_percentiles = HashMap::new();
+    let price_percentiles = collect_price_percentiles(conn, &symbols);
 
     publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, &earnings_map, &price_percentiles, period).await
 }
@@ -309,7 +309,7 @@ pub async fn publish_option_chains(
     let sharpe_ratios = collect_sharpe_ratios(&conn, &symbols);
     let price_ranges = collect_price_ranges(&conn, &symbols);
     let earnings_map = HashMap::new();
-    let price_percentiles = HashMap::new();
+    let price_percentiles = collect_price_percentiles(&conn, &symbols);
 
     publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, &earnings_map, &price_percentiles, period).await
 }
@@ -397,6 +397,21 @@ fn format_telegram_caption(top_picks: &[model::TopPick], period: usize) -> Strin
     }
 
     caption
+}
+
+/// Collects price percentiles for the given symbols from the database.
+fn collect_price_percentiles(conn: &Connection, symbols: &[String]) -> HashMap<String, f64> {
+    let mut percentiles = HashMap::new();
+    for symbol in symbols {
+        match price_percentile::get_price_percentile(conn, symbol) {
+            Ok(Some(p)) => {
+                percentiles.insert(symbol.clone(), p);
+            }
+            Ok(None) => log::warn!("No price percentile found for symbol: {}", symbol),
+            Err(err) => log::error!("Failed to get price percentile for {}: {}", symbol, err),
+        }
+    }
+    percentiles
 }
 
 /// Publishes option chain data to Telegram
