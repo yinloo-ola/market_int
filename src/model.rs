@@ -117,6 +117,17 @@ pub fn calculate_put_score(
     Some(0.30 * sharpe_norm + 0.40 * safety_norm + 0.30 * return_norm)
 }
 
+/// Returns a momentum flag based on price percentile.
+pub fn momentum_flag(price_percentile: f64) -> &'static str {
+    if price_percentile > 0.90 {
+        "EXTENDED"
+    } else if price_percentile > 0.80 {
+        "HIGH"
+    } else {
+        "NORMAL"
+    }
+}
+
 /// Represents the side of an option (call or put).
 #[derive(Debug, Serialize)]
 pub enum OptionChainSide {
@@ -432,6 +443,36 @@ mod tests {
     #[test]
     fn test_put_score_above_strike_percentile_boundary() {
         assert!(calculate_put_score(1.0, 0.61, 0.35).is_none());
+    }
+
+    #[test]
+    fn test_momentum_flag_normal() {
+        assert_eq!(momentum_flag(0.50), "NORMAL");
+    }
+
+    #[test]
+    fn test_momentum_flag_normal_boundary() {
+        assert_eq!(momentum_flag(0.80), "NORMAL");
+    }
+
+    #[test]
+    fn test_momentum_flag_high() {
+        assert_eq!(momentum_flag(0.85), "HIGH");
+    }
+
+    #[test]
+    fn test_momentum_flag_high_boundary() {
+        assert_eq!(momentum_flag(0.90), "HIGH");
+    }
+
+    #[test]
+    fn test_momentum_flag_extended() {
+        assert_eq!(momentum_flag(0.95), "EXTENDED");
+    }
+
+    #[test]
+    fn test_momentum_flag_extended_at_boundary() {
+        assert_eq!(momentum_flag(0.91), "EXTENDED");
     }
 
     #[test]
