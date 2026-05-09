@@ -207,11 +207,27 @@ pub struct OptionStrikeCandle {
     pub strike_to: f64,        // Strike price to.
 }
 
+/// Top pick from scored option chains, used for Telegram caption.
+pub struct TopPick {
+    pub rank: usize,
+    pub underlying: String,
+    pub strike: f64,
+    pub bid: f64,
+    pub ask: f64,
+    pub rate_of_return: f64,
+    pub score: f64,
+    pub sharpe: f64,
+    pub momentum_flag: String,
+    pub earnings: Option<EarningsInfo>,
+}
+
 pub fn option_chain_to_csv_vec(
     all_chains: &[OptionStrikeCandle],
     sharpe_ratios: &HashMap<String, f64>,
     price_ranges: &HashMap<String, PutPriceRange>,
-) -> Result<Vec<u8>> {
+    price_percentiles: &HashMap<String, f64>,
+    earnings_map: &HashMap<String, EarningsInfo>,
+) -> Result<(Vec<u8>, Vec<TopPick>)> {
     let buf = BufWriter::new(Vec::new());
     let mut writer = Writer::from_writer(buf);
 
@@ -236,12 +252,15 @@ pub fn option_chain_to_csv_vec(
             "sharpe_ratio",
             "strike_percentile",
             "score",
+            "momentum_flag",
+            "earnings_before_expiry",
         ])
         .map_err(QuotesError::CsvError)?;
 
     // Write the data rows.
     for chain in all_chains {
         let sharpe_ratio = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
+        let price_percentile = price_percentiles.get(&chain.underlying).copied();
 
         let (strike_percentile_str, score_str) = match price_ranges.get(&chain.underlying) {
             Some(range) => {
@@ -252,6 +271,20 @@ pub fn option_chain_to_csv_vec(
                 (sp_str, score_str)
             }
             None => (String::new(), String::new()),
+        };
+
+        let momentum = price_percentile.map(|p| momentum_flag(p).to_string()).unwrap_or_default();
+
+        let earnings_str = match earnings_map.get(&chain.underlying) {
+            Some(info) => {
+                let time_label = match info.report_time.as_str() {
+                    "盘前" | "BMO" | "before_open" => "before_open",
+                    "盘后" | "AMC" | "after_close" => "after_close",
+                    _ => &info.report_time,
+                };
+                format!("{} ({})", info.report_date, time_label)
+            }
+            None => String::new(),
         };
 
         writer
@@ -274,12 +307,52 @@ pub fn option_chain_to_csv_vec(
                 &format!("{:.3}", sharpe_ratio),
                 &strike_percentile_str,
                 &score_str,
+                &momentum,
+                &earnings_str,
             ])
             .map_err(QuotesError::CsvError)?;
     }
 
     let bytes = writer.into_inner().unwrap().into_inner().unwrap();
-    Ok(bytes)
+
+    // Select top 3 scored chains for TopPicks
+    let mut scored: Vec<(usize, f64)> = all_chains
+        .iter()
+        .enumerate()
+        .filter_map(|(i, chain)| {
+            let sharpe = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
+            let range = price_ranges.get(&chain.underlying)?;
+            let sp = calculate_strike_percentile(chain.strike, range.min, range.max);
+            let score = calculate_put_score(sharpe, sp, chain.rate_of_return)?;
+            Some((i, score))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+    let top_picks: Vec<TopPick> = scored
+        .iter()
+        .take(3)
+        .enumerate()
+        .map(|(rank, (idx, score))| {
+            let chain = &all_chains[*idx];
+            let sharpe = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
+            let pp = price_percentiles.get(&chain.underlying).copied();
+            TopPick {
+                rank: rank + 1,
+                underlying: chain.underlying.clone(),
+                strike: chain.strike,
+                bid: chain.bid,
+                ask: chain.ask,
+                rate_of_return: chain.rate_of_return,
+                score: *score,
+                sharpe,
+                momentum_flag: pp.map(|p| momentum_flag(p).to_string()).unwrap_or_default(),
+                earnings: earnings_map.get(&chain.underlying).cloned(),
+            }
+        })
+        .collect();
+
+    Ok((bytes, top_picks))
 }
 
 pub type Result<T> = std::result::Result<T, QuotesError>;
