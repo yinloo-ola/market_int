@@ -1,0 +1,54 @@
+📝 *Put Option Selection Guide*
+
+━━━━━━━━━━━━━━━━━━
+
+📋 *Field Reference*
+
+• `rate_of_return` — Annualised premium yield. `(mid price / strike) ÷ weeks to expiry × 52`. Good: 0.25–0.65
+
+• `sharpe_ratio` — Risk-adjusted return of the underlying stock. Higher = better reward per unit of risk. Good: > 1.0
+
+• `strike_percentile` — Where the strike sits within the stock's expected support range. 0 = deep support, 1 = at resistance. Good: ≤ 0.60
+
+• `score` — Composite quality score (0–1). Combines Sharpe (30%), strike safety (40%), return quality (30%). Options failing pre-filters are blank. Good: > 0.6
+
+• `price_percentile` — Where current price sits within its 20-day range. Drives momentum flag: NORMAL (≤80%), HIGH (80–90%), EXTENDED (>90%). Good: ≤ 0.80
+
+• `earnings_before_expiry` — Earnings date if it falls before option expiry. Empty = no earnings risk. Good: empty
+
+━━━━━━━━━━━━━━━━━━
+
+✅ *Quick Filter — 4 Rules*
+
+1️⃣ `score > 0.6` — Primary gate. Bundles Sharpe, safety, and return checks.
+
+2️⃣ `earnings_before_expiry` is empty — Earnings cause gap risk and IV crush. Avoid.
+
+3️⃣ `price_percentile ≤ 0.80` — Stock trading at top of range = overextended. Stick to NORMAL momentum.
+
+4️⃣ `rate_of_return` between 0.25 and 0.65 — Below 0.25 not worth capital. Above 0.65 = market pricing in high risk.
+
+━━━━━━━━━━━━━━━━━━
+
+📊 *Score Breakdown*
+
+🛡 Safety (strike percentile) — 40%
+Lower strike vs support = more room before you're at risk.
+
+📈 Sharpe ratio — 30%
+Strong risk-adjusted returns = stock likely keeps trending up.
+
+💰 Return quality — 30%
+Prefers ~35% annualised. Penalises extreme returns signalling danger.
+
+━━━━━━━━━━━━━━━━━━
+
+🚩 *Red Flags — Avoid These*
+
+❌ `score` is blank — Failed pre-filter. Return too low/high, negative Sharpe, or strike above resistance.
+
+❌ `earnings_before_expiry` has a date — Stock can gap well below your strike.
+
+❌ `price_percentile > 0.90` (EXTENDED) — Stock at 20-day high. May overshoot before reverting.
+
+❌ `rate_of_return > 0.65` — Market is pricing high probability of a drop. You're being paid for real risk.
