@@ -575,4 +575,88 @@ mod tests {
         let score = calculate_put_score(2.0, 0.0, 0.35).unwrap();
         assert!((score - 1.0).abs() < 1e-9);
     }
+
+    fn make_chain(underlying: &str, strike: f64, rate_of_return: f64) -> OptionStrikeCandle {
+        OptionStrikeCandle {
+            underlying: underlying.to_string(),
+            strike,
+            underlying_price: 100.0,
+            side: OptionChainSide::Put,
+            bid: 1.0,
+            mid: 1.5,
+            ask: 2.0,
+            last: 1.5,
+            bid_size: 10,
+            ask_size: 10,
+            expiration: "2026-06-19".to_string(),
+            updated: "2026-05-13".to_string(),
+            dte: 30,
+            volume: 100,
+            open_interest: 200,
+            rate_of_return,
+            strike_from: 80.0,
+            strike_to: 120.0,
+        }
+    }
+
+    #[test]
+    fn test_top_picks_unique_underlyings() {
+        // AAPL appears 3 times with high scores, TSLA and NVDA once each
+        let chains = vec![
+            make_chain("AAPL", 90.0, 0.35),
+            make_chain("AAPL", 85.0, 0.40),
+            make_chain("AAPL", 80.0, 0.30),
+            make_chain("TSLA", 200.0, 0.30),
+            make_chain("NVDA", 130.0, 0.28),
+        ];
+
+        let mut sharpe = HashMap::new();
+        sharpe.insert("AAPL".to_string(), 1.5);
+        sharpe.insert("TSLA".to_string(), 1.5);
+        sharpe.insert("NVDA".to_string(), 1.5);
+
+        let mut ranges = HashMap::new();
+        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+        ranges.insert("TSLA".to_string(), PutPriceRange { min: 150.0, max: 250.0 });
+        ranges.insert("NVDA".to_string(), PutPriceRange { min: 100.0, max: 160.0 });
+
+        let percentiles = HashMap::new();
+        let earnings = HashMap::new();
+
+        let (_csv, top_picks) = option_chain_to_csv_vec(
+            &chains, &sharpe, &ranges, &percentiles, &earnings,
+        ).unwrap();
+
+        let underlyings: Vec<&str> = top_picks.iter().map(|p| p.underlying.as_str()).collect();
+        let mut unique = underlyings.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(underlyings.len(), unique.len(), "top picks should have unique underlyings but got: {:?}", underlyings);
+        assert_eq!(top_picks.len(), 3, "should have exactly 3 picks");
+        assert_eq!(top_picks[0].underlying, "AAPL", "first pick should be highest scoring");
+    }
+
+    #[test]
+    fn test_top_picks_fewer_than_three_unique() {
+        // Only AAPL chains — should return 1 pick, not 3
+        let chains = vec![
+            make_chain("AAPL", 90.0, 0.35),
+            make_chain("AAPL", 85.0, 0.40),
+        ];
+
+        let mut sharpe = HashMap::new();
+        sharpe.insert("AAPL".to_string(), 1.5);
+
+        let mut ranges = HashMap::new();
+        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+
+        let percentiles = HashMap::new();
+        let earnings = HashMap::new();
+
+        let (_csv, top_picks) = option_chain_to_csv_vec(
+            &chains, &sharpe, &ranges, &percentiles, &earnings,
+        ).unwrap();
+
+        assert_eq!(top_picks.len(), 1, "should return only 1 pick for 1 unique underlying");
+    }
 }
