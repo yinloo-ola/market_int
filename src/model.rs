@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env::VarError,
     error::Error,
     fmt::Display,
@@ -329,8 +329,10 @@ pub fn option_chain_to_csv_vec(
         .collect();
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
+    let mut seen = HashSet::new();
     let top_picks: Vec<TopPick> = scored
         .iter()
+        .filter(|(idx, _)| seen.insert(all_chains[*idx].underlying.clone()))
         .take(3)
         .enumerate()
         .map(|(rank, (idx, score))| {
