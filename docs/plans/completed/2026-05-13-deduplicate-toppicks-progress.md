@@ -7,5 +7,5 @@ Last updated: 2026-05-13
 
 | # | Status | Task | Commit |
 |---|--------|------|--------|
-| 1 | ⏸ test-review | Add test for unique-underlying top picks (checkpoint: test) | — |
-| 2 | ⬜ pending | Deduplicate top picks by underlying | — |
+| 1 | ✅ done | Add test for unique-underlying top picks (checkpoint: test) | 4bc61ea |
+| 2 | ✅ done | Deduplicate top picks by underlying | 5455581 |
