@@ -78,6 +78,13 @@ pub struct EarningsInfo {
     pub expected_eps: Option<f64>,
 }
 
+/// Stores trend data for a symbol (price relative to EMAs).
+#[derive(Debug, Clone)]
+pub struct TrendData {
+    pub trend_ratio_short: f64, // price / EMA20
+    pub trend_ratio_long: f64,  // price / EMA50
+}
+
 /// Stores the 20-day price range for a symbol (for strike percentile calculation).
 #[derive(Debug, Clone)]
 pub struct PutPriceRange {
@@ -94,6 +101,18 @@ pub fn calculate_strike_percentile(strike: f64, min: f64, max: f64) -> f64 {
     (strike - min) / (max - min)
 }
 
+/// Calculates the trend factor for strike tightening.
+/// Returns a value in [0.75, 1.0] — never widens strikes.
+/// When trend is strong (ratio > 1.0), reduces max_drop by up to TREND_TIGHTEN_CAP.
+pub fn calculate_trend_factor(trend_ratio_short: f64) -> f64 {
+    if trend_ratio_short <= 1.0 {
+        return 1.0; // No tightening when not above EMA
+    }
+    let reduction = (trend_ratio_short - 1.0) * constants::TREND_TIGHTEN_MULTIPLIER;
+    let capped_reduction = reduction.min(constants::TREND_TIGHTEN_CAP);
+    1.0 - capped_reduction
+}
+
 /// Calculates a composite score [0, 1] for a put option.
 /// Returns None if the option fails any pre-filter.
 ///
@@ -101,12 +120,16 @@ pub fn calculate_strike_percentile(strike: f64, min: f64, max: f64) -> f64 {
 ///   - rate_of_return in [MIN_RATE_OF_RETURN, MAX_RATE_OF_RETURN]
 ///   - sharpe > 0
 ///   - strike_percentile <= MAX_STRIKE_PERCENTILE
+///   - trend_ratio_short >= TREND_FILTER_THRESHOLD
+///   - trend_ratio_long >= TREND_FILTER_THRESHOLD
 ///
-/// Score = 0.30 * sharpe_norm + 0.40 * safety_norm + 0.30 * return_norm
+/// Score = 0.20 * sharpe_norm + 0.30 * safety_norm + 0.20 * return_norm + 0.30 * trend_norm
 pub fn calculate_put_score(
     sharpe: f64,
     strike_percentile: f64,
     rate_of_return: f64,
+    trend_ratio_short: f64,
+    trend_ratio_long: f64,
 ) -> Option<f64> {
     // Pre-filters
     if rate_of_return < constants::MIN_RATE_OF_RETURN || rate_of_return > constants::MAX_RATE_OF_RETURN {
@@ -118,12 +141,21 @@ pub fn calculate_put_score(
     if strike_percentile > constants::MAX_STRIKE_PERCENTILE {
         return None;
     }
+    // Trend hard filter
+    if trend_ratio_short < constants::TREND_FILTER_THRESHOLD {
+        return None;
+    }
+    if trend_ratio_long < constants::TREND_FILTER_THRESHOLD {
+        return None;
+    }
 
     let sharpe_norm = (sharpe / 2.0).clamp(0.0, 1.0);
     let safety_norm = 1.0 - strike_percentile.max(0.0);
     let return_norm = (1.0 - (rate_of_return - 0.35).abs() / 0.20).clamp(0.0, 1.0);
+    // Trend norm: reward stocks further above their EMA
+    let trend_norm = ((trend_ratio_short - constants::TREND_FILTER_THRESHOLD) / 0.10).clamp(0.0, 1.0);
 
-    Some(0.30 * sharpe_norm + 0.40 * safety_norm + 0.30 * return_norm)
+    Some(0.20 * sharpe_norm + 0.30 * safety_norm + 0.20 * return_norm + 0.30 * trend_norm)
 }
 
 /// Returns a momentum flag based on price percentile.
@@ -227,6 +259,7 @@ pub fn option_chain_to_csv_vec(
     price_ranges: &HashMap<String, PutPriceRange>,
     price_percentiles: &HashMap<String, f64>,
     earnings_map: &HashMap<String, EarningsInfo>,
+    trend_data: &HashMap<String, (f64, f64)>,
 ) -> Result<(Vec<u8>, Vec<TopPick>)> {
     let buf = BufWriter::new(Vec::new());
     let mut writer = Writer::from_writer(buf);
@@ -265,7 +298,8 @@ pub fn option_chain_to_csv_vec(
         let (strike_percentile_str, score_str) = match price_ranges.get(&chain.underlying) {
             Some(range) => {
                 let sp = calculate_strike_percentile(chain.strike, range.min, range.max);
-                let score = calculate_put_score(sharpe_ratio, sp, chain.rate_of_return);
+                let (ts, tl) = trend_data.get(&chain.underlying).copied().unwrap_or((1.0, 1.0));
+                let score = calculate_put_score(sharpe_ratio, sp, chain.rate_of_return, ts, tl);
                 let sp_str = format!("{:.3}", sp);
                 let score_str = score.map(|s| format!("{:.3}", s)).unwrap_or_default();
                 (sp_str, score_str)
@@ -323,7 +357,8 @@ pub fn option_chain_to_csv_vec(
             let sharpe = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
             let range = price_ranges.get(&chain.underlying)?;
             let sp = calculate_strike_percentile(chain.strike, range.min, range.max);
-            let score = calculate_put_score(sharpe, sp, chain.rate_of_return)?;
+            let (ts, tl) = trend_data.get(&chain.underlying).copied().unwrap_or((1.0, 1.0));
+            let score = calculate_put_score(sharpe, sp, chain.rate_of_return, ts, tl)?;
             Some((i, score))
         })
         .collect();
@@ -458,71 +493,71 @@ mod tests {
 
     #[test]
     fn test_put_score_good_option() {
-        // sharpe=1.8, percentile=0.10, return=0.32
-        // sharpe_norm=0.9, safety_norm=0.9, return_norm=0.85
-        // score = 0.30*0.9 + 0.40*0.9 + 0.30*0.85 = 0.27 + 0.36 + 0.255 = 0.885
-        let score = calculate_put_score(1.8, 0.10, 0.32).unwrap();
-        assert!((score - 0.885).abs() < 1e-9);
+        // sharpe=1.8, percentile=0.10, return=0.32, trend_short=1.05, trend_long=1.05
+        // sharpe_norm=0.9, safety_norm=0.9, return_norm=0.85, trend_norm=(0.07/0.10)=0.7
+        // score = 0.20*0.9 + 0.30*0.9 + 0.20*0.85 + 0.30*0.7 = 0.18 + 0.27 + 0.17 + 0.21 = 0.83
+        let score = calculate_put_score(1.8, 0.10, 0.32, 1.05, 1.05).unwrap();
+        assert!((score - 0.83).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_filtered_low_return() {
-        assert!(calculate_put_score(1.5, 0.10, 0.20).is_none());
+        assert!(calculate_put_score(1.5, 0.10, 0.20, 1.05, 1.05).is_none());
     }
 
     #[test]
     fn test_put_score_filtered_high_return() {
-        assert!(calculate_put_score(1.5, 0.10, 0.70).is_none());
+        assert!(calculate_put_score(1.5, 0.10, 0.70, 1.05, 1.05).is_none());
     }
 
     #[test]
     fn test_put_score_filtered_negative_sharpe() {
-        assert!(calculate_put_score(-0.5, 0.10, 0.35).is_none());
+        assert!(calculate_put_score(-0.5, 0.10, 0.35, 1.05, 1.05).is_none());
     }
 
     #[test]
     fn test_put_score_filtered_zero_sharpe() {
-        assert!(calculate_put_score(0.0, 0.10, 0.35).is_none());
+        assert!(calculate_put_score(0.0, 0.10, 0.35, 1.05, 1.05).is_none());
     }
 
     #[test]
     fn test_put_score_filtered_high_percentile() {
-        assert!(calculate_put_score(1.5, 0.61, 0.35).is_none());
+        assert!(calculate_put_score(1.5, 0.61, 0.35, 1.05, 1.05).is_none());
     }
 
     #[test]
     fn test_put_score_boundary_return_low() {
-        assert!(calculate_put_score(1.0, 0.10, 0.25).is_some());
+        assert!(calculate_put_score(1.0, 0.10, 0.25, 1.05, 1.05).is_some());
     }
 
     #[test]
     fn test_put_score_boundary_return_high() {
-        assert!(calculate_put_score(1.0, 0.10, 0.65).is_some());
+        assert!(calculate_put_score(1.0, 0.10, 0.65, 1.05, 1.05).is_some());
     }
 
     #[test]
     fn test_put_score_boundary_percentile() {
-        assert!(calculate_put_score(1.0, 0.60, 0.35).is_some());
+        assert!(calculate_put_score(1.0, 0.60, 0.35, 1.05, 1.05).is_some());
     }
 
     #[test]
     fn test_put_score_just_below_return_floor() {
-        assert!(calculate_put_score(1.0, 0.10, 0.24).is_none());
+        assert!(calculate_put_score(1.0, 0.10, 0.24, 1.05, 1.05).is_none());
     }
 
     #[test]
     fn test_put_score_at_return_floor() {
-        assert!(calculate_put_score(1.0, 0.10, 0.25).is_some());
+        assert!(calculate_put_score(1.0, 0.10, 0.25, 1.05, 1.05).is_some());
     }
 
     #[test]
     fn test_put_score_at_strike_percentile_boundary() {
-        assert!(calculate_put_score(1.0, 0.60, 0.35).is_some());
+        assert!(calculate_put_score(1.0, 0.60, 0.35, 1.05, 1.05).is_some());
     }
 
     #[test]
     fn test_put_score_above_strike_percentile_boundary() {
-        assert!(calculate_put_score(1.0, 0.61, 0.35).is_none());
+        assert!(calculate_put_score(1.0, 0.61, 0.35, 1.05, 1.05).is_none());
     }
 
     #[test]
@@ -558,24 +593,29 @@ mod tests {
     #[test]
     fn test_put_score_clamps_negative_percentile() {
         // strike below 20-day min -> negative percentile -> should clamp to 0.0
-        let score = calculate_put_score(2.0, -0.10, 0.35).unwrap();
-        assert!((score - 1.0).abs() < 1e-9); // same as percentile=0.0
+        // sharpe_norm=1.0, safety_norm=1.0, return_norm=1.0, trend_norm=0.7
+        // score = 0.20 + 0.30 + 0.20 + 0.21 = 0.91
+        let score = calculate_put_score(2.0, -0.10, 0.35, 1.05, 1.05).unwrap();
+        assert!((score - 0.91).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_high_sharpe_clamps() {
         // sharpe > 2.0 should clamp sharpe_norm to 1.0
-        let score = calculate_put_score(5.0, 0.0, 0.35).unwrap();
-        assert!((score - 1.0).abs() < 1e-9); // same as sharpe=2.0
+        // sharpe_norm=1.0, safety_norm=1.0, return_norm=1.0, trend_norm=0.7
+        // score = 0.91
+        let score = calculate_put_score(5.0, 0.0, 0.35, 1.05, 1.05).unwrap();
+        assert!((score - 0.91).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_peak_return() {
         // return exactly at 0.35 -> return_norm = 1.0
         // sharpe=2.0 -> sharpe_norm=1.0, percentile=0.0 -> safety_norm=1.0
-        // score = 0.30 + 0.40 + 0.30 = 1.0
-        let score = calculate_put_score(2.0, 0.0, 0.35).unwrap();
-        assert!((score - 1.0).abs() < 1e-9);
+        // trend_short=1.05 -> trend_norm=0.7
+        // score = 0.20 + 0.30 + 0.20 + 0.21 = 0.91
+        let score = calculate_put_score(2.0, 0.0, 0.35, 1.05, 1.05).unwrap();
+        assert!((score - 0.91).abs() < 0.01);
     }
 
     fn make_chain(underlying: &str, strike: f64, rate_of_return: f64) -> OptionStrikeCandle {
@@ -624,9 +664,10 @@ mod tests {
 
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
+        let trend_data = HashMap::new();
 
         let (_csv, top_picks) = option_chain_to_csv_vec(
-            &chains, &sharpe, &ranges, &percentiles, &earnings,
+            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data,
         ).unwrap();
 
         let underlyings: Vec<&str> = top_picks.iter().map(|p| p.underlying.as_str()).collect();
@@ -654,11 +695,67 @@ mod tests {
 
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
+        let trend_data = HashMap::new();
 
         let (_csv, top_picks) = option_chain_to_csv_vec(
-            &chains, &sharpe, &ranges, &percentiles, &earnings,
+            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data,
         ).unwrap();
 
         assert_eq!(top_picks.len(), 1, "should return only 1 pick for 1 unique underlying");
+    }
+
+    #[test]
+    fn test_put_score_filtered_trend_short_below_threshold() {
+        assert!(calculate_put_score(1.5, 0.10, 0.35, 0.97, 1.05).is_none());
+    }
+
+    #[test]
+    fn test_put_score_filtered_trend_long_below_threshold() {
+        assert!(calculate_put_score(1.5, 0.10, 0.35, 1.05, 0.97).is_none());
+    }
+
+    #[test]
+    fn test_put_score_trend_at_threshold() {
+        assert!(calculate_put_score(1.0, 0.10, 0.35, 0.98, 0.98).is_some());
+    }
+
+    #[test]
+    fn test_put_score_trend_just_below_threshold() {
+        assert!(calculate_put_score(1.0, 0.10, 0.35, 0.979, 0.98).is_none());
+        assert!(calculate_put_score(1.0, 0.10, 0.35, 0.98, 0.979).is_none());
+    }
+
+    #[test]
+    fn test_trend_factor_no_tightening_when_flat() {
+        let factor = calculate_trend_factor(1.0);
+        assert!((factor - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_trend_factor_mild_tightening() {
+        // trend_ratio = 1.03 → reduction = 0.03 * 4.0 = 0.12 → factor = 0.88
+        let factor = calculate_trend_factor(1.03);
+        assert!((factor - 0.88).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_trend_factor_capped() {
+        // trend_ratio = 1.20 → reduction = 0.80 → capped at 0.25 → factor = 0.75
+        let factor = calculate_trend_factor(1.20);
+        assert!((factor - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_trend_factor_below_one() {
+        // trend_ratio < 1.0 → factor = 1.0 (never widen)
+        let factor = calculate_trend_factor(0.95);
+        assert!((factor - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_trend_factor_at_cap_boundary() {
+        // reduction = (1.0625 - 1.0) * 4.0 = 0.25 → exactly at cap
+        let factor = calculate_trend_factor(1.0625);
+        assert!((factor - 0.75).abs() < 1e-9);
     }
 }

@@ -443,7 +443,8 @@ pub async fn publish_to_telegram(
     period: usize,
 ) -> model::Result<()> {
     // Save all_chains to a csv file and upload it to dropbox
-    let (csv, top_picks) = model::option_chain_to_csv_vec(all_chains, sharpe_ratios, price_ranges, price_percentiles, _earnings_map)?;
+    let trend_data = HashMap::new();
+    let (csv, top_picks) = model::option_chain_to_csv_vec(all_chains, sharpe_ratios, price_ranges, price_percentiles, _earnings_map, &trend_data)?;
 
     let now_singapore = Local::now().with_timezone(&Singapore);
     let formatted_date = now_singapore.format("%d%b_%H%M").to_string();
