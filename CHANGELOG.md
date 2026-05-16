@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Trend tightening now applies only to the upper strike bound (`strike_to`), keeping `strike_from` un-tightened to allow more lower strikes for strongly trending stocks
+- Raised `MAX_RATE_OF_RETURN` from 0.65 to 0.80 to allow strikes with higher returns
+
 ### Added
 
 - Sector column in CSV output with GICS broad sector mapping from `data/sectors.csv`
