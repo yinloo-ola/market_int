@@ -878,4 +878,56 @@ mod tests {
         assert!(bear_score > bull_score,
             "bear score ({}) should be > bull score ({})", bear_score, bull_score);
     }
+
+    #[test]
+    fn test_regime_integration_bear_allows_more_stocks() {
+        // Simulate a bear market: 5 stocks, only 1 has trend > 0.98
+        // Under bull regime, only 1 passes → 1 top pick
+        // Under bear regime, more pass → more top picks
+        let chains = vec![
+            make_chain("AAPL", 90.0, 0.35),   // strong trend
+            make_chain("MSFT", 350.0, 0.35),   // moderate trend (0.95)
+            make_chain("TSLA", 200.0, 0.35),   // weak trend (0.93)
+            make_chain("NVDA", 120.0, 0.35),   // very weak (0.90)
+            make_chain("GOOG", 150.0, 0.35),   // freefall (0.85)
+        ];
+
+        let mut sharpe = HashMap::new();
+        for sym in &["AAPL", "MSFT", "TSLA", "NVDA", "GOOG"] {
+            sharpe.insert(sym.to_string(), 1.5);
+        }
+
+        let mut ranges = HashMap::new();
+        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+        ranges.insert("MSFT".to_string(), PutPriceRange { min: 300.0, max: 400.0 });
+        ranges.insert("TSLA".to_string(), PutPriceRange { min: 150.0, max: 250.0 });
+        ranges.insert("NVDA".to_string(), PutPriceRange { min: 100.0, max: 160.0 });
+        ranges.insert("GOOG".to_string(), PutPriceRange { min: 130.0, max: 180.0 });
+
+        let mut trend_data = HashMap::new();
+        trend_data.insert("AAPL".to_string(), (1.05, 1.06));
+        trend_data.insert("MSFT".to_string(), (0.95, 0.96));
+        trend_data.insert("TSLA".to_string(), (0.93, 0.94));
+        trend_data.insert("NVDA".to_string(), (0.90, 0.91));
+        trend_data.insert("GOOG".to_string(), (0.85, 0.86));
+
+        let percentiles = HashMap::new();
+        let earnings = HashMap::new();
+
+        // Bull regime: only AAPL passes trend filter (threshold=0.98)
+        let bull = MarketRegime::from_spy_trend(1.05);
+        let (_csv_bull, picks_bull) = option_chain_to_csv_vec(
+            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data, &bull,
+        ).unwrap();
+        assert_eq!(picks_bull.len(), 1, "bull: only AAPL should pass");
+        assert_eq!(picks_bull[0].underlying, "AAPL");
+
+        // Bear regime: AAPL, MSFT, TSLA pass (threshold=0.92), NVDA at 0.90 also passes
+        let bear = MarketRegime::from_spy_trend(0.92);
+        let (_csv_bear, picks_bear) = option_chain_to_csv_vec(
+            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data, &bear,
+        ).unwrap();
+        assert!(picks_bear.len() >= 3, "bear: at least AAPL, MSFT, TSLA should pass, got {}", picks_bear.len());
+        assert!(picks_bear.len() <= 4, "bear: GOOG (0.85) should still be blocked");
+    }
 }
