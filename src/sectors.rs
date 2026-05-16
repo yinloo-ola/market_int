@@ -91,4 +91,20 @@ mod tests {
         let map = HashMap::<String, String>::new();
         assert_eq!(get_sector(&map, "UNKNOWN_TICKER"), "Unknown");
     }
+
+    #[test]
+    fn test_load_actual_sectors_file() {
+        // Integration test: verify the shipped data/sectors.csv is well-formed
+        // and contains mappings for all symbols in data/symbols.csv
+        let sectors_map = load_sectors("data/sectors.csv").unwrap();
+        assert!(!sectors_map.is_empty(), "sectors.csv should not be empty");
+
+        // Check that all known tickers are mapped
+        for ticker in &["AAPL", "NVDA", "XOM", "JPM", "JNJ", "WMT"] {
+            assert!(sectors_map.contains_key(*ticker), "sectors.csv missing: {}", ticker);
+            let sector = &sectors_map[*ticker];
+            assert_ne!(sector, "Unknown", "sector for {} should not be Unknown", ticker);
+            assert!(!sector.is_empty(), "sector for {} should not be empty", ticker);
+        }
+    }
 }

@@ -1220,4 +1220,185 @@ mod tests {
         assert_eq!(top_picks[1].sector, "Unknown");
         assert_eq!(top_picks[2].sector, "Unknown");
     }
+
+    #[test]
+    fn test_csv_contains_sector_column() {
+        let chains = vec![make_chain("AAPL", 90.0, 0.35)];
+
+        let mut sharpe = HashMap::new();
+        sharpe.insert("AAPL".to_string(), 1.5);
+
+        let mut ranges = HashMap::new();
+        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+
+        let mut sectors = HashMap::new();
+        sectors.insert("AAPL".to_string(), "Technology".to_string());
+
+        let percentiles = HashMap::new();
+        let earnings = HashMap::new();
+        let trend_data = HashMap::new();
+
+        let (csv_bytes, _) = option_chain_to_csv_vec(
+            &chains,
+            &sharpe,
+            &ranges,
+            &percentiles,
+            &earnings,
+            &trend_data,
+            &sectors,
+            &bull_regime(),
+        )
+        .unwrap();
+
+        let csv_str = String::from_utf8(csv_bytes).unwrap();
+        let mut lines = csv_str.lines();
+        let header = lines.next().unwrap();
+        assert!(header.contains("sector"), "header should contain 'sector', got: {}", header);
+
+        // Check order: underlying, sector, strike
+        let header_parts: Vec<&str> = header.split(',').collect();
+        let underlying_idx = header_parts.iter().position(|h| *h == "underlying").unwrap();
+        let sector_idx = header_parts.iter().position(|h| *h == "sector").unwrap();
+        let strike_idx = header_parts.iter().position(|h| *h == "strike").unwrap();
+        assert_eq!(sector_idx, underlying_idx + 1, "sector should be right after underlying");
+        assert_eq!(strike_idx, sector_idx + 1, "strike should be right after sector");
+
+        let data_line = lines.next().unwrap();
+        let data_parts: Vec<&str> = data_line.split(',').collect();
+        assert_eq!(data_parts[underlying_idx], "AAPL");
+        assert_eq!(data_parts[sector_idx], "Technology");
+    }
+
+    #[test]
+    fn test_csv_sector_unknown_when_not_mapped() {
+        let chains = vec![make_chain("FOO", 90.0, 0.35)];
+
+        let mut sharpe = HashMap::new();
+        sharpe.insert("FOO".to_string(), 1.5);
+
+        let mut ranges = HashMap::new();
+        ranges.insert("FOO".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+
+        let sectors = HashMap::new(); // no mapping for FOO
+
+        let percentiles = HashMap::new();
+        let earnings = HashMap::new();
+        let trend_data = HashMap::new();
+
+        let (csv_bytes, _) = option_chain_to_csv_vec(
+            &chains,
+            &sharpe,
+            &ranges,
+            &percentiles,
+            &earnings,
+            &trend_data,
+            &sectors,
+            &bull_regime(),
+        )
+        .unwrap();
+
+        let csv_str = String::from_utf8(csv_bytes).unwrap();
+        let data_line = csv_str.lines().nth(1).unwrap();
+        let data_parts: Vec<&str> = data_line.split(',').collect();
+        let sector_idx = csv_str.lines().next().unwrap().split(',').position(|h| h == "sector").unwrap();
+        assert_eq!(data_parts[sector_idx], "Unknown");
+    }
+
+    #[test]
+    fn test_top_picks_all_same_sector_returns_fewer() {
+        // 5 stocks, all Technology — should only get 1 pick
+        let chains = vec![
+            make_chain("AAPL", 90.0, 0.35),
+            make_chain("MSFT", 350.0, 0.34),
+            make_chain("NVDA", 130.0, 0.33),
+            make_chain("AVGO", 160.0, 0.32),
+            make_chain("ORCL", 140.0, 0.31),
+        ];
+
+        let mut sharpe = HashMap::new();
+        for sym in &["AAPL", "MSFT", "NVDA", "AVGO", "ORCL"] {
+            sharpe.insert(sym.to_string(), 1.5);
+        }
+
+        let mut ranges = HashMap::new();
+        for sym in &["AAPL", "MSFT", "NVDA", "AVGO", "ORCL"] {
+            ranges.insert(sym.to_string(), PutPriceRange { min: 80.0, max: 200.0 });
+        }
+
+        let mut sectors = HashMap::new();
+        for sym in &["AAPL", "MSFT", "NVDA", "AVGO", "ORCL"] {
+            sectors.insert(sym.to_string(), "Technology".to_string());
+        }
+
+        let percentiles = HashMap::new();
+        let earnings = HashMap::new();
+        let trend_data = HashMap::new();
+
+        let (_csv, top_picks) = option_chain_to_csv_vec(
+            &chains,
+            &sharpe,
+            &ranges,
+            &percentiles,
+            &earnings,
+            &trend_data,
+            &sectors,
+            &bull_regime(),
+        )
+        .unwrap();
+
+        assert_eq!(top_picks.len(), 1, "all same sector should yield only 1 pick");
+        assert_eq!(top_picks[0].sector, "Technology");
+    }
+
+    #[test]
+    fn test_top_picks_mixed_known_and_unknown_sectors() {
+        // AAPL=Technology, BBB=Unknown, CCC=Unknown, XOM=Energy
+        // Expected: AAPL (Tech) -> BBB (Unknown, allowed) -> CCC (Unknown, allowed)
+        // XOM (Energy) should be skipped because higher-scoring Unknowns come first
+        let chains = vec![
+            make_chain("AAPL", 90.0, 0.35),
+            make_chain("BBB", 90.0, 0.34),
+            make_chain("CCC", 90.0, 0.33),
+            make_chain("XOM", 100.0, 0.32),
+        ];
+
+        let mut sharpe = HashMap::new();
+        for sym in &["AAPL", "BBB", "CCC", "XOM"] {
+            sharpe.insert(sym.to_string(), 1.5);
+        }
+
+        let mut ranges = HashMap::new();
+        for sym in &["AAPL", "BBB", "CCC", "XOM"] {
+            ranges.insert(sym.to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+        }
+
+        let mut sectors = HashMap::new();
+        sectors.insert("AAPL".to_string(), "Technology".to_string());
+        sectors.insert("XOM".to_string(), "Energy".to_string());
+        // BBB and CCC are Unknown
+
+        let percentiles = HashMap::new();
+        let earnings = HashMap::new();
+        let trend_data = HashMap::new();
+
+        let (_csv, top_picks) = option_chain_to_csv_vec(
+            &chains,
+            &sharpe,
+            &ranges,
+            &percentiles,
+            &earnings,
+            &trend_data,
+            &sectors,
+            &bull_regime(),
+        )
+        .unwrap();
+
+        assert_eq!(top_picks.len(), 3);
+        assert_eq!(top_picks[0].underlying, "AAPL");
+        assert_eq!(top_picks[0].sector, "Technology");
+        assert_eq!(top_picks[1].underlying, "BBB");
+        assert_eq!(top_picks[1].sector, "Unknown");
+        assert_eq!(top_picks[2].underlying, "CCC");
+        assert_eq!(top_picks[2].sector, "Unknown");
+    }
 }

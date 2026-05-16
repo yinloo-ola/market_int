@@ -622,3 +622,72 @@ pub async fn publish_to_telegram(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{EarningsInfo, TopPick};
+
+    fn make_pick(rank: usize, underlying: &str, sector: &str) -> TopPick {
+        TopPick {
+            rank,
+            underlying: underlying.to_string(),
+            sector: sector.to_string(),
+            strike: 100.0,
+            bid: 1.50,
+            ask: 2.00,
+            rate_of_return: 0.35,
+            score: 0.85,
+            sharpe: 1.5,
+            price_percentile: None,
+            earnings: None,
+            trend_short: None,
+            trend_long: None,
+        }
+    }
+
+    #[test]
+    fn test_caption_shows_sector_for_known() {
+        let picks = vec![
+            make_pick(1, "AAPL", "Technology"),
+            make_pick(2, "XOM", "Energy"),
+        ];
+        let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
+        let caption = format_telegram_caption(&picks, 5, &regime);
+
+        assert!(caption.contains("AAPL (Technology)"), "caption should show sector: {}", caption);
+        assert!(caption.contains("XOM (Energy)"), "caption should show sector: {}", caption);
+    }
+
+    #[test]
+    fn test_caption_hides_unknown_sector() {
+        let picks = vec![
+            make_pick(1, "FOO", "Unknown"),
+        ];
+        let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
+        let caption = format_telegram_caption(&picks, 5, &regime);
+
+        assert!(caption.contains("FOO $"), "caption should contain ticker: {}", caption);
+        assert!(!caption.contains("(Unknown)"), "caption should NOT show Unknown sector: {}", caption);
+    }
+
+    #[test]
+    fn test_caption_mixed_sectors() {
+        let mut pick_known = make_pick(1, "AAPL", "Technology");
+        pick_known.earnings = Some(EarningsInfo {
+            report_date: "2026-05-20".to_string(),
+            report_time: "盘后".to_string(),
+            expected_eps: None,
+        });
+        let pick_unknown = make_pick(2, "BAR", "Unknown");
+        let picks = vec![pick_known, pick_unknown];
+
+        let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
+        let caption = format_telegram_caption(&picks, 5, &regime);
+
+        assert!(caption.contains("AAPL (Technology)"));
+        assert!(!caption.contains("BAR ("));
+        assert!(caption.contains("BAR $")); // ticker present but no sector label
+        assert!(caption.contains("⚠️ Earnings: AAPL 2026-05-20 (AMC)"));
+    }
+}
