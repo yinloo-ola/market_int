@@ -7,8 +7,8 @@ Last updated: 2026-05-16T02:30:00Z
 
 | # | Status | Task | Commit |
 |---|--------|------|--------|
-| 1 | 🔄 in-progress | Add trend constants and DB store module with tests (checkpoint: done) | — |
-| 2 | ⬜ pending | Create trend calculation module with tests (checkpoint: done) | — |
+| 1 | ✅ done | Add trend constants and DB store module with tests (checkpoint: done) | 5f0a851 |
+| 2 | 🔄 in-progress | Create trend calculation module with tests (checkpoint: done) | — |
 | 3 | ⬜ pending | Update calculate_put_score with trend filter — add and update tests | — |
 | 4 | ⬜ pending | Apply trend-adjusted strike range and update CSV/telegram output — update tests | — |
 | 5 | ⬜ pending | Wire CLI commands and PerformAll pipeline | — |

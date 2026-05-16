@@ -22,6 +22,8 @@ mod maxdrop;
 mod option;
 // Sharpe ratio calculation and storage.
 mod sharpe;
+// Trend calculation and storage.
+mod trend;
 // Price percentile calculation and storage.
 mod price_percentile;
 /// module to read symbols from symbol file
