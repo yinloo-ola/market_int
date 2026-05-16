@@ -3,7 +3,7 @@
 Plan: docs/plans/2026-05-16-market-regime-implementation.md
 Branch: market-regime
 Started: 2026-05-16T00:00:00Z
-Last updated: 2026-05-16T00:21:00Z
+Last updated: 2026-05-16T00:22:00Z
 
 | # | Status | Task | Commit |
 |---|--------|------|--------|
@@ -12,4 +12,4 @@ Last updated: 2026-05-16T00:21:00Z
 | 3 | ✅ done | Thread `MarketRegime` through `option_chain_to_csv_vec` and its callers | 9c3da59 |
 | 4 | ✅ done | Add regime flag to Telegram caption | f0e756a |
 | 5 | ✅ done | Compute SPY trend and wire regime into PerformAll pipeline | 65fabfd |
-| 6 | ⏸ done-review | End-to-end integration test with mock data (checkpoint: done) | — |
+| 6 | ✅ done | End-to-end integration test with mock data (checkpoint: done) | b666d23 |
