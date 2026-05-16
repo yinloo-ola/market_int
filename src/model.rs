@@ -251,6 +251,8 @@ pub struct TopPick {
     pub sharpe: f64,
     pub price_percentile: Option<f64>,
     pub earnings: Option<EarningsInfo>,
+    pub trend_short: Option<f64>,
+    pub trend_long: Option<f64>,
 }
 
 pub fn option_chain_to_csv_vec(
@@ -287,6 +289,8 @@ pub fn option_chain_to_csv_vec(
             "score",
             "price_percentile",
             "earnings_before_expiry",
+            "trend_short",
+            "trend_long",
         ])
         .map_err(QuotesError::CsvError)?;
 
@@ -321,6 +325,11 @@ pub fn option_chain_to_csv_vec(
             None => String::new(),
         };
 
+        let (trend_short_str, trend_long_str) = match trend_data.get(&chain.underlying) {
+            Some((short, long)) => (format!("{:.3}", short), format!("{:.3}", long)),
+            None => (String::new(), String::new()),
+        };
+
         writer
             .write_record([
                 &chain.underlying,
@@ -343,6 +352,8 @@ pub fn option_chain_to_csv_vec(
                 &score_str,
                 &momentum,
                 &earnings_str,
+                &trend_short_str,
+                &trend_long_str,
             ])
             .map_err(QuotesError::CsvError)?;
     }
@@ -374,6 +385,8 @@ pub fn option_chain_to_csv_vec(
             let chain = &all_chains[*idx];
             let sharpe = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
             let pp = price_percentiles.get(&chain.underlying).copied();
+            let ts = trend_data.get(&chain.underlying).map(|(s, _)| *s);
+            let tl = trend_data.get(&chain.underlying).map(|(_, l)| *l);
             TopPick {
                 rank: rank + 1,
                 underlying: chain.underlying.clone(),
@@ -385,6 +398,8 @@ pub fn option_chain_to_csv_vec(
                 sharpe,
                 price_percentile: pp,
                 earnings: earnings_map.get(&chain.underlying).cloned(),
+                trend_short: ts,
+                trend_long: tl,
             }
         })
         .collect();
@@ -757,5 +772,65 @@ mod tests {
         // reduction = (1.0625 - 1.0) * 4.0 = 0.25 → exactly at cap
         let factor = calculate_trend_factor(1.0625);
         assert!((factor - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_top_picks_trend_filter_blocks_weak_stock() {
+        // AAPL has strong trend → passes filter and gets scored
+        // MSFT has weak trend → blocked by filter, gets no score
+        let chains = vec![
+            make_chain("AAPL", 90.0, 0.35),
+            make_chain("MSFT", 380.0, 0.40),
+        ];
+
+        let mut sharpe = HashMap::new();
+        sharpe.insert("AAPL".to_string(), 1.5);
+        sharpe.insert("MSFT".to_string(), 1.5);
+
+        let mut ranges = HashMap::new();
+        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+        ranges.insert("MSFT".to_string(), PutPriceRange { min: 350.0, max: 420.0 });
+
+        let percentiles = HashMap::new();
+        let earnings = HashMap::new();
+
+        // MSFT has weak trend (below 0.98) → should be filtered out
+        let mut trend_data = HashMap::new();
+        trend_data.insert("AAPL".to_string(), (1.05, 1.06));
+        trend_data.insert("MSFT".to_string(), (0.95, 0.94));
+
+        let (_csv, top_picks) = option_chain_to_csv_vec(
+            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data,
+        ).unwrap();
+
+        assert_eq!(top_picks.len(), 1, "only AAPL should pass trend filter");
+        assert_eq!(top_picks[0].underlying, "AAPL");
+        assert_eq!(top_picks[0].trend_short, Some(1.05));
+        assert_eq!(top_picks[0].trend_long, Some(1.06));
+    }
+
+    #[test]
+    fn test_top_picks_no_trend_data_still_scored() {
+        // When no trend data exists, stocks default to (1.0, 1.0) → passes filter
+        let chains = vec![
+            make_chain("AAPL", 90.0, 0.35),
+        ];
+
+        let mut sharpe = HashMap::new();
+        sharpe.insert("AAPL".to_string(), 1.5);
+
+        let mut ranges = HashMap::new();
+        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+
+        let percentiles = HashMap::new();
+        let earnings = HashMap::new();
+        let trend_data = HashMap::new(); // empty — no trend data
+
+        let (_csv, top_picks) = option_chain_to_csv_vec(
+            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data,
+        ).unwrap();
+
+        assert_eq!(top_picks.len(), 1, "should still score without trend data");
+        assert_eq!(top_picks[0].trend_short, None);
     }
 }
