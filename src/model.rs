@@ -255,6 +255,7 @@ pub struct OptionStrikeCandle {
 pub struct TopPick {
     pub rank: usize,
     pub underlying: String,
+    pub sector: String,
     pub strike: f64,
     pub bid: f64,
     pub ask: f64,
@@ -274,6 +275,7 @@ pub fn option_chain_to_csv_vec(
     price_percentiles: &HashMap<String, f64>,
     earnings_map: &HashMap<String, EarningsInfo>,
     trend_data: &HashMap<String, (f64, f64)>,
+    sectors: &HashMap<String, String>,
     regime: &crate::regime::MarketRegime,
 ) -> Result<(Vec<u8>, Vec<TopPick>)> {
     let buf = BufWriter::new(Vec::new());
@@ -283,6 +285,7 @@ pub fn option_chain_to_csv_vec(
     writer
         .write_record([
             "underlying",
+            "sector",
             "strike",
             "underlying_price",
             "side",
@@ -349,9 +352,15 @@ pub fn option_chain_to_csv_vec(
             None => (String::new(), String::new()),
         };
 
+        let sector_str = sectors
+            .get(&chain.underlying)
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string());
+
         writer
             .write_record([
                 &chain.underlying,
+                &sector_str,
                 &chain.strike.to_string(),
                 &chain.underlying_price.to_string(),
                 &format!("{:?}", chain.side),
@@ -398,33 +407,53 @@ pub fn option_chain_to_csv_vec(
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
     let mut seen = HashSet::new();
-    let top_picks: Vec<TopPick> = scored
-        .iter()
-        .filter(|(idx, _)| seen.insert(all_chains[*idx].underlying.clone()))
-        .take(3)
-        .enumerate()
-        .map(|(rank, (idx, score))| {
-            let chain = &all_chains[*idx];
-            let sharpe = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
-            let pp = price_percentiles.get(&chain.underlying).copied();
-            let ts = trend_data.get(&chain.underlying).map(|(s, _)| *s);
-            let tl = trend_data.get(&chain.underlying).map(|(_, l)| *l);
-            TopPick {
-                rank: rank + 1,
-                underlying: chain.underlying.clone(),
-                strike: chain.strike,
-                bid: chain.bid,
-                ask: chain.ask,
-                rate_of_return: chain.rate_of_return,
-                score: *score,
-                sharpe,
-                price_percentile: pp,
-                earnings: earnings_map.get(&chain.underlying).cloned(),
-                trend_short: ts,
-                trend_long: tl,
-            }
-        })
-        .collect();
+    let mut seen_sectors = HashSet::new();
+    let mut top_picks: Vec<TopPick> = Vec::new();
+    let mut rank = 0;
+
+    for (idx, score) in &scored {
+        if rank >= 3 {
+            break;
+        }
+        let chain = &all_chains[*idx];
+        if seen.contains(&chain.underlying) {
+            continue;
+        }
+        let sector = sectors
+            .get(&chain.underlying)
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string());
+        if sector != "Unknown" && seen_sectors.contains(&sector) {
+            continue;
+        }
+
+        let sharpe = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
+        let pp = price_percentiles.get(&chain.underlying).copied();
+        let ts = trend_data.get(&chain.underlying).map(|(s, _)| *s);
+        let tl = trend_data.get(&chain.underlying).map(|(_, l)| *l);
+
+        seen.insert(chain.underlying.clone());
+        if sector != "Unknown" {
+            seen_sectors.insert(sector.clone());
+        }
+
+        rank += 1;
+        top_picks.push(TopPick {
+            rank,
+            underlying: chain.underlying.clone(),
+            sector,
+            strike: chain.strike,
+            bid: chain.bid,
+            ask: chain.ask,
+            rate_of_return: chain.rate_of_return,
+            score: *score,
+            sharpe,
+            price_percentile: pp,
+            earnings: earnings_map.get(&chain.underlying).cloned(),
+            trend_short: ts,
+            trend_long: tl,
+        });
+    }
 
     Ok((bytes, top_picks))
 }
@@ -734,6 +763,7 @@ mod tests {
             &percentiles,
             &earnings,
             &trend_data,
+            &HashMap::new(),
             &bull_regime(),
         )
         .unwrap();
@@ -786,6 +816,7 @@ mod tests {
             &percentiles,
             &earnings,
             &trend_data,
+            &HashMap::new(),
             &bull_regime(),
         )
         .unwrap();
@@ -896,6 +927,7 @@ mod tests {
             &percentiles,
             &earnings,
             &trend_data,
+            &HashMap::new(),
             &bull_regime(),
         )
         .unwrap();
@@ -934,6 +966,7 @@ mod tests {
             &percentiles,
             &earnings,
             &trend_data,
+            &HashMap::new(),
             &bull_regime(),
         )
         .unwrap();
@@ -1052,6 +1085,7 @@ mod tests {
             &percentiles,
             &earnings,
             &trend_data,
+            &HashMap::new(),
             &bull,
         )
         .unwrap();
@@ -1067,6 +1101,7 @@ mod tests {
             &percentiles,
             &earnings,
             &trend_data,
+            &HashMap::new(),
             &bear,
         )
         .unwrap();
@@ -1079,5 +1114,110 @@ mod tests {
             picks_bear.len() <= 4,
             "bear: GOOG (0.85) should still be blocked"
         );
+    }
+
+    #[test]
+    fn test_top_picks_sector_diversity() {
+        // AAPL and MSFT are both Technology, NVDA is also Technology, XOM is Energy
+        // Without sector filter: AAPL, MSFT, NVDA (all Tech)
+        // With sector filter: AAPL (Tech), XOM (Energy), then JPM (Financials)
+        let chains = vec![
+            make_chain("AAPL", 90.0, 0.35),
+            make_chain("MSFT", 350.0, 0.34),  // same sector as AAPL
+            make_chain("NVDA", 130.0, 0.33),  // same sector as AAPL
+            make_chain("XOM", 100.0, 0.32),   // Energy
+            make_chain("JPM", 200.0, 0.31),   // Financials
+        ];
+
+        let mut sharpe = HashMap::new();
+        for sym in &["AAPL", "MSFT", "NVDA", "XOM", "JPM"] {
+            sharpe.insert(sym.to_string(), 1.5);
+        }
+
+        let mut ranges = HashMap::new();
+        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+        ranges.insert("MSFT".to_string(), PutPriceRange { min: 300.0, max: 400.0 });
+        ranges.insert("NVDA".to_string(), PutPriceRange { min: 100.0, max: 160.0 });
+        ranges.insert("XOM".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+        ranges.insert("JPM".to_string(), PutPriceRange { min: 180.0, max: 220.0 });
+
+        let mut sectors = HashMap::new();
+        sectors.insert("AAPL".to_string(), "Technology".to_string());
+        sectors.insert("MSFT".to_string(), "Technology".to_string());
+        sectors.insert("NVDA".to_string(), "Technology".to_string());
+        sectors.insert("XOM".to_string(), "Energy".to_string());
+        sectors.insert("JPM".to_string(), "Financials".to_string());
+
+        let percentiles = HashMap::new();
+        let earnings = HashMap::new();
+        let trend_data = HashMap::new();
+
+        let (_csv, top_picks) = option_chain_to_csv_vec(
+            &chains,
+            &sharpe,
+            &ranges,
+            &percentiles,
+            &earnings,
+            &trend_data,
+            &sectors,
+            &bull_regime(),
+        )
+        .unwrap();
+
+        assert_eq!(top_picks.len(), 3);
+        assert_eq!(top_picks[0].underlying, "AAPL");
+        assert_eq!(top_picks[0].sector, "Technology");
+        assert_eq!(top_picks[1].underlying, "XOM");
+        assert_eq!(top_picks[1].sector, "Energy");
+        assert_eq!(top_picks[2].underlying, "JPM");
+        assert_eq!(top_picks[2].sector, "Financials");
+
+        // No two picks share a sector
+        let sectors_seen: HashSet<&str> =
+            top_picks.iter().map(|p| p.sector.as_str()).collect();
+        assert_eq!(sectors_seen.len(), top_picks.len());
+    }
+
+    #[test]
+    fn test_top_picks_unknown_sector_not_excluded() {
+        // Two stocks with Unknown sector should both be picked
+        let chains = vec![
+            make_chain("AAA", 90.0, 0.35),
+            make_chain("BBB", 90.0, 0.34),
+            make_chain("CCC", 90.0, 0.33),
+        ];
+
+        let mut sharpe = HashMap::new();
+        for sym in &["AAA", "BBB", "CCC"] {
+            sharpe.insert(sym.to_string(), 1.5);
+        }
+
+        let mut ranges = HashMap::new();
+        for sym in &["AAA", "BBB", "CCC"] {
+            ranges.insert(sym.to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+        }
+
+        // No sector mappings — all will be "Unknown"
+        let sectors = HashMap::new();
+        let percentiles = HashMap::new();
+        let earnings = HashMap::new();
+        let trend_data = HashMap::new();
+
+        let (_csv, top_picks) = option_chain_to_csv_vec(
+            &chains,
+            &sharpe,
+            &ranges,
+            &percentiles,
+            &earnings,
+            &trend_data,
+            &sectors,
+            &bull_regime(),
+        )
+        .unwrap();
+
+        assert_eq!(top_picks.len(), 3);
+        assert_eq!(top_picks[0].sector, "Unknown");
+        assert_eq!(top_picks[1].sector, "Unknown");
+        assert_eq!(top_picks[2].sector, "Unknown");
     }
 }

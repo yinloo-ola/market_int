@@ -145,6 +145,7 @@ pub async fn retrieve_option_chains_with_expiry(
     expiry_timeframe: ExpiryTimeframe,
     requester: &mut Requester,
     regime: &crate::regime::MarketRegime,
+    sectors: &HashMap<String, String>,
 ) -> model::Result<()> {
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
@@ -317,6 +318,7 @@ pub async fn retrieve_option_chains_with_expiry(
         &earnings_map,
         &price_percentiles,
         &trend_data,
+        sectors,
         period,
         regime,
     )
@@ -346,6 +348,7 @@ pub async fn publish_option_chains(
     mut conn: Connection,
     period: usize,
     regime: &crate::regime::MarketRegime,
+    sectors: &HashMap<String, String>,
 ) -> model::Result<()> {
     option_chain::create_table(&conn)?;
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
@@ -375,6 +378,7 @@ pub async fn publish_option_chains(
         &earnings_map,
         &price_percentiles,
         &trend_data,
+        sectors,
         period,
         regime,
     )
@@ -454,8 +458,14 @@ fn format_telegram_caption(
             .map(|t| format!(" | Trend: {:.0}%", t * 100.0))
             .unwrap_or_default();
 
+        let sector_str = if pick.sector != "Unknown" {
+            format!(" ({})", pick.sector)
+        } else {
+            String::new()
+        };
+
         caption.push_str(&format!(
-            "{}. {} ${strike:.0}P | Bid: ${bid:.2} / Ask: ${ask:.2} | Return: {:.0}%\n   Score: {:.2} | Sharpe: {:.1}{pctl}{trend_str}\n\n",
+            "{}. {}{sector_str} ${strike:.0}P | Bid: ${bid:.2} / Ask: ${ask:.2} | Return: {:.0}%\n   Score: {:.2} | Sharpe: {:.1}{pctl}{trend_str}\n\n",
             pick.rank,
             pick.underlying,
             pick.rate_of_return * 100.0,
@@ -531,6 +541,7 @@ pub async fn publish_to_telegram(
     _earnings_map: &HashMap<String, model::EarningsInfo>,
     price_percentiles: &HashMap<String, f64>,
     trend_data: &HashMap<String, (f64, f64)>,
+    sectors: &HashMap<String, String>,
     period: usize,
     regime: &crate::regime::MarketRegime,
 ) -> model::Result<()> {
@@ -542,6 +553,7 @@ pub async fn publish_to_telegram(
         price_percentiles,
         _earnings_map,
         trend_data,
+        sectors,
         regime,
     )?;
 
