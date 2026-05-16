@@ -574,7 +574,8 @@ mod tests {
 
     #[test]
     fn test_put_score_filtered_high_return() {
-        assert!(calculate_put_score(1.5, 0.10, 0.70, 1.05, 1.05, &bull_regime()).is_none());
+        // 0.85 > MAX_RATE_OF_RETURN (0.80)
+        assert!(calculate_put_score(1.5, 0.10, 0.85, 1.05, 1.05, &bull_regime()).is_none());
     }
 
     #[test]
@@ -599,7 +600,7 @@ mod tests {
 
     #[test]
     fn test_put_score_boundary_return_high() {
-        assert!(calculate_put_score(1.0, 0.10, 0.65, 1.05, 1.05, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.0, 0.10, 0.80, 1.05, 1.05, &bull_regime()).is_some());
     }
 
     #[test]

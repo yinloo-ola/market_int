@@ -7,7 +7,7 @@ pub const PRICE_PERCENTILE_DAYS: u32 = 20;
 pub const MOMENTUM_HIGH_THRESHOLD: f64 = 0.80;
 pub const MOMENTUM_EXTENDED_THRESHOLD: f64 = 0.90;
 pub const MIN_RATE_OF_RETURN: f64 = 0.25;
-pub const MAX_RATE_OF_RETURN: f64 = 0.65;
+pub const MAX_RATE_OF_RETURN: f64 = 0.80;
 pub const MAX_STRIKE_PERCENTILE: f64 = 0.60;
 
 // Trend filter constants
