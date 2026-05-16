@@ -18,7 +18,7 @@
 - `src/model.rs` — Domain types, error enums, scoring functions (`calculate_put_score`, `calculate_strike_percentile`, `option_chain_to_csv_vec`)
 - `src/marketdata/` — MarketData API client and response types
 - `src/tiger/` — Tiger Brokers API client (RSA-signed auth, option chains, earnings calendar)
-- `src/store/` — SQLite persistence layer (candle, true_range, max_drop, sharpe_ratio, price_percentile, option_chain)
+- `src/store/` — SQLite persistence layer (candle, true_range, max_drop, sharpe_ratio, price_percentile, trend, option_chain)
 - `src/constants.rs` — All tunable constants (candle count, thresholds, scoring weights)
 - `src/symbols.rs` — Reads newline-separated symbols from CSV file
 - `src/http/` — Shared HTTP client
@@ -56,6 +56,7 @@
 | `calculate-max-drop <path> <period>` | Calculate max drop (period: integer, e.g. 5 or 20) |
 | `calculate-sharpe-ratio <path>` | Calculate Sharpe ratios |
 | `calculate-price-percentile <path>` | Calculate 20-day price percentiles |
+| `calculate-trend <path>` | Calculate EMA20/EMA50 trend ratios |
 | `pull-option-chain5-day <path>` | Pull option chains with ~5-day expiry |
 | `pull-option-chain20-day <path>` | Pull option chains with ~20-day expiry |
 | `publish-option-chain <path>` | Publish top picks to Telegram |
@@ -71,7 +72,7 @@ Convenience targets are available in the `Makefile` (e.g., `make pull-quotes`, `
 - Run all tests: `cargo test`
 - Run a specific test: `cargo test <test_name>`
 - All tests are unit tests in `src/model.rs` (`mod tests` block)
-- Tests cover: `calculate_strike_percentile`, `calculate_put_score`, `momentum_flag`, `option_chain_to_csv_vec` (top picks uniqueness)
+- Tests cover: `calculate_strike_percentile`, `calculate_put_score`, `calculate_trend_factor`, `momentum_flag`, `option_chain_to_csv_vec` (top picks uniqueness, trend filter)
 - No integration tests or external API tests — all tests are pure functions with no I/O
 - **Always run `cargo test` before committing**
 
@@ -120,7 +121,8 @@ make gcloud-job
 
 ## Additional Notes
 
-- The option scoring model uses a weighted composite: 30% Sharpe, 40% safety (1 − strike percentile), 30% return proximity to ideal (0.35)
-- Pre-filters reject options with: rate of return outside [0.25, 0.65], Sharpe ≤ 0, or strike percentile > 0.60
+- The option scoring model uses a weighted composite: 30% trend (EMA ratio), 30% safety (1 − strike percentile), 20% Sharpe, 20% return proximity to ideal (0.35)
+- Pre-filters reject options with: rate of return outside [0.25, 0.65], Sharpe ≤ 0, strike percentile > 0.60, or trend ratio < 0.98 (below EMA)
+- Strike ranges are tightened by up to 25% when trend is strong (price well above EMA)
 - Top picks are deduplicated by underlying symbol (max 3 picks)
 - Momentum flags (`NORMAL` / `HIGH` / `EXTENDED`) are based on price percentile thresholds (0.80 / 0.90)
