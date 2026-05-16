@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Sector column in CSV output with GICS broad sector mapping from `data/sectors.csv`
+- Top 3 Telegram picks are now diversified across different sectors (stocks with "Unknown" sector are not excluded)
+- Telegram caption shows sector label next to ticker (e.g. `AAPL (Technology)`)
+- `sectors` module with `sector_of()` helper and `UNKNOWN_SECTOR` constant
+
 ## [0.7.0] - 2026-05-16
 
 ### Added
