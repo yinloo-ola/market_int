@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Result};
+use rusqlite::{Connection, Result, params};
 
 /// Creates the trend table if it doesn't exist.
 pub fn create_table(conn: &Connection) -> Result<()> {
@@ -35,7 +35,14 @@ pub fn save_trend(
     let mut stmt = conn.prepare(
         "REPLACE INTO trend (symbol, ema_short, ema_long, trend_ratio_short, trend_ratio_long, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )?;
-    stmt.execute(params![symbol, ema_short, ema_long, trend_ratio_short, trend_ratio_long, timestamp])?;
+    stmt.execute(params![
+        symbol,
+        ema_short,
+        ema_long,
+        trend_ratio_short,
+        trend_ratio_long,
+        timestamp
+    ])?;
     Ok(())
 }
 

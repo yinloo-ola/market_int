@@ -1,5 +1,5 @@
 use super::super::model;
-use rusqlite::{params, Connection, Result};
+use rusqlite::{Connection, Result, params};
 
 /// Initializes the candle table in the SQLite database.
 pub fn create_table(conn: &Connection) -> Result<()> {

@@ -278,26 +278,49 @@ pub async fn retrieve_option_chains_with_expiry(
     // Fetch earnings calendar from now to the end of the option period
     let today_ny = Local::now().with_timezone(&New_York);
     let end_date_ny = today_ny + chrono::Duration::days(period as i64 + 7);
-    let earnings_map = match requester.query_earnings_calendar("US", &today_ny, &end_date_ny).await {
+    let earnings_map = match requester
+        .query_earnings_calendar("US", &today_ny, &end_date_ny)
+        .await
+    {
         Ok(entries) => {
             let mut map = HashMap::new();
             for entry in entries {
-                map.insert(entry.symbol.clone(), model::EarningsInfo {
-                    report_date: entry.report_date,
-                    report_time: entry.report_time,
-                    expected_eps: entry.expected_eps,
-                });
+                map.insert(
+                    entry.symbol.clone(),
+                    model::EarningsInfo {
+                        report_date: entry.report_date,
+                        report_time: entry.report_time,
+                        expected_eps: entry.expected_eps,
+                    },
+                );
             }
-            log::info!("Earnings calendar: {} symbols with earnings before {}", map.len(), end_date_ny.format("%Y-%m-%d"));
+            log::info!(
+                "Earnings calendar: {} symbols with earnings before {}",
+                map.len(),
+                end_date_ny.format("%Y-%m-%d")
+            );
             map
         }
         Err(e) => {
-            log::warn!("Failed to fetch earnings calendar, proceeding without: {}", e);
+            log::warn!(
+                "Failed to fetch earnings calendar, proceeding without: {}",
+                e
+            );
             HashMap::new()
         }
     };
 
-    publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, &earnings_map, &price_percentiles, &trend_data, period, regime).await
+    publish_to_telegram(
+        &all_chains,
+        &sharpe_ratios,
+        &price_ranges,
+        &earnings_map,
+        &price_percentiles,
+        &trend_data,
+        period,
+        regime,
+    )
+    .await
 }
 
 /// Days to add from each weekday for Short and Medium timeframes.
@@ -345,7 +368,17 @@ pub async fn publish_option_chains(
     let price_percentiles = collect_price_percentiles(&conn, &symbols);
     let trend_data = collect_trend_data(&conn, &symbols);
 
-    publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, &earnings_map, &price_percentiles, &trend_data, period, regime).await
+    publish_to_telegram(
+        &all_chains,
+        &sharpe_ratios,
+        &price_ranges,
+        &earnings_map,
+        &price_percentiles,
+        &trend_data,
+        period,
+        regime,
+    )
+    .await
 }
 
 /// Collects Sharpe ratios for the given symbols from the database.
@@ -353,7 +386,9 @@ fn collect_sharpe_ratios(conn: &Connection, symbols: &[String]) -> HashMap<Strin
     let mut ratios = HashMap::new();
     for symbol in symbols {
         match sharpe_ratio::get_sharpe_ratio(conn, symbol) {
-            Ok(Some(ratio)) => { ratios.insert(symbol.clone(), ratio); }
+            Ok(Some(ratio)) => {
+                ratios.insert(symbol.clone(), ratio);
+            }
             Ok(None) => log::warn!("No Sharpe ratio found for symbol: {}", symbol),
             Err(err) => log::error!("Failed to get Sharpe ratio for {}: {}", symbol, err),
         }
@@ -370,9 +405,21 @@ fn collect_price_ranges(
     for symbol in symbols {
         match candle::get_candles(conn, symbol, constants::PRICE_PERCENTILE_DAYS) {
             Ok(candles) if !candles.is_empty() => {
-                let min_price = candles.iter().map(|c| c.close).fold(f64::INFINITY, f64::min);
-                let max_price = candles.iter().map(|c| c.close).fold(f64::NEG_INFINITY, f64::max);
-                ranges.insert(symbol.clone(), model::PutPriceRange { min: min_price, max: max_price });
+                let min_price = candles
+                    .iter()
+                    .map(|c| c.close)
+                    .fold(f64::INFINITY, f64::min);
+                let max_price = candles
+                    .iter()
+                    .map(|c| c.close)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                ranges.insert(
+                    symbol.clone(),
+                    model::PutPriceRange {
+                        min: min_price,
+                        max: max_price,
+                    },
+                );
             }
             _ => log::warn!("No 20-day candles found for symbol: {}", symbol),
         }
@@ -381,7 +428,11 @@ fn collect_price_ranges(
 }
 
 /// Formats a Telegram caption from top picks.
-fn format_telegram_caption(top_picks: &[model::TopPick], period: usize, regime: &crate::regime::MarketRegime) -> String {
+fn format_telegram_caption(
+    top_picks: &[model::TopPick],
+    period: usize,
+    regime: &crate::regime::MarketRegime,
+) -> String {
     let now_singapore = Local::now().with_timezone(&Singapore);
     let date_str = now_singapore.format("%d%b").to_string();
 
@@ -393,11 +444,13 @@ fn format_telegram_caption(top_picks: &[model::TopPick], period: usize, regime: 
     caption.push_str(&format!("🏆 Top 3 Puts — {} {}-day\n\n", date_str, period));
 
     for pick in top_picks {
-        let pctl = pick.price_percentile
+        let pctl = pick
+            .price_percentile
             .map(|p| format!(" | Pctl: {:.0}%", p * 100.0))
             .unwrap_or_default();
 
-        let trend_str = pick.trend_short
+        let trend_str = pick
+            .trend_short
             .map(|t| format!(" | Trend: {:.0}%", t * 100.0))
             .unwrap_or_default();
 
@@ -482,7 +535,15 @@ pub async fn publish_to_telegram(
     regime: &crate::regime::MarketRegime,
 ) -> model::Result<()> {
     // Save all_chains to a csv file and upload it to dropbox
-    let (csv, top_picks) = model::option_chain_to_csv_vec(all_chains, sharpe_ratios, price_ranges, price_percentiles, _earnings_map, trend_data, regime)?;
+    let (csv, top_picks) = model::option_chain_to_csv_vec(
+        all_chains,
+        sharpe_ratios,
+        price_ranges,
+        price_percentiles,
+        _earnings_map,
+        trend_data,
+        regime,
+    )?;
 
     let now_singapore = Local::now().with_timezone(&Singapore);
     let formatted_date = now_singapore.format("%d%b_%H%M").to_string();

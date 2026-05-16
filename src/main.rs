@@ -43,12 +43,12 @@ mod store {
     pub mod option_chain;
     /// price percentile storage.
     pub mod price_percentile;
-    /// Trend data storage.
-    pub mod trend;
     /// Sharpe ratio storage.
     pub mod sharpe_ratio;
     /// SQLite database interaction.
     pub mod sqlite;
+    /// Trend data storage.
+    pub mod trend;
     /// true range storage.
     pub mod true_range;
 }
@@ -350,7 +350,9 @@ async fn main() {
                     let r = crate::regime::MarketRegime::from_spy_trend(spy_trend);
                     log::info!(
                         "Market regime: bearness={:.2}, threshold={:.3}, flag={}",
-                        r.bearness, r.trend_threshold, r.flag
+                        r.bearness,
+                        r.trend_threshold,
+                        r.flag
                     );
                     r
                 }
@@ -450,17 +452,27 @@ async fn main() {
             let today_ny = Local::now().with_timezone(&New_York);
             let two_weeks_ny = today_ny + chrono::Duration::days(14);
 
-            match requester.query_earnings_calendar("US", &today_ny, &two_weeks_ny).await {
+            match requester
+                .query_earnings_calendar("US", &today_ny, &two_weeks_ny)
+                .await
+            {
                 Ok(entries) => {
                     let relevant: Vec<_> = entries
                         .iter()
                         .filter(|e| symbol_list.contains(&e.symbol.as_str()))
                         .collect();
-                    log::info!("Earnings calendar: {} total, {} relevant to test symbols", entries.len(), relevant.len());
+                    log::info!(
+                        "Earnings calendar: {} total, {} relevant to test symbols",
+                        entries.len(),
+                        relevant.len()
+                    );
                     for entry in &relevant {
                         log::info!(
                             "  {} - Report: {} ({}) EPS: {:?}",
-                            entry.symbol, entry.report_date, entry.report_time, entry.expected_eps
+                            entry.symbol,
+                            entry.report_date,
+                            entry.report_time,
+                            entry.expected_eps
                         );
                     }
                 }

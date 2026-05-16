@@ -75,7 +75,7 @@ impl Requester {
             .build()
             .ok()?;
 
-        let requester = Requester { 
+        let requester = Requester {
             client,
             option_expiration_cache: HashMap::new(),
             cache_ttl: Duration::from_secs(300), // 5 minutes cache TTL
@@ -111,7 +111,9 @@ impl Requester {
         let resp = self
             .execute_query("corporate_action", "2.0", Some(biz_content))
             .await
-            .map_err(|e| RequestError::Other(format!("Failed to query earnings calendar: {}", e)))?;
+            .map_err(|e| {
+                RequestError::Other(format!("Failed to query earnings calendar: {}", e))
+            })?;
 
         let mut entries = Vec::new();
 
@@ -277,18 +279,24 @@ impl Requester {
         symbols: &[&str],
     ) -> Result<Vec<model::OptionExpiration>, RequestError> {
         let cache_key = self.generate_cache_key(symbols);
-        
+
         // Check if we have a valid cached entry
         if let Some(cached_entry) = self.option_expiration_cache.get(&cache_key) {
             if self.is_cache_valid(cached_entry) {
-                log::debug!("Using cached option expiration data for symbols: {}", cache_key);
+                log::debug!(
+                    "Using cached option expiration data for symbols: {}",
+                    cache_key
+                );
                 return Ok(cached_entry.data.clone());
             }
         }
 
         // Cache miss or expired, make API call
-        log::debug!("Fetching fresh option expiration data for symbols: {}", cache_key);
-        
+        log::debug!(
+            "Fetching fresh option expiration data for symbols: {}",
+            cache_key
+        );
+
         let biz_content = serde_json::json!({
             "symbols": symbols,
         });
@@ -788,7 +796,8 @@ fn parse_value_as_object<'a>(
 // Helper function to convert expiry timestamp to string format
 fn format_expiry_timestamp(timestamp: i64) -> String {
     if timestamp > 0 {
-        chrono::Local.timestamp_millis_opt(timestamp)
+        chrono::Local
+            .timestamp_millis_opt(timestamp)
             .single()
             .map(|dt| dt.format("%Y-%m-%d").to_string())
             .unwrap_or_else(|| "Unknown".to_string())

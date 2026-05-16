@@ -1,5 +1,5 @@
 use super::super::model;
-use rusqlite::{params, Connection, Result};
+use rusqlite::{Connection, Result, params};
 
 pub fn create_table(conn: &Connection) -> Result<()> {
     conn.execute(
@@ -34,7 +34,8 @@ pub fn create_table(conn: &Connection) -> Result<()> {
     conn.execute(
         "ALTER TABLE option_strike ADD COLUMN earnings_before_expiry TEXT",
         [],
-    ).ok(); // Ignore error if column already exists
+    )
+    .ok(); // Ignore error if column already exists
     Ok(())
 }
 

@@ -6,10 +6,7 @@ use crate::{
 use rusqlite::Connection;
 
 /// Calculates EMA-based trend ratios for all symbols and saves to DB.
-pub fn calculate_and_save(
-    symbols_file_path: &str,
-    conn: &mut Connection,
-) -> model::Result<()> {
+pub fn calculate_and_save(symbols_file_path: &str, conn: &mut Connection) -> model::Result<()> {
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
     store::trend::create_table(conn)?;
@@ -94,8 +91,16 @@ mod tests {
         let (ratio_short, ratio_long) = calculate_trend_ratios(&closes);
 
         // Price (159) should be well above both EMAs
-        assert!(ratio_short > 1.0, "short ratio should be > 1.0 in uptrend, got {}", ratio_short);
-        assert!(ratio_long > 1.0, "long ratio should be > 1.0 in uptrend, got {}", ratio_long);
+        assert!(
+            ratio_short > 1.0,
+            "short ratio should be > 1.0 in uptrend, got {}",
+            ratio_short
+        );
+        assert!(
+            ratio_long > 1.0,
+            "long ratio should be > 1.0 in uptrend, got {}",
+            ratio_long
+        );
     }
 
     #[test]
@@ -105,10 +110,26 @@ mod tests {
         let (ratio_short, ratio_long) = calculate_trend_ratios(&closes);
 
         // Price (82) should be well below both EMAs
-        assert!(ratio_short < 1.0, "short ratio should be < 1.0 in downtrend, got {}", ratio_short);
-        assert!(ratio_long < 1.0, "long ratio should be < 1.0 in downtrend, got {}", ratio_long);
-        assert!(ratio_short < 0.98, "short ratio should trigger filter (< 0.98), got {}", ratio_short);
-        assert!(ratio_long < 0.98, "long ratio should trigger filter (< 0.98), got {}", ratio_long);
+        assert!(
+            ratio_short < 1.0,
+            "short ratio should be < 1.0 in downtrend, got {}",
+            ratio_short
+        );
+        assert!(
+            ratio_long < 1.0,
+            "long ratio should be < 1.0 in downtrend, got {}",
+            ratio_long
+        );
+        assert!(
+            ratio_short < 0.98,
+            "short ratio should trigger filter (< 0.98), got {}",
+            ratio_short
+        );
+        assert!(
+            ratio_long < 0.98,
+            "long ratio should trigger filter (< 0.98), got {}",
+            ratio_long
+        );
     }
 
     #[test]
@@ -118,8 +139,16 @@ mod tests {
         let (ratio_short, ratio_long) = calculate_trend_ratios(&closes);
 
         // Price equals both EMAs → ratio should be exactly 1.0
-        assert!((ratio_short - 1.0).abs() < 0.01, "flat prices should give ratio ~1.0, got {}", ratio_short);
-        assert!((ratio_long - 1.0).abs() < 0.01, "flat prices should give ratio ~1.0, got {}", ratio_long);
+        assert!(
+            (ratio_short - 1.0).abs() < 0.01,
+            "flat prices should give ratio ~1.0, got {}",
+            ratio_short
+        );
+        assert!(
+            (ratio_long - 1.0).abs() < 0.01,
+            "flat prices should give ratio ~1.0, got {}",
+            ratio_long
+        );
     }
 
     #[test]
@@ -132,8 +161,16 @@ mod tests {
         let (ratio_short, ratio_long) = calculate_trend_ratios(&closes);
 
         // EMA20 should react to recent drop → ratio_short < 1.0
-        assert!(ratio_short < 1.0, "recent drop should push short ratio below 1.0, got {}", ratio_short);
+        assert!(
+            ratio_short < 1.0,
+            "recent drop should push short ratio below 1.0, got {}",
+            ratio_short
+        );
         // EMA50 still near 150 → ratio_long should be very low
-        assert!(ratio_long < 0.95, "recent drop should push long ratio well below 1.0, got {}", ratio_long);
+        assert!(
+            ratio_long < 0.95,
+            "recent drop should push long ratio well below 1.0, got {}",
+            ratio_long
+        );
     }
 }

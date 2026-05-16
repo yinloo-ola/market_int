@@ -12,8 +12,7 @@ pub struct MarketRegime {
 impl MarketRegime {
     /// Compute regime from SPY's trend_ratio_long (price / EMA50).
     pub fn from_spy_trend(spy_trend_long: f64) -> Self {
-        let bearness =
-            ((1.0 - spy_trend_long).max(0.0) / crate::constants::BEARNESS_MAX).min(1.0);
+        let bearness = ((1.0 - spy_trend_long).max(0.0) / crate::constants::BEARNESS_MAX).min(1.0);
 
         let trend_threshold = crate::constants::TREND_THRESHOLD_BULL
             - crate::constants::TREND_THRESHOLD_RANGE * bearness;
@@ -42,15 +41,12 @@ impl MarketRegime {
 }
 
 /// Fetch SPY's daily candles and compute trend_ratio_long (price / EMA50).
-pub async fn compute_spy_trend(requester: &mut crate::tiger::api_caller::Requester) -> Result<f64, String> {
+pub async fn compute_spy_trend(
+    requester: &mut crate::tiger::api_caller::Requester,
+) -> Result<f64, String> {
     let now = chrono::Local::now();
     let candles = requester
-        .query_stock_quotes(
-            &["SPY"],
-            &now,
-            crate::constants::EMA_LONG_PERIOD,
-            "day",
-        )
+        .query_stock_quotes(&["SPY"], &now, crate::constants::EMA_LONG_PERIOD, "day")
         .await
         .map_err(|e| format!("Failed to fetch SPY candles: {}", e))?;
 
@@ -68,7 +64,8 @@ pub async fn compute_spy_trend(requester: &mut crate::tiger::api_caller::Request
         ));
     }
 
-    let ema_long = crate::atr::exponential_moving_average(&closes, crate::constants::EMA_LONG_PERIOD);
+    let ema_long =
+        crate::atr::exponential_moving_average(&closes, crate::constants::EMA_LONG_PERIOD);
     let current_price = closes.last().unwrap();
     let trend_ratio_long = current_price / ema_long;
 

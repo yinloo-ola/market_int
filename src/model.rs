@@ -8,14 +8,14 @@ use std::{
 
 use csv::Writer;
 use rusqlite::{
-    types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef},
     ToSql,
+    types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef},
 };
 use serde::{Deserialize, Serialize};
 use telegram_bot_api::bot::APIResponseError;
 
-use crate::http::client;
 use crate::constants;
+use crate::http::client;
 
 /// Represents the market status.
 #[derive(Debug)]
@@ -133,7 +133,9 @@ pub fn calculate_put_score(
     regime: &crate::regime::MarketRegime,
 ) -> Option<f64> {
     // Pre-filters
-    if rate_of_return < constants::MIN_RATE_OF_RETURN || rate_of_return > constants::MAX_RATE_OF_RETURN {
+    if rate_of_return < constants::MIN_RATE_OF_RETURN
+        || rate_of_return > constants::MAX_RATE_OF_RETURN
+    {
         return None;
     }
     if sharpe <= 0.0 {
@@ -166,9 +168,13 @@ pub fn calculate_put_score(
 
 /// Returns a momentum flag based on price percentile.
 pub fn momentum_flag(price_percentile: f64) -> &'static str {
-    if price_percentile > constants::MOMENTUM_EXTENDED_THRESHOLD { "EXTENDED" }
-    else if price_percentile > constants::MOMENTUM_HIGH_THRESHOLD { "HIGH" }
-    else { "NORMAL" }
+    if price_percentile > constants::MOMENTUM_EXTENDED_THRESHOLD {
+        "EXTENDED"
+    } else if price_percentile > constants::MOMENTUM_HIGH_THRESHOLD {
+        "HIGH"
+    } else {
+        "NORMAL"
+    }
 }
 
 /// Represents the side of an option (call or put).
@@ -309,8 +315,12 @@ pub fn option_chain_to_csv_vec(
         let (strike_percentile_str, score_str) = match price_ranges.get(&chain.underlying) {
             Some(range) => {
                 let sp = calculate_strike_percentile(chain.strike, range.min, range.max);
-                let (ts, tl) = trend_data.get(&chain.underlying).copied().unwrap_or((1.0, 1.0));
-                let score = calculate_put_score(sharpe_ratio, sp, chain.rate_of_return, ts, tl, regime);
+                let (ts, tl) = trend_data
+                    .get(&chain.underlying)
+                    .copied()
+                    .unwrap_or((1.0, 1.0));
+                let score =
+                    calculate_put_score(sharpe_ratio, sp, chain.rate_of_return, ts, tl, regime);
                 let sp_str = format!("{:.3}", sp);
                 let score_str = score.map(|s| format!("{:.3}", s)).unwrap_or_default();
                 (sp_str, score_str)
@@ -318,7 +328,9 @@ pub fn option_chain_to_csv_vec(
             None => (String::new(), String::new()),
         };
 
-        let momentum = price_percentile.map(|p| format!("{:.0}%", p * 100.0)).unwrap_or_default();
+        let momentum = price_percentile
+            .map(|p| format!("{:.0}%", p * 100.0))
+            .unwrap_or_default();
 
         let earnings_str = match earnings_map.get(&chain.underlying) {
             Some(info) => {
@@ -375,7 +387,10 @@ pub fn option_chain_to_csv_vec(
             let sharpe = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
             let range = price_ranges.get(&chain.underlying)?;
             let sp = calculate_strike_percentile(chain.strike, range.min, range.max);
-            let (ts, tl) = trend_data.get(&chain.underlying).copied().unwrap_or((1.0, 1.0));
+            let (ts, tl) = trend_data
+                .get(&chain.underlying)
+                .copied()
+                .unwrap_or((1.0, 1.0));
             let score = calculate_put_score(sharpe, sp, chain.rate_of_return, ts, tl, regime)?;
             Some((i, score))
         })
@@ -686,25 +701,58 @@ mod tests {
         sharpe.insert("NVDA".to_string(), 1.5);
 
         let mut ranges = HashMap::new();
-        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
-        ranges.insert("TSLA".to_string(), PutPriceRange { min: 150.0, max: 250.0 });
-        ranges.insert("NVDA".to_string(), PutPriceRange { min: 100.0, max: 160.0 });
+        ranges.insert(
+            "AAPL".to_string(),
+            PutPriceRange {
+                min: 80.0,
+                max: 120.0,
+            },
+        );
+        ranges.insert(
+            "TSLA".to_string(),
+            PutPriceRange {
+                min: 150.0,
+                max: 250.0,
+            },
+        );
+        ranges.insert(
+            "NVDA".to_string(),
+            PutPriceRange {
+                min: 100.0,
+                max: 160.0,
+            },
+        );
 
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
         let trend_data = HashMap::new();
 
         let (_csv, top_picks) = option_chain_to_csv_vec(
-            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data, &bull_regime(),
-        ).unwrap();
+            &chains,
+            &sharpe,
+            &ranges,
+            &percentiles,
+            &earnings,
+            &trend_data,
+            &bull_regime(),
+        )
+        .unwrap();
 
         let underlyings: Vec<&str> = top_picks.iter().map(|p| p.underlying.as_str()).collect();
         let mut unique = underlyings.clone();
         unique.sort();
         unique.dedup();
-        assert_eq!(underlyings.len(), unique.len(), "top picks should have unique underlyings but got: {:?}", underlyings);
+        assert_eq!(
+            underlyings.len(),
+            unique.len(),
+            "top picks should have unique underlyings but got: {:?}",
+            underlyings
+        );
         assert_eq!(top_picks.len(), 3, "should have exactly 3 picks");
-        assert_eq!(top_picks[0].underlying, "AAPL", "first pick should be highest scoring");
+        assert_eq!(
+            top_picks[0].underlying, "AAPL",
+            "first pick should be highest scoring"
+        );
     }
 
     #[test]
@@ -719,17 +767,34 @@ mod tests {
         sharpe.insert("AAPL".to_string(), 1.5);
 
         let mut ranges = HashMap::new();
-        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+        ranges.insert(
+            "AAPL".to_string(),
+            PutPriceRange {
+                min: 80.0,
+                max: 120.0,
+            },
+        );
 
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
         let trend_data = HashMap::new();
 
         let (_csv, top_picks) = option_chain_to_csv_vec(
-            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data, &bull_regime(),
-        ).unwrap();
+            &chains,
+            &sharpe,
+            &ranges,
+            &percentiles,
+            &earnings,
+            &trend_data,
+            &bull_regime(),
+        )
+        .unwrap();
 
-        assert_eq!(top_picks.len(), 1, "should return only 1 pick for 1 unique underlying");
+        assert_eq!(
+            top_picks.len(),
+            1,
+            "should return only 1 pick for 1 unique underlying"
+        );
     }
 
     #[test]
@@ -801,8 +866,20 @@ mod tests {
         sharpe.insert("MSFT".to_string(), 1.5);
 
         let mut ranges = HashMap::new();
-        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
-        ranges.insert("MSFT".to_string(), PutPriceRange { min: 350.0, max: 420.0 });
+        ranges.insert(
+            "AAPL".to_string(),
+            PutPriceRange {
+                min: 80.0,
+                max: 120.0,
+            },
+        );
+        ranges.insert(
+            "MSFT".to_string(),
+            PutPriceRange {
+                min: 350.0,
+                max: 420.0,
+            },
+        );
 
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
@@ -813,8 +890,15 @@ mod tests {
         trend_data.insert("MSFT".to_string(), (0.95, 0.94));
 
         let (_csv, top_picks) = option_chain_to_csv_vec(
-            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data, &bull_regime(),
-        ).unwrap();
+            &chains,
+            &sharpe,
+            &ranges,
+            &percentiles,
+            &earnings,
+            &trend_data,
+            &bull_regime(),
+        )
+        .unwrap();
 
         assert_eq!(top_picks.len(), 1, "only AAPL should pass trend filter");
         assert_eq!(top_picks[0].underlying, "AAPL");
@@ -825,23 +909,34 @@ mod tests {
     #[test]
     fn test_top_picks_no_trend_data_still_scored() {
         // When no trend data exists, stocks default to (1.0, 1.0) → passes filter
-        let chains = vec![
-            make_chain("AAPL", 90.0, 0.35),
-        ];
+        let chains = vec![make_chain("AAPL", 90.0, 0.35)];
 
         let mut sharpe = HashMap::new();
         sharpe.insert("AAPL".to_string(), 1.5);
 
         let mut ranges = HashMap::new();
-        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+        ranges.insert(
+            "AAPL".to_string(),
+            PutPriceRange {
+                min: 80.0,
+                max: 120.0,
+            },
+        );
 
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
         let trend_data = HashMap::new(); // empty — no trend data
 
         let (_csv, top_picks) = option_chain_to_csv_vec(
-            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data, &bull_regime(),
-        ).unwrap();
+            &chains,
+            &sharpe,
+            &ranges,
+            &percentiles,
+            &earnings,
+            &trend_data,
+            &bull_regime(),
+        )
+        .unwrap();
 
         assert_eq!(top_picks.len(), 1, "should still score without trend data");
         assert_eq!(top_picks[0].trend_short, None);
@@ -875,8 +970,12 @@ mod tests {
         // With these inputs: safety_norm=0.9, sharpe_norm=0.75
         // Bull: trend_norm=(1.05-0.98)/0.10=0.7, return_norm=1.0
         // Bear: trend_norm=(1.05-0.92)/0.10=1.0(clamped), return_norm=1.0
-        assert!(bear_score > bull_score,
-            "bear score ({}) should be > bull score ({})", bear_score, bull_score);
+        assert!(
+            bear_score > bull_score,
+            "bear score ({}) should be > bull score ({})",
+            bear_score,
+            bull_score
+        );
     }
 
     #[test]
@@ -885,11 +984,11 @@ mod tests {
         // Under bull regime, only 1 passes → 1 top pick
         // Under bear regime, more pass → more top picks
         let chains = vec![
-            make_chain("AAPL", 90.0, 0.35),   // strong trend
-            make_chain("MSFT", 350.0, 0.35),   // moderate trend (0.95)
-            make_chain("TSLA", 200.0, 0.35),   // weak trend (0.93)
-            make_chain("NVDA", 120.0, 0.35),   // very weak (0.90)
-            make_chain("GOOG", 150.0, 0.35),   // freefall (0.85)
+            make_chain("AAPL", 90.0, 0.35),  // strong trend
+            make_chain("MSFT", 350.0, 0.35), // moderate trend (0.95)
+            make_chain("TSLA", 200.0, 0.35), // weak trend (0.93)
+            make_chain("NVDA", 120.0, 0.35), // very weak (0.90)
+            make_chain("GOOG", 150.0, 0.35), // freefall (0.85)
         ];
 
         let mut sharpe = HashMap::new();
@@ -898,11 +997,41 @@ mod tests {
         }
 
         let mut ranges = HashMap::new();
-        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
-        ranges.insert("MSFT".to_string(), PutPriceRange { min: 300.0, max: 400.0 });
-        ranges.insert("TSLA".to_string(), PutPriceRange { min: 150.0, max: 250.0 });
-        ranges.insert("NVDA".to_string(), PutPriceRange { min: 100.0, max: 160.0 });
-        ranges.insert("GOOG".to_string(), PutPriceRange { min: 130.0, max: 180.0 });
+        ranges.insert(
+            "AAPL".to_string(),
+            PutPriceRange {
+                min: 80.0,
+                max: 120.0,
+            },
+        );
+        ranges.insert(
+            "MSFT".to_string(),
+            PutPriceRange {
+                min: 300.0,
+                max: 400.0,
+            },
+        );
+        ranges.insert(
+            "TSLA".to_string(),
+            PutPriceRange {
+                min: 150.0,
+                max: 250.0,
+            },
+        );
+        ranges.insert(
+            "NVDA".to_string(),
+            PutPriceRange {
+                min: 100.0,
+                max: 160.0,
+            },
+        );
+        ranges.insert(
+            "GOOG".to_string(),
+            PutPriceRange {
+                min: 130.0,
+                max: 180.0,
+            },
+        );
 
         let mut trend_data = HashMap::new();
         trend_data.insert("AAPL".to_string(), (1.05, 1.06));
@@ -917,17 +1046,38 @@ mod tests {
         // Bull regime: only AAPL passes trend filter (threshold=0.98)
         let bull = MarketRegime::from_spy_trend(1.05);
         let (_csv_bull, picks_bull) = option_chain_to_csv_vec(
-            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data, &bull,
-        ).unwrap();
+            &chains,
+            &sharpe,
+            &ranges,
+            &percentiles,
+            &earnings,
+            &trend_data,
+            &bull,
+        )
+        .unwrap();
         assert_eq!(picks_bull.len(), 1, "bull: only AAPL should pass");
         assert_eq!(picks_bull[0].underlying, "AAPL");
 
         // Bear regime: AAPL, MSFT, TSLA pass (threshold=0.92), NVDA at 0.90 also passes
         let bear = MarketRegime::from_spy_trend(0.92);
         let (_csv_bear, picks_bear) = option_chain_to_csv_vec(
-            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data, &bear,
-        ).unwrap();
-        assert!(picks_bear.len() >= 3, "bear: at least AAPL, MSFT, TSLA should pass, got {}", picks_bear.len());
-        assert!(picks_bear.len() <= 4, "bear: GOOG (0.85) should still be blocked");
+            &chains,
+            &sharpe,
+            &ranges,
+            &percentiles,
+            &earnings,
+            &trend_data,
+            &bear,
+        )
+        .unwrap();
+        assert!(
+            picks_bear.len() >= 3,
+            "bear: at least AAPL, MSFT, TSLA should pass, got {}",
+            picks_bear.len()
+        );
+        assert!(
+            picks_bear.len() <= 4,
+            "bear: GOOG (0.85) should still be blocked"
+        );
     }
 }

@@ -1,5 +1,5 @@
 use super::super::model;
-use rusqlite::{params, Connection, Result};
+use rusqlite::{Connection, Result, params};
 
 pub fn create_table(conn: &Connection) -> Result<()> {
     conn.execute(
