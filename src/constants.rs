@@ -13,6 +13,10 @@ pub const MAX_STRIKE_PERCENTILE: f64 = 0.60;
 // Trend filter constants
 pub const EMA_SHORT_PERIOD: u32 = 20;
 pub const EMA_LONG_PERIOD: u32 = 50;
-pub const TREND_FILTER_THRESHOLD: f64 = 0.98;
+pub const TREND_THRESHOLD_BULL: f64 = 0.98;      // Threshold in bull market (current behavior)
+pub const TREND_THRESHOLD_RANGE: f64 = 0.06;     // How far threshold can drop (0.98 → 0.92)
+pub const BEARNESS_MAX: f64 = 0.08;               // SPY drop that maps to bearness = 1.0
+#[deprecated(note = "Use TREND_THRESHOLD_BULL via MarketRegime instead")]
+pub const TREND_FILTER_THRESHOLD: f64 = TREND_THRESHOLD_BULL;
 pub const TREND_TIGHTEN_MULTIPLIER: f64 = 4.0;
 pub const TREND_TIGHTEN_CAP: f64 = 0.25;

@@ -12,6 +12,7 @@ mod http {
 }
 // Data models.
 mod model;
+mod regime;
 // Pull quotes from API.
 mod quotes;
 // Average True Range (ATR) calculation.
