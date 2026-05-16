@@ -40,6 +40,8 @@ mod store {
     pub mod option_chain;
     /// price percentile storage.
     pub mod price_percentile;
+    /// Trend data storage.
+    pub mod trend;
     /// Sharpe ratio storage.
     pub mod sharpe_ratio;
     /// SQLite database interaction.

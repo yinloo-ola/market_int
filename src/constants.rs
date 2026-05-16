@@ -9,3 +9,10 @@ pub const MOMENTUM_EXTENDED_THRESHOLD: f64 = 0.90;
 pub const MIN_RATE_OF_RETURN: f64 = 0.25;
 pub const MAX_RATE_OF_RETURN: f64 = 0.65;
 pub const MAX_STRIKE_PERCENTILE: f64 = 0.60;
+
+// Trend filter constants
+pub const EMA_SHORT_PERIOD: u32 = 20;
+pub const EMA_LONG_PERIOD: u32 = 50;
+pub const TREND_FILTER_THRESHOLD: f64 = 0.98;
+pub const TREND_TIGHTEN_MULTIPLIER: f64 = 4.0;
+pub const TREND_TIGHTEN_CAP: f64 = 0.25;
