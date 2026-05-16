@@ -13,12 +13,14 @@ pub fn read_symbols_from_file(symbols_file_path: &str) -> Result<Vec<String>> {
     }
 
     let file = OpenOptions::new().read(true).open(path)?;
-    let lines: Result<Vec<String>> = BufReader::new(file)
+    let symbols: Vec<String> = BufReader::new(file)
         .lines()
         .map(|line| line.map_err(|_e| QuotesError::CouldNotReadLine))
+        .filter_map(|line| line.ok())
+        .map(|line| line.split(',').next().unwrap_or(&line).trim().to_string())
+        .filter(|s| !s.is_empty())
         .collect();
 
-    let symbols = lines?;
     if symbols.is_empty() {
         return Err(QuotesError::EmptySymbolFile(symbols_file_path.to_string()));
     }
