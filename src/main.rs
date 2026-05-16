@@ -227,7 +227,13 @@ async fn main() {
                     return;
                 }
             };
-            let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
+            let regime = match crate::regime::compute_spy_trend(&mut requester).await {
+                Ok(spy_trend) => crate::regime::MarketRegime::from_spy_trend(spy_trend),
+                Err(e) => {
+                    log::warn!("Failed to compute SPY regime, using bull defaults: {}", e);
+                    crate::regime::MarketRegime::from_spy_trend(1.05)
+                }
+            };
             match option::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
                 &model::OptionChainSide::Put,
@@ -251,7 +257,13 @@ async fn main() {
                     return;
                 }
             };
-            let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
+            let regime = match crate::regime::compute_spy_trend(&mut requester).await {
+                Ok(spy_trend) => crate::regime::MarketRegime::from_spy_trend(spy_trend),
+                Err(e) => {
+                    log::warn!("Failed to compute SPY regime, using bull defaults: {}", e);
+                    crate::regime::MarketRegime::from_spy_trend(1.05)
+                }
+            };
             match option::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
                 &model::OptionChainSide::Put,
@@ -332,7 +344,21 @@ async fn main() {
                 }
             };
             // Pull option chains with 5-day expiry (short timeframe)
-            let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
+            // Compute SPY-based market regime
+            let regime = match crate::regime::compute_spy_trend(&mut requester).await {
+                Ok(spy_trend) => {
+                    let r = crate::regime::MarketRegime::from_spy_trend(spy_trend);
+                    log::info!(
+                        "Market regime: bearness={:.2}, threshold={:.3}, flag={}",
+                        r.bearness, r.trend_threshold, r.flag
+                    );
+                    r
+                }
+                Err(e) => {
+                    log::warn!("Failed to compute SPY regime, using bull defaults: {}", e);
+                    crate::regime::MarketRegime::from_spy_trend(1.05)
+                }
+            };
             match option::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
                 &model::OptionChainSide::Put,

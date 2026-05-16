@@ -41,6 +41,48 @@ impl MarketRegime {
     }
 }
 
+/// Fetch SPY's daily candles and compute trend_ratio_long (price / EMA50).
+pub async fn compute_spy_trend(requester: &mut crate::tiger::api_caller::Requester) -> Result<f64, String> {
+    let now = chrono::Local::now();
+    let candles = requester
+        .query_stock_quotes(
+            &["SPY"],
+            &now,
+            crate::constants::EMA_LONG_PERIOD,
+            "day",
+        )
+        .await
+        .map_err(|e| format!("Failed to fetch SPY candles: {}", e))?;
+
+    if candles.is_empty() {
+        return Err("No SPY candles returned".to_string());
+    }
+
+    let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
+
+    if closes.len() < crate::constants::EMA_LONG_PERIOD as usize {
+        return Err(format!(
+            "Not enough SPY candles (got {}, need {})",
+            closes.len(),
+            crate::constants::EMA_LONG_PERIOD
+        ));
+    }
+
+    let ema_long = crate::atr::exponential_moving_average(&closes, crate::constants::EMA_LONG_PERIOD);
+    let current_price = closes.last().unwrap();
+    let trend_ratio_long = current_price / ema_long;
+
+    log::info!(
+        "SPY regime: price={:.2}, EMA{}={:.2}, trend_ratio_long={:.4}",
+        current_price,
+        crate::constants::EMA_LONG_PERIOD,
+        ema_long,
+        trend_ratio_long
+    );
+
+    Ok(trend_ratio_long)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
