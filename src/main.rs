@@ -227,12 +227,14 @@ async fn main() {
                     return;
                 }
             };
+            let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
             match option::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
                 &model::OptionChainSide::Put,
                 &mut conn,
                 ExpiryTimeframe::Short,
                 &mut requester,
+                &regime,
             )
             .await
             {
@@ -249,12 +251,14 @@ async fn main() {
                     return;
                 }
             };
+            let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
             match option::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
                 &model::OptionChainSide::Put,
                 &mut conn,
                 ExpiryTimeframe::Medium,
                 &mut requester,
+                &regime,
             )
             .await
             {
@@ -328,12 +332,14 @@ async fn main() {
                 }
             };
             // Pull option chains with 5-day expiry (short timeframe)
+            let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
             match option::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
                 &model::OptionChainSide::Put,
                 &mut conn,
                 ExpiryTimeframe::Short,
                 &mut requester,
+                &regime,
             )
             .await
             {
@@ -348,6 +354,7 @@ async fn main() {
                 &mut conn,
                 ExpiryTimeframe::Medium,
                 &mut requester,
+                &regime,
             )
             .await
             {
@@ -357,7 +364,8 @@ async fn main() {
         }
 
         Commands::PublishOptionChain { symbols_file_path } => {
-            match option::publish_option_chains(&symbols_file_path, conn, 5).await {
+            let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
+            match option::publish_option_chains(&symbols_file_path, conn, 5, &regime).await {
                 Ok(_) => log::info!("Successfully published option chains"),
                 Err(err) => log::error!("Error publishing option chains: {}", err),
             }

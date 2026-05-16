@@ -144,6 +144,7 @@ pub async fn retrieve_option_chains_with_expiry(
     conn: &mut Connection,
     expiry_timeframe: ExpiryTimeframe,
     requester: &mut Requester,
+    regime: &crate::regime::MarketRegime,
 ) -> model::Result<()> {
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
@@ -296,7 +297,7 @@ pub async fn retrieve_option_chains_with_expiry(
         }
     };
 
-    publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, &earnings_map, &price_percentiles, &trend_data, period).await
+    publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, &earnings_map, &price_percentiles, &trend_data, period, regime).await
 }
 
 /// Days to add from each weekday for Short and Medium timeframes.
@@ -321,6 +322,7 @@ pub async fn publish_option_chains(
     symbols_file_path: &str,
     mut conn: Connection,
     period: usize,
+    regime: &crate::regime::MarketRegime,
 ) -> model::Result<()> {
     option_chain::create_table(&conn)?;
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
@@ -343,7 +345,7 @@ pub async fn publish_option_chains(
     let price_percentiles = collect_price_percentiles(&conn, &symbols);
     let trend_data = collect_trend_data(&conn, &symbols);
 
-    publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, &earnings_map, &price_percentiles, &trend_data, period).await
+    publish_to_telegram(&all_chains, &sharpe_ratios, &price_ranges, &earnings_map, &price_percentiles, &trend_data, period, regime).await
 }
 
 /// Collects Sharpe ratios for the given symbols from the database.
@@ -472,9 +474,10 @@ pub async fn publish_to_telegram(
     price_percentiles: &HashMap<String, f64>,
     trend_data: &HashMap<String, (f64, f64)>,
     period: usize,
+    regime: &crate::regime::MarketRegime,
 ) -> model::Result<()> {
     // Save all_chains to a csv file and upload it to dropbox
-    let (csv, top_picks) = model::option_chain_to_csv_vec(all_chains, sharpe_ratios, price_ranges, price_percentiles, _earnings_map, trend_data)?;
+    let (csv, top_picks) = model::option_chain_to_csv_vec(all_chains, sharpe_ratios, price_ranges, price_percentiles, _earnings_map, trend_data, regime)?;
 
     let now_singapore = Local::now().with_timezone(&Singapore);
     let formatted_date = now_singapore.format("%d%b_%H%M").to_string();
