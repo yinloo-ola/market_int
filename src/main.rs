@@ -29,6 +29,8 @@ mod trend;
 mod price_percentile;
 /// module to read symbols from symbol file
 mod symbols;
+/// module to load sector mappings
+mod sectors;
 // Tiger API client
 mod tiger {
     pub mod api_caller;

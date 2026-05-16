@@ -1,0 +1,94 @@
+use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
+
+use crate::model::{QuotesError, Result};
+
+pub fn load_sectors(path: &str) -> Result<HashMap<String, String>> {
+    let p = Path::new(path);
+    if !p.exists() {
+        log::warn!(
+            "Sectors file not found: {}. All sectors will be Unknown.",
+            path
+        );
+        return Ok(HashMap::new());
+    }
+
+    let file = OpenOptions::new().read(true).open(p)?;
+    let mut map = HashMap::new();
+
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(|_| QuotesError::CouldNotReadLine)?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.splitn(2, ',').collect();
+        if parts.len() == 2 {
+            map.insert(parts[0].trim().to_string(), parts[1].trim().to_string());
+        }
+    }
+
+    log::info!("Loaded {} sector mappings from {}", map.len(), path);
+    Ok(map)
+}
+
+/// Returns the sector for a symbol, or "Unknown" if not found.
+pub fn get_sector(sectors: &HashMap<String, String>, symbol: &str) -> String {
+    sectors
+        .get(symbol)
+        .cloned()
+        .unwrap_or_else(|| "Unknown".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_load_sectors() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "AAPL,Technology").unwrap();
+        writeln!(f, "XOM,Energy").unwrap();
+        writeln!(f, "JPM,Financials").unwrap();
+
+        let map = load_sectors(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(map.len(), 3);
+        assert_eq!(map["AAPL"], "Technology");
+        assert_eq!(map["XOM"], "Energy");
+        assert_eq!(map["JPM"], "Financials");
+    }
+
+    #[test]
+    fn test_load_sectors_missing_file() {
+        let map = load_sectors("/nonexistent/path.csv").unwrap();
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_load_sectors_skips_blank_lines() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "AAPL,Technology").unwrap();
+        writeln!(f, "").unwrap();
+        writeln!(f, "XOM,Energy").unwrap();
+
+        let map = load_sectors(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn test_get_sector_known() {
+        let mut map = HashMap::new();
+        map.insert("AAPL".to_string(), "Technology".to_string());
+        assert_eq!(get_sector(&map, "AAPL"), "Technology");
+    }
+
+    #[test]
+    fn test_get_sector_unknown() {
+        let map = HashMap::<String, String>::new();
+        assert_eq!(get_sector(&map, "UNKNOWN_TICKER"), "Unknown");
+    }
+}
