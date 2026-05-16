@@ -381,11 +381,16 @@ fn collect_price_ranges(
 }
 
 /// Formats a Telegram caption from top picks.
-fn format_telegram_caption(top_picks: &[model::TopPick], period: usize) -> String {
+fn format_telegram_caption(top_picks: &[model::TopPick], period: usize, regime: &crate::regime::MarketRegime) -> String {
     let now_singapore = Local::now().with_timezone(&Singapore);
     let date_str = now_singapore.format("%d%b").to_string();
 
-    let mut caption = format!("🏆 Top 3 Puts — {} {}-day\n\n", date_str, period);
+    let mut caption = String::new();
+    if !regime.flag.is_empty() {
+        caption.push_str(regime.flag);
+        caption.push('\n');
+    }
+    caption.push_str(&format!("🏆 Top 3 Puts — {} {}-day\n\n", date_str, period));
 
     for pick in top_picks {
         let pctl = pick.price_percentile
@@ -491,7 +496,7 @@ pub async fn publish_to_telegram(
 
     log::debug!("chat_id {chat_id}");
 
-    let caption = format_telegram_caption(&top_picks, period);
+    let caption = format_telegram_caption(&top_picks, period, regime);
 
     let resp = bot
         .send_document(telegram_bot_api::methods::SendDocument {
