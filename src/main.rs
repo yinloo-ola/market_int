@@ -153,6 +153,9 @@ enum Commands {
     CalculatePricePercentile {
         symbols_file_path: String,
     },
+    CalculateTrend {
+        symbols_file_path: String,
+    },
     // Test Tiger API
     TestTiger {
         symbols: String,
@@ -277,6 +280,13 @@ async fn main() {
             }
         }
 
+        Commands::CalculateTrend { symbols_file_path } => {
+            match trend::calculate_and_save(&symbols_file_path, &mut conn) {
+                Ok(_) => log::info!("Successfully calculated and saved trend data"),
+                Err(err) => log::error!("Error calculating trend data: {}", err),
+            }
+        }
+
         Commands::PerformAll { symbols_file_path } => {
             match quotes::pull_and_save(&symbols_file_path, &mut conn).await {
                 Ok(_) => log::info!("Successfully pulled and saved quotes"),
@@ -303,6 +313,10 @@ async fn main() {
             match price_percentile::calculate_and_save(&symbols_file_path, &mut conn) {
                 Ok(_) => log::info!("Successfully calculated and saved price percentiles"),
                 Err(err) => log::error!("Error calculating price percentiles: {}", err),
+            }
+            match trend::calculate_and_save(&symbols_file_path, &mut conn) {
+                Ok(_) => log::info!("Successfully calculated and saved trend data"),
+                Err(err) => log::error!("Error calculating trend data: {}", err),
             }
             // Initialize Tiger API requester once to cache option expiration data
             let mut requester = match tiger::api_caller::Requester::new().await {
