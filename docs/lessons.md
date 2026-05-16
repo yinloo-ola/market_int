@@ -13,3 +13,4 @@ Retire rules that no longer apply during finalizing.
 - When using constants, replace ALL magic numbers — don't leave some hardcoded and some constant.
 - API responses may not be arrays. Check the actual shape (e.g., a map keyed by dates) before parsing.
 - The `edit` tool requires exact whitespace matching. When oldText fails, use `cat -v -e -t` or `xxd` to inspect invisible characters like double newlines.
+- When testing continuous ranges with boundary assertions (e.g., `bearness == 0.50`), account for floating-point imprecision. Use tolerance (`abs() < epsilon`) or test at exact integer multiples rather than trusting division to produce clean values.

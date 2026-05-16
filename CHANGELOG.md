@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-05-16
+
+### Added
+
+- Market regime-aware trend filtering — SPY's position relative to its EMA50 dynamically adjusts the trend filter threshold (0.98→0.92) and scoring weights (safety↑ trend↓) based on market conditions (#98ddf1f, #9c3da59)
+- Telegram caption shows ⚠️ Correction or 🐻 Bear market flag when SPY is below its EMA50 (#f0e756a)
+- 15 new tests covering regime calculation, dynamic scoring, and integration scenarios (#98ddf1f, #b666d23)
 
 ### Fixed
 
@@ -150,7 +156,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Symbol chunking for batched API requests (#515239c)
 - Option chain retrieval based on ATR ranges (#28e804c)
 
-[Unreleased]: https://github.com/compare/v0.6.0...HEAD
+[0.7.0]: https://github.com/compare/v0.6.2...v0.7.0
+[Unreleased]: https://github.com/compare/v0.7.0...HEAD
 [0.6.0]: https://github.com/compare/v0.5.6...v0.6.0
 [0.5.6]: https://github.com/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/compare/v0.5.4...v0.5.5
