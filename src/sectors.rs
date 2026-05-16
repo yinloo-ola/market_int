@@ -34,12 +34,21 @@ pub fn load_sectors(path: &str) -> Result<HashMap<String, String>> {
     Ok(map)
 }
 
-/// Returns the sector for a symbol, or "Unknown" if not found.
+/// Default sector label when a symbol has no mapping.
+pub const UNKNOWN_SECTOR: &str = "Unknown";
+
+/// Returns the sector for a symbol as a borrowed `&str`,
+/// or [`UNKNOWN_SECTOR`] if not found.
+///
+/// Prefer this over the old `get_sector` to avoid allocations.
+pub fn sector_of<'a>(sectors: &'a HashMap<String, String>, symbol: &str) -> &'a str {
+    sectors.get(symbol).map(|s| s.as_str()).unwrap_or(UNKNOWN_SECTOR)
+}
+
+/// Returns the sector for a symbol as an owned `String`,
+/// or [`UNKNOWN_SECTOR`] if not found.
 pub fn get_sector(sectors: &HashMap<String, String>, symbol: &str) -> String {
-    sectors
-        .get(symbol)
-        .cloned()
-        .unwrap_or_else(|| "Unknown".to_string())
+    sector_of(sectors, symbol).to_string()
 }
 
 #[cfg(test)]

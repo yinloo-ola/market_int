@@ -9,6 +9,8 @@ use telegram_bot_api::{
     types::{ChatId, InputFile},
 };
 
+use crate::sectors::UNKNOWN_SECTOR;
+
 use crate::{
     constants,
     model::{self, QuotesError},
@@ -458,7 +460,7 @@ fn format_telegram_caption(
             .map(|t| format!(" | Trend: {:.0}%", t * 100.0))
             .unwrap_or_default();
 
-        let sector_str = if pick.sector != "Unknown" {
+        let sector_str = if pick.sector != UNKNOWN_SECTOR {
             format!(" ({})", pick.sector)
         } else {
             String::new()

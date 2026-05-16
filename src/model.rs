@@ -16,6 +16,7 @@ use telegram_bot_api::bot::APIResponseError;
 
 use crate::constants;
 use crate::http::client;
+use crate::sectors::{UNKNOWN_SECTOR, sector_of};
 
 /// Represents the market status.
 #[derive(Debug)]
@@ -352,10 +353,7 @@ pub fn option_chain_to_csv_vec(
             None => (String::new(), String::new()),
         };
 
-        let sector_str = sectors
-            .get(&chain.underlying)
-            .cloned()
-            .unwrap_or_else(|| "Unknown".to_string());
+        let sector_str = sector_of(sectors, &chain.underlying).to_string();
 
         writer
             .write_record([
@@ -419,11 +417,8 @@ pub fn option_chain_to_csv_vec(
         if seen.contains(&chain.underlying) {
             continue;
         }
-        let sector = sectors
-            .get(&chain.underlying)
-            .cloned()
-            .unwrap_or_else(|| "Unknown".to_string());
-        if sector != "Unknown" && seen_sectors.contains(&sector) {
+        let sector = sector_of(sectors, &chain.underlying).to_string();
+        if sector != UNKNOWN_SECTOR && seen_sectors.contains(&sector) {
             continue;
         }
 
@@ -433,7 +428,7 @@ pub fn option_chain_to_csv_vec(
         let tl = trend_data.get(&chain.underlying).map(|(_, l)| *l);
 
         seen.insert(chain.underlying.clone());
-        if sector != "Unknown" {
+        if sector != UNKNOWN_SECTOR {
             seen_sectors.insert(sector.clone());
         }
 
