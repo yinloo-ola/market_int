@@ -367,7 +367,7 @@ async fn main() {
                     crate::regime::MarketRegime::from_spy_trend(1.05)
                 }
             };
-            let sectors = sectors::load_sectors("data/symbols.csv").unwrap_or_default();
+            let sectors = sectors::load_sectors(&symbols_file_path).unwrap_or_default();
             match option::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
                 &model::OptionChainSide::Put,
