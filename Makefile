@@ -69,6 +69,7 @@ clean:
 
 # Docker operations
 docker-build:
+	sed -i.bak 's/^version = "[0-9.]*"/version = "$(tag)"/' Cargo.toml && rm -f Cargo.toml.bak
 	docker build --platform linux/amd64 -t us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:$(tag) .
 	docker push us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:$(tag)
 	sed -i.bak 's|us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:[0-9.]*|us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:'$(tag)'|' job.yaml && rm -f job.yaml.bak
