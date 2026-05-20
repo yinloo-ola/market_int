@@ -103,15 +103,35 @@ pub fn calculate_strike_percentile(strike: f64, min: f64, max: f64) -> f64 {
 }
 
 /// Calculates the trend factor for strike tightening.
-/// Returns a value in [0.75, 1.0] — never widens strikes.
-/// When trend is strong (ratio > 1.0), reduces max_drop by up to TREND_TIGHTEN_CAP.
+/// Returns a value in [0.85, 1.0] — never widens strikes.
+///
+/// Uses an inverted-V shape:
+///   - Below 1.0: no tightening (1.0)
+///   - 1.0 to TREND_TIGHTEN_PEAK: tightening ramps up linearly
+///   - Above TREND_TIGHTEN_PEAK: easing back — sudden surges risk pullback
+///
+/// At the peak (~1.05), max tightening is TREND_TIGHTEN_CAP (floor = 0.90).
+/// Beyond the peak, easing linearly reduces tightening at TREND_EASE_BACK rate,
+/// bottoming out at 0.85 for very extreme surges.
 pub fn calculate_trend_factor(trend_ratio_short: f64) -> f64 {
     if trend_ratio_short <= 1.0 {
         return 1.0; // No tightening when not above EMA
     }
-    let reduction = (trend_ratio_short - 1.0) * constants::TREND_TIGHTEN_MULTIPLIER;
-    let capped_reduction = reduction.min(constants::TREND_TIGHTEN_CAP);
-    1.0 - capped_reduction
+
+    let cap = constants::TREND_TIGHTEN_CAP;
+    let peak = constants::TREND_TIGHTEN_PEAK;
+
+    if trend_ratio_short <= peak {
+        // Ramp up tightening proportionally
+        let reduction = (trend_ratio_short - 1.0) * constants::TREND_TIGHTEN_MULTIPLIER;
+        1.0 - reduction.min(cap)
+    } else {
+        // Ease back: surge stocks are pullback risks
+        let peak_reduction = ((peak - 1.0) * constants::TREND_TIGHTEN_MULTIPLIER).min(cap);
+        let excess = trend_ratio_short - peak;
+        let reduction = (peak_reduction - excess * constants::TREND_EASE_BACK).max(0.0);
+        1.0 - reduction
+    }
 }
 
 /// Calculates a composite score [0, 1] for a put option.
@@ -853,16 +873,33 @@ mod tests {
 
     #[test]
     fn test_trend_factor_mild_tightening() {
-        // trend_ratio = 1.03 → reduction = 0.03 * 4.0 = 0.12 → factor = 0.88
+        // trend_ratio = 1.03 → reduction = 0.03 * 2.0 = 0.06 → factor = 0.94
         let factor = calculate_trend_factor(1.03);
-        assert!((factor - 0.88).abs() < 1e-9);
+        assert!((factor - 0.94).abs() < 1e-9);
     }
 
     #[test]
-    fn test_trend_factor_capped() {
-        // trend_ratio = 1.20 → reduction = 0.80 → capped at 0.25 → factor = 0.75
+    fn test_trend_factor_at_peak() {
+        // trend_ratio = 1.05 (PEAK) → reduction = 0.05 * 2.0 = 0.10 → factor = 0.90
+        let factor = calculate_trend_factor(1.05);
+        assert!((factor - 0.90).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_trend_factor_surge_eases_back() {
+        // trend_ratio = 1.20 → past peak, ease back
+        // peak_reduction = 0.10, excess = 0.15, ease = 0.15 * 0.5 = 0.075
+        // reduction = 0.10 - 0.075 = 0.025 → factor = 0.975
         let factor = calculate_trend_factor(1.20);
-        assert!((factor - 0.75).abs() < 1e-9);
+        assert!((factor - 0.975).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_trend_factor_extreme_surge_no_tightening() {
+        // trend_ratio = 1.25 → excess = 0.20, ease = 0.10
+        // peak_reduction 0.10 fully eased → factor = 1.0
+        let factor = calculate_trend_factor(1.25);
+        assert!((factor - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -870,13 +907,6 @@ mod tests {
         // trend_ratio < 1.0 → factor = 1.0 (never widen)
         let factor = calculate_trend_factor(0.95);
         assert!((factor - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_trend_factor_at_cap_boundary() {
-        // reduction = (1.0625 - 1.0) * 4.0 = 0.25 → exactly at cap
-        let factor = calculate_trend_factor(1.0625);
-        assert!((factor - 0.75).abs() < 1e-9);
     }
 
     #[test]

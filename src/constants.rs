@@ -16,5 +16,7 @@ pub const EMA_LONG_PERIOD: u32 = 50;
 pub const TREND_THRESHOLD_BULL: f64 = 0.98; // Threshold in bull market (current behavior)
 pub const TREND_THRESHOLD_RANGE: f64 = 0.06; // How far threshold can drop (0.98 → 0.92)
 pub const BEARNESS_MAX: f64 = 0.08; // SPY drop that maps to bearness = 1.0
-pub const TREND_TIGHTEN_MULTIPLIER: f64 = 4.0;
-pub const TREND_TIGHTEN_CAP: f64 = 0.25;
+pub const TREND_TIGHTEN_MULTIPLIER: f64 = 2.0;
+pub const TREND_TIGHTEN_CAP: f64 = 0.10;
+pub const TREND_TIGHTEN_PEAK: f64 = 1.05;
+pub const TREND_EASE_BACK: f64 = 0.5;
