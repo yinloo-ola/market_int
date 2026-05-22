@@ -665,6 +665,138 @@ pub fn run_backtest(
     }
 }
 
+// ── Output Formatting ──────────────────────────────────────────
+
+/// Format a single config's metrics for terminal output.
+pub fn format_metrics(metrics: &BacktestMetrics) -> String {
+    let mut out = String::new();
+    let sep = "═".repeat(60);
+
+    out.push_str(&format!("{}\n", sep));
+    out.push_str(&format!("Config: {}\n", metrics.config_name));
+    out.push_str(&format!(
+        "Period: {}-day | From: {} | To: {}\n",
+        metrics.period, metrics.from_date, metrics.to_date
+    ));
+    out.push_str(&format!(
+        "Simulations: {} | Picks: {}\n",
+        metrics.total_simulations, metrics.total_picks
+    ));
+    out.push_str(&format!("{}\n", "─".repeat(60)));
+    out.push_str(&format!(
+        "Assignment rate:    {:.1}% ({} / {})\n",
+        metrics.assignment_rate() * 100.0,
+        metrics.assignment_count,
+        metrics.total_picks
+    ));
+    out.push_str(&format!(
+        "Avg return:         {:.1}%\n",
+        metrics.avg_rate_of_return * 100.0
+    ));
+    out.push_str(&format!("Avg score:          {:.2}\n", metrics.avg_score));
+    out.push_str(&format!(
+        "Avg loss (assigned): {:.1}% below strike\n",
+        metrics.avg_loss_when_assigned * 100.0
+    ));
+
+    // Regime breakdown
+    let bull_picks: Vec<&BacktestPick> = metrics
+        .picks
+        .iter()
+        .filter(|p| p.regime_flag.is_empty())
+        .collect();
+    let corr_picks: Vec<&BacktestPick> = metrics
+        .picks
+        .iter()
+        .filter(|p| p.regime_flag.contains("Correction"))
+        .collect();
+    let bear_picks: Vec<&BacktestPick> = metrics
+        .picks
+        .iter()
+        .filter(|p| p.regime_flag.contains("Bear"))
+        .collect();
+
+    if !bull_picks.is_empty() || !corr_picks.is_empty() || !bear_picks.is_empty() {
+        out.push_str("By regime:\n");
+        if !bull_picks.is_empty() {
+            let assigned = bull_picks.iter().filter(|p| p.assigned).count();
+            let avg_ror = bull_picks.iter().map(|p| p.rate_of_return).sum::<f64>()
+                / bull_picks.len() as f64;
+            out.push_str(&format!(
+                "  Bull ({}):       {:.1}% assignment, avg return {:.1}%\n",
+                bull_picks.len(),
+                assigned as f64 / bull_picks.len() as f64 * 100.0,
+                avg_ror * 100.0
+            ));
+        }
+        if !corr_picks.is_empty() {
+            let assigned = corr_picks.iter().filter(|p| p.assigned).count();
+            let avg_ror = corr_picks.iter().map(|p| p.rate_of_return).sum::<f64>()
+                / corr_picks.len() as f64;
+            out.push_str(&format!(
+                "  Correction ({}): {:.1}% assignment, avg return {:.1}%\n",
+                corr_picks.len(),
+                assigned as f64 / corr_picks.len() as f64 * 100.0,
+                avg_ror * 100.0
+            ));
+        }
+        if !bear_picks.is_empty() {
+            let assigned = bear_picks.iter().filter(|p| p.assigned).count();
+            let avg_ror = bear_picks.iter().map(|p| p.rate_of_return).sum::<f64>()
+                / bear_picks.len() as f64;
+            out.push_str(&format!(
+                "  Bear ({}):       {:.1}% assignment, avg return {:.1}%\n",
+                bear_picks.len(),
+                assigned as f64 / bear_picks.len() as f64 * 100.0,
+                avg_ror * 100.0
+            ));
+        }
+    }
+
+    out.push_str(&format!("{}\n", sep));
+    out
+}
+
+/// Write all metrics to a CSV file.
+pub fn write_csv(path: &str, all_metrics: &[BacktestMetrics]) -> model::Result<()> {
+    use std::io::Write;
+    let mut file =
+        std::fs::File::create(path).map_err(|e| model::QuotesError::CouldNotOpenFile(e))?;
+    writeln!(
+        file,
+        "config,sim_date,symbol,sector,strike,price,rate_of_return,score,trend_short,trend_long,regime,assigned,close_at_expiry,close_day_after"
+    )
+    .map_err(|e| model::QuotesError::CouldNotOpenFile(e))?;;
+    for metrics in all_metrics {
+        for pick in &metrics.picks {
+            writeln!(
+                file,
+                "{},{},{},{},{:.2},{:.2},{:.4},{:.3},{:.3},{:.3},{},{},{},{}",
+                metrics.config_name,
+                pick.sim_date,
+                pick.symbol,
+                pick.sector,
+                pick.strike,
+                pick.price_at_pick,
+                pick.rate_of_return,
+                pick.score,
+                pick.trend_short,
+                pick.trend_long,
+                pick.regime_flag,
+                pick.assigned,
+                pick.close_at_expiry
+                    .map(|v| format!("{:.2}", v))
+                    .unwrap_or_default(),
+                pick.close_day_after
+                    .map(|v| format!("{:.2}", v))
+                    .unwrap_or_default(),
+            )
+            .map_err(|e| model::QuotesError::CouldNotOpenFile(e))?;
+        }
+    }
+    Ok(())
+}
+
 // ── Tests ──────────────────────────────────────────────────────
 
 #[cfg(test)]
