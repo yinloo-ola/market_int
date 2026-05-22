@@ -227,10 +227,8 @@ pub async fn retrieve_option_chains_with_expiry(
             let latest_candle = &candle::get_candles(conn, symbol, 1)?[0];
             underlying_prices.insert(symbol.to_string(), latest_candle.close);
 
-            let trend_factor = match trend_data.get(symbol) {
-                Some((ratio_short, _)) => model::calculate_trend_factor(*ratio_short),
-                None => 1.0,
-            };
+            // Default to 1.0 (no tightening) matching the winning return-min-30 backtest config
+            let trend_factor = 1.0;
 
             let (min_strike, max_strike) = calculate_adjusted_strike_range(
                 latest_candle.close,

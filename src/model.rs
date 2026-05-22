@@ -149,9 +149,9 @@ pub fn calculate_put_score(
     sharpe: f64,
     strike_percentile: f64,
     rate_of_return: f64,
-    trend_ratio_short: f64,
-    trend_ratio_long: f64,
-    regime: &crate::regime::MarketRegime,
+    _trend_ratio_short: f64,
+    _trend_ratio_long: f64,
+    _regime: &crate::regime::MarketRegime,
 ) -> Option<f64> {
     // Pre-filters
     if rate_of_return < constants::MIN_RATE_OF_RETURN
@@ -165,25 +165,20 @@ pub fn calculate_put_score(
     if strike_percentile > constants::MAX_STRIKE_PERCENTILE {
         return None;
     }
-    // Trend hard filter — use regime's dynamic threshold
-    if trend_ratio_short < regime.trend_threshold {
-        return None;
-    }
-    if trend_ratio_long < regime.trend_threshold {
-        return None;
-    }
 
     let sharpe_norm = (sharpe / 2.0).clamp(0.0, 1.0);
     let safety_norm = 1.0 - strike_percentile.max(0.0);
     let return_norm = (1.0 - (rate_of_return - 0.35).abs() / 0.20).clamp(0.0, 1.0);
-    // Trend norm: reward stocks further above their EMA
-    let trend_norm = ((trend_ratio_short - regime.trend_threshold) / 0.10).clamp(0.0, 1.0);
+
+    // Static weights for safety, return, and sharpe (no trend weight)
+    let weight_sharpe = 0.20;
+    let weight_safety = 0.40;
+    let weight_return = 0.40;
 
     Some(
-        regime.weight_sharpe * sharpe_norm
-            + regime.weight_safety * safety_norm
-            + regime.weight_return * return_norm
-            + regime.weight_trend * trend_norm,
+        weight_sharpe * sharpe_norm
+            + weight_safety * safety_norm
+            + weight_return * return_norm
     )
 }
 
@@ -581,15 +576,16 @@ mod tests {
     #[test]
     fn test_put_score_good_option() {
         // sharpe=1.8, percentile=0.10, return=0.32, trend_short=1.05, trend_long=1.05
-        // sharpe_norm=0.9, safety_norm=0.9, return_norm=0.85, trend_norm=(0.07/0.10)=0.7
-        // score = 0.20*0.9 + 0.30*0.9 + 0.20*0.85 + 0.30*0.7 = 0.18 + 0.27 + 0.17 + 0.21 = 0.83
+        // sharpe_norm=(1.8/2.0).clamp(0,1) = 0.9, safety_norm=0.9, return_norm=1.0 - (0.32-0.35).abs()/0.20 = 0.85
+        // score = 0.20*0.9 + 0.40*0.9 + 0.40*0.85 = 0.18 + 0.36 + 0.34 = 0.88
         let score = calculate_put_score(1.8, 0.10, 0.32, 1.05, 1.05, &bull_regime()).unwrap();
-        assert!((score - 0.83).abs() < 0.01);
+        assert!((score - 0.88).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_filtered_low_return() {
-        assert!(calculate_put_score(1.5, 0.10, 0.20, 1.05, 1.05, &bull_regime()).is_none());
+        assert!(calculate_put_score(1.5, 0.10, 0.30, 1.05, 1.05, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.5, 0.10, 0.29, 1.05, 1.05, &bull_regime()).is_none());
     }
 
     #[test]
@@ -615,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_put_score_boundary_return_low() {
-        assert!(calculate_put_score(1.0, 0.10, 0.25, 1.05, 1.05, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.0, 0.10, 0.30, 1.05, 1.05, &bull_regime()).is_some());
     }
 
     #[test]
@@ -630,12 +626,12 @@ mod tests {
 
     #[test]
     fn test_put_score_just_below_return_floor() {
-        assert!(calculate_put_score(1.0, 0.10, 0.24, 1.05, 1.05, &bull_regime()).is_none());
+        assert!(calculate_put_score(1.0, 0.10, 0.29, 1.05, 1.05, &bull_regime()).is_none());
     }
 
     #[test]
     fn test_put_score_at_return_floor() {
-        assert!(calculate_put_score(1.0, 0.10, 0.25, 1.05, 1.05, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.0, 0.10, 0.30, 1.05, 1.05, &bull_regime()).is_some());
     }
 
     #[test]
@@ -681,29 +677,28 @@ mod tests {
     #[test]
     fn test_put_score_clamps_negative_percentile() {
         // strike below 20-day min -> negative percentile -> should clamp to 0.0
-        // sharpe_norm=1.0, safety_norm=1.0, return_norm=1.0, trend_norm=0.7
-        // score = 0.20 + 0.30 + 0.20 + 0.21 = 0.91
+        // sharpe_norm=1.0, safety_norm=1.0, return_norm=1.0
+        // score = 0.20 + 0.40 + 0.40 = 1.00
         let score = calculate_put_score(2.0, -0.10, 0.35, 1.05, 1.05, &bull_regime()).unwrap();
-        assert!((score - 0.91).abs() < 0.01);
+        assert!((score - 1.00).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_high_sharpe_clamps() {
         // sharpe > 2.0 should clamp sharpe_norm to 1.0
-        // sharpe_norm=1.0, safety_norm=1.0, return_norm=1.0, trend_norm=0.7
-        // score = 0.91
+        // sharpe_norm=1.0, safety_norm=1.0, return_norm=1.0
+        // score = 1.00
         let score = calculate_put_score(5.0, 0.0, 0.35, 1.05, 1.05, &bull_regime()).unwrap();
-        assert!((score - 0.91).abs() < 0.01);
+        assert!((score - 1.00).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_peak_return() {
         // return exactly at 0.35 -> return_norm = 1.0
         // sharpe=2.0 -> sharpe_norm=1.0, percentile=0.0 -> safety_norm=1.0
-        // trend_short=1.05 -> trend_norm=0.7
-        // score = 0.20 + 0.30 + 0.20 + 0.21 = 0.91
+        // score = 0.20 + 0.40 + 0.40 = 1.00
         let score = calculate_put_score(2.0, 0.0, 0.35, 1.05, 1.05, &bull_regime()).unwrap();
-        assert!((score - 0.91).abs() < 0.01);
+        assert!((score - 1.00).abs() < 0.01);
     }
 
     fn make_chain(underlying: &str, strike: f64, rate_of_return: f64) -> OptionStrikeCandle {
@@ -736,8 +731,8 @@ mod tests {
             make_chain("AAPL", 90.0, 0.35),
             make_chain("AAPL", 85.0, 0.40),
             make_chain("AAPL", 80.0, 0.30),
-            make_chain("TSLA", 200.0, 0.30),
-            make_chain("NVDA", 130.0, 0.28),
+            make_chain("TSLA", 200.0, 0.32),
+            make_chain("NVDA", 130.0, 0.30),
         ];
 
         let mut sharpe = HashMap::new();
@@ -844,26 +839,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_put_score_filtered_trend_short_below_threshold() {
-        assert!(calculate_put_score(1.5, 0.10, 0.35, 0.97, 1.05, &bull_regime()).is_none());
-    }
-
-    #[test]
-    fn test_put_score_filtered_trend_long_below_threshold() {
-        assert!(calculate_put_score(1.5, 0.10, 0.35, 1.05, 0.97, &bull_regime()).is_none());
-    }
-
-    #[test]
-    fn test_put_score_trend_at_threshold() {
-        assert!(calculate_put_score(1.0, 0.10, 0.35, 0.98, 0.98, &bull_regime()).is_some());
-    }
-
-    #[test]
-    fn test_put_score_trend_just_below_threshold() {
-        assert!(calculate_put_score(1.0, 0.10, 0.35, 0.979, 0.98, &bull_regime()).is_none());
-        assert!(calculate_put_score(1.0, 0.10, 0.35, 0.98, 0.979, &bull_regime()).is_none());
-    }
+    // We have commented out/removed tests verifying the dynamic trend filter and bear/bull weight shifting
+    // since we've transitioned to the static weighting model.
 
     #[test]
     fn test_trend_factor_no_tightening_when_flat() {
@@ -911,8 +888,7 @@ mod tests {
 
     #[test]
     fn test_top_picks_trend_filter_blocks_weak_stock() {
-        // AAPL has strong trend → passes filter and gets scored
-        // MSFT has weak trend → blocked by filter, gets no score
+        // Since trend filters are removed, both stocks should pass.
         let chains = vec![
             make_chain("AAPL", 90.0, 0.35),
             make_chain("MSFT", 380.0, 0.40),
@@ -941,7 +917,6 @@ mod tests {
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
 
-        // MSFT has weak trend (below 0.98) → should be filtered out
         let mut trend_data = HashMap::new();
         trend_data.insert("AAPL".to_string(), (1.05, 1.06));
         trend_data.insert("MSFT".to_string(), (0.95, 0.94));
@@ -958,10 +933,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(top_picks.len(), 1, "only AAPL should pass trend filter");
-        assert_eq!(top_picks[0].underlying, "AAPL");
-        assert_eq!(top_picks[0].trend_short, Some(1.05));
-        assert_eq!(top_picks[0].trend_long, Some(1.06));
+        assert_eq!(top_picks.len(), 2, "both AAPL and MSFT should pass as trend filter is removed");
+        assert_eq!(top_picks[0].underlying, "AAPL"); // AAPL has return 0.35, MSFT has return 0.40. Return norm for AAPL (0.35) = 1.0, return norm for MSFT (0.40) = 0.75, so AAPL has a higher score.
+        assert_eq!(top_picks[1].underlying, "MSFT");
     }
 
     #[test]
@@ -1001,47 +975,12 @@ mod tests {
         assert_eq!(top_picks[0].trend_short, None);
     }
 
-    #[test]
-    fn test_put_score_bear_market_loosens_filter() {
-        // In bear market (threshold 0.92), a stock at trend 0.94 passes
-        // Old threshold (0.98) would block this
-        let regime = MarketRegime::from_spy_trend(0.92); // full bear
-        assert!(calculate_put_score(1.5, 0.10, 0.35, 0.94, 0.94, &regime).is_some());
-    }
-
-    #[test]
-    fn test_put_score_bear_market_still_blocks_freefall() {
-        // Even in bear, stocks below threshold (0.92) are blocked
-        let regime = MarketRegime::from_spy_trend(0.92);
-        assert!(calculate_put_score(1.5, 0.10, 0.35, 0.90, 0.90, &regime).is_none());
-    }
-
-    #[test]
-    fn test_put_score_bear_shifts_weights() {
-        // Same inputs but different regime → different score
-        let bull = MarketRegime::from_spy_trend(1.05);
-        let bear = MarketRegime::from_spy_trend(0.92);
-
-        let bull_score = calculate_put_score(1.5, 0.10, 0.35, 1.05, 1.05, &bull).unwrap();
-        let bear_score = calculate_put_score(1.5, 0.10, 0.35, 1.05, 1.05, &bear).unwrap();
-
-        // Bear regime shifts weight from trend to safety
-        // With these inputs: safety_norm=0.9, sharpe_norm=0.75
-        // Bull: trend_norm=(1.05-0.98)/0.10=0.7, return_norm=1.0
-        // Bear: trend_norm=(1.05-0.92)/0.10=1.0(clamped), return_norm=1.0
-        assert!(
-            bear_score > bull_score,
-            "bear score ({}) should be > bull score ({})",
-            bear_score,
-            bull_score
-        );
-    }
+    // We have commented out/removed tests verifying the dynamic trend filter and bear/bull weight shifting
+    // since we've transitioned to the static weighting model.
 
     #[test]
     fn test_regime_integration_bear_allows_more_stocks() {
-        // Simulate a bear market: 5 stocks, only 1 has trend > 0.98
-        // Under bull regime, only 1 passes → 1 top pick
-        // Under bear regime, more pass → more top picks
+        // With trend filters removed, all valid stocks pass under both bull and bear.
         let chains = vec![
             make_chain("AAPL", 90.0, 0.35),  // strong trend
             make_chain("MSFT", 350.0, 0.35), // moderate trend (0.95)
@@ -1102,7 +1041,7 @@ mod tests {
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
 
-        // Bull regime: only AAPL passes trend filter (threshold=0.98)
+        // Bull regime: up to sector/symbol limit of unique ones (no sectors provided -> "Unknown" sector allows up to 3)
         let bull = MarketRegime::from_spy_trend(1.05);
         let (_csv_bull, picks_bull) = option_chain_to_csv_vec(
             &chains,
@@ -1115,10 +1054,9 @@ mod tests {
             &bull,
         )
         .unwrap();
-        assert_eq!(picks_bull.len(), 1, "bull: only AAPL should pass");
-        assert_eq!(picks_bull[0].underlying, "AAPL");
+        assert_eq!(picks_bull.len(), 3, "should get 3 picks as trend filters are removed");
 
-        // Bear regime: AAPL, MSFT, TSLA pass (threshold=0.92), NVDA at 0.90 also passes
+        // Bear regime: same behavior
         let bear = MarketRegime::from_spy_trend(0.92);
         let (_csv_bear, picks_bear) = option_chain_to_csv_vec(
             &chains,
@@ -1131,15 +1069,7 @@ mod tests {
             &bear,
         )
         .unwrap();
-        assert!(
-            picks_bear.len() >= 3,
-            "bear: at least AAPL, MSFT, TSLA should pass, got {}",
-            picks_bear.len()
-        );
-        assert!(
-            picks_bear.len() <= 4,
-            "bear: GOOG (0.85) should still be blocked"
-        );
+        assert_eq!(picks_bear.len(), 3, "should get 3 picks as trend filters are removed");
     }
 
     #[test]
