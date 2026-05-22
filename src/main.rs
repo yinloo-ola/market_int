@@ -61,6 +61,7 @@ mod constants;
 mod backtest;
 
 use chrono::{Datelike, Local};
+use chrono::NaiveDate;
 use chrono_tz::America::New_York;
 use clap::{Parser, Subcommand};
 use dotenv::dotenv;
@@ -165,6 +166,25 @@ enum Commands {
     // Test Tiger API
     TestTiger {
         symbols: String,
+    },
+    // Backtest simulation
+    Backtest {
+        symbols_file_path: String,
+        /// Start date (YYYY-MM-DD)
+        #[arg(long, default_value = "2023-01-01")]
+        from: String,
+        /// End date (YYYY-MM-DD)
+        #[arg(long, default_value = "2024-12-31")]
+        to: String,
+        /// Config preset name or "all"
+        #[arg(long, default_value = "all")]
+        config: String,
+        /// DTE period: 5 or 20
+        #[arg(long, default_value = "5")]
+        period: Option<usize>,
+        /// CSV output path
+        #[arg(long, default_value = "backtest_results.csv")]
+        output: String,
     },
 }
 
@@ -492,6 +512,95 @@ async fn main() {
                 Err(err) => {
                     log::error!("Failed to query earnings calendar: {}", err);
                 }
+            }
+        }
+
+        Commands::Backtest {
+            symbols_file_path,
+            from,
+            to,
+            config,
+            period,
+            output,
+        } => {
+            let from_date = match NaiveDate::parse_from_str(&from, "%Y-%m-%d") {
+                Ok(d) => d,
+                Err(e) => {
+                    log::error!("Invalid --from date '{}': {}. Use YYYY-MM-DD.", from, e);
+                    return;
+                }
+            };
+            let to_date = match NaiveDate::parse_from_str(&to, "%Y-%m-%d") {
+                Ok(d) => d,
+                Err(e) => {
+                    log::error!("Invalid --to date '{}': {}. Use YYYY-MM-DD.", to, e);
+                    return;
+                }
+            };
+
+            let symbols = match symbols::read_symbols_from_file(&symbols_file_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("Failed to read symbols: {}", e);
+                    return;
+                }
+            };
+            let sectors = crate::sectors::load_sectors(&symbols_file_path).unwrap_or_default();
+
+            let configs: Vec<backtest::BacktestConfig> = if config == "all" {
+                backtest::BacktestConfig::all_presets()
+                    .into_iter()
+                    .map(|mut c| {
+                        if let Some(p) = period {
+                            c.period = p;
+                        }
+                        c
+                    })
+                    .collect()
+            } else {
+                match backtest::BacktestConfig::by_name(&config) {
+                    Some(mut c) => {
+                        if let Some(p) = period {
+                            c.period = p;
+                        }
+                        vec![c]
+                    }
+                    None => {
+                        log::error!(
+                            "Unknown config '{}'. Available: {}",
+                            config,
+                            backtest::BacktestConfig::all_presets()
+                                .iter()
+                                .map(|c| c.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        return;
+                    }
+                }
+            };
+
+            log::info!(
+                "Running backtest: {} configs, {} symbols, {} to {}",
+                configs.len(),
+                symbols.len(),
+                from_date,
+                to_date
+            );
+
+            let mut all_metrics = Vec::new();
+            for cfg in &configs {
+                log::info!("Running config: {}", cfg.name);
+                let metrics = backtest::run_backtest(
+                    cfg, &conn, &symbols, &sectors, from_date, to_date,
+                );
+                println!("{}", backtest::format_metrics(&metrics));
+                all_metrics.push(metrics);
+            }
+
+            match backtest::write_csv(&output, &all_metrics) {
+                Ok(_) => log::info!("Results written to {}", output),
+                Err(e) => log::error!("Failed to write CSV: {}", e),
             }
         }
     }

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use chrono::{Datelike, Duration, NaiveDate, Weekday};
 
 use crate::{
-    constants, maxdrop, model, price_percentile, sharpe, trend,
+    constants, maxdrop, model, sharpe, trend,
     store::candle,
 };
 
@@ -766,7 +766,7 @@ pub fn write_csv(path: &str, all_metrics: &[BacktestMetrics]) -> model::Result<(
         file,
         "config,sim_date,symbol,sector,strike,price,rate_of_return,score,trend_short,trend_long,regime,assigned,close_at_expiry,close_day_after"
     )
-    .map_err(|e| model::QuotesError::CouldNotOpenFile(e))?;;
+    .map_err(|e| model::QuotesError::CouldNotOpenFile(e))?;
     for metrics in all_metrics {
         for pick in &metrics.picks {
             writeln!(
