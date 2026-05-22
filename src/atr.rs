@@ -36,14 +36,14 @@ pub fn calculate_and_save(
                     .map(|c| c.low)
                     .min_by(|a, b| a.partial_cmp(b).unwrap())
                     .unwrap();
-                let volume: u32 = chunk.iter().map(|c| c.volume).sum();
+                let volume: u64 = chunk.iter().map(|c| c.volume as u64).sum();
                 model::Candle {
                     symbol: symbol.clone(),
                     open,
                     high,
                     low,
                     close,
-                    volume,
+                    volume: volume as u32, // stored as u32, aggregate may wrap for very high volume
                     timestamp: chunk.first().map_or(0, |c| c.timestamp), // Handle empty chunks
                 }
             })

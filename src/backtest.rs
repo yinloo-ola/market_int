@@ -371,6 +371,14 @@ fn load_all_candles(
             Err(_) => log::warn!("No candles found for {}", symbol),
         }
     }
+    // Always load SPY for regime computation, even if not in symbols list
+    if !map.contains_key("SPY") {
+        if let Ok(candles) = candle::get_candles(conn, "SPY", constants::CANDLE_COUNT) {
+            if !candles.is_empty() {
+                map.insert("SPY".to_string(), candles);
+            }
+        }
+    }
     map
 }
 
@@ -429,19 +437,21 @@ pub fn run_backtest(
     for sim_date in &mondays {
         let sim_ts = date_to_timestamp(*sim_date);
 
-        // Compute SPY regime
-        let spy_candles = match candles_map.get("SPY") {
-            Some(c) => c,
-            None => continue,
+        // Compute SPY regime (default to bull if SPY not in dataset)
+        let regime = match candles_map.get("SPY") {
+            Some(spy_candles) => {
+                let spy_up_to: Vec<model::Candle> =
+                    spy_candles.iter().filter(|c| c.timestamp <= sim_ts).cloned().collect();
+                if spy_up_to.len() < constants::EMA_LONG_PERIOD as usize {
+                    config.build_regime(1.05) // bull defaults
+                } else {
+                    let spy_closes: Vec<f64> = spy_up_to.iter().map(|c| c.close).collect();
+                    let (_, spy_trend_long) = trend::calculate_trend_ratios(&spy_closes);
+                    config.build_regime(spy_trend_long)
+                }
+            }
+            None => config.build_regime(1.05), // bull defaults
         };
-        let spy_up_to: Vec<model::Candle> =
-            spy_candles.iter().filter(|c| c.timestamp <= sim_ts).cloned().collect();
-        if spy_up_to.len() < constants::EMA_LONG_PERIOD as usize {
-            continue;
-        }
-        let spy_closes: Vec<f64> = spy_up_to.iter().map(|c| c.close).collect();
-        let (_, spy_trend_long) = trend::calculate_trend_ratios(&spy_closes);
-        let regime = config.build_regime(spy_trend_long);
 
         // Evaluate each symbol
         let mut candidates: Vec<(usize, f64, f64, f64, f64, f64, f64, &str)> = Vec::new();
