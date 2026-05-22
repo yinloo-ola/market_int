@@ -49,7 +49,7 @@ fn calculate_trading_days_to_expiry(from_date: NewYorkDateTime, to_date: NewYork
 /// Calculates adjusted strike range based on DTE, period, and trend factor.
 /// Trend tightening is applied only to the upper bound (strike_to),
 /// keeping the lower bound (strike_from) un-tightened so more lower strikes are available.
-fn calculate_adjusted_strike_range(
+pub(crate) fn calculate_adjusted_strike_range(
     underlying_price: f64,
     percentile_drop: f64,
     ema_drop: f64,

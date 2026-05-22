@@ -309,6 +309,362 @@ impl BacktestConfig {
     }
 }
 
+// ── Result Types ───────────────────────────────────────────────
+
+/// One simulated pick at a point in time.
+#[derive(Debug, Clone)]
+pub struct BacktestPick {
+    pub sim_date: NaiveDate,
+    pub symbol: String,
+    pub sector: String,
+    pub strike: f64,
+    pub price_at_pick: f64,
+    pub rate_of_return: f64,
+    pub score: f64,
+    pub trend_short: f64,
+    pub trend_long: f64,
+    pub regime_flag: String,
+    pub assigned: bool,
+    pub close_at_expiry: Option<f64>,
+    pub close_day_after: Option<f64>,
+}
+
+/// Aggregated metrics for one config.
+#[derive(Debug, Clone)]
+pub struct BacktestMetrics {
+    pub config_name: String,
+    pub period: usize,
+    pub from_date: NaiveDate,
+    pub to_date: NaiveDate,
+    pub total_simulations: usize,
+    pub total_picks: usize,
+    pub assignment_count: usize,
+    pub avg_rate_of_return: f64,
+    pub avg_score: f64,
+    pub avg_loss_when_assigned: f64,
+    pub picks: Vec<BacktestPick>,
+}
+
+impl BacktestMetrics {
+    pub fn assignment_rate(&self) -> f64 {
+        if self.total_picks == 0 {
+            return 0.0;
+        }
+        self.assignment_count as f64 / self.total_picks as f64
+    }
+}
+
+// ── Simulation Engine ──────────────────────────────────────────
+
+/// Load all candles for each symbol into memory.
+fn load_all_candles(
+    conn: &rusqlite::Connection,
+    symbols: &[String],
+) -> HashMap<String, Vec<model::Candle>> {
+    let mut map = HashMap::new();
+    for symbol in symbols {
+        match candle::get_candles(conn, symbol, constants::CANDLE_COUNT) {
+            Ok(candles) if !candles.is_empty() => {
+                map.insert(symbol.clone(), candles);
+            }
+            Ok(_) => log::warn!("No candles found for {}", symbol),
+            Err(_) => log::warn!("No candles found for {}", symbol),
+        }
+    }
+    map
+}
+
+/// Convert a NaiveDate to unix timestamp (end of day UTC).
+fn date_to_timestamp(date: NaiveDate) -> u32 {
+    date.and_hms_opt(23, 59, 59)
+        .unwrap()
+        .and_utc()
+        .timestamp() as u32
+}
+
+/// Generate Mondays between from_date and to_date (inclusive).
+fn generate_mondays(from: NaiveDate, to: NaiveDate) -> Vec<NaiveDate> {
+    let mut mondays = Vec::new();
+    let mut current = from;
+    while current <= to {
+        if current.weekday() == Weekday::Mon {
+            mondays.push(current);
+        }
+        current += Duration::days(1);
+    }
+    mondays
+}
+
+/// Find the close price on or after target_date for a symbol.
+/// Returns None if no candle found within 7 calendar days.
+fn find_close_on_date(
+    candles: &[model::Candle],
+    target_date: NaiveDate,
+) -> Option<f64> {
+    let target_ts = date_to_timestamp(target_date);
+    let max_ts = date_to_timestamp(target_date + Duration::days(7));
+    for c in candles {
+        if c.timestamp >= target_ts && c.timestamp <= max_ts {
+            return Some(c.close);
+        }
+    }
+    None
+}
+
+/// Run the full backtest for a single configuration.
+pub fn run_backtest(
+    config: &BacktestConfig,
+    conn: &rusqlite::Connection,
+    symbols: &[String],
+    sectors: &HashMap<String, String>,
+    from_date: NaiveDate,
+    to_date: NaiveDate,
+) -> BacktestMetrics {
+    let candles_map = load_all_candles(conn, symbols);
+    let mondays = generate_mondays(from_date, to_date);
+    let period = config.period;
+
+    let mut picks: Vec<BacktestPick> = Vec::new();
+
+    for sim_date in &mondays {
+        let sim_ts = date_to_timestamp(*sim_date);
+
+        // Compute SPY regime
+        let spy_candles = match candles_map.get("SPY") {
+            Some(c) => c,
+            None => continue,
+        };
+        let spy_up_to: Vec<model::Candle> =
+            spy_candles.iter().filter(|c| c.timestamp <= sim_ts).cloned().collect();
+        if spy_up_to.len() < constants::EMA_LONG_PERIOD as usize {
+            continue;
+        }
+        let spy_closes: Vec<f64> = spy_up_to.iter().map(|c| c.close).collect();
+        let (_, spy_trend_long) = trend::calculate_trend_ratios(&spy_closes);
+        let regime = config.build_regime(spy_trend_long);
+
+        // Evaluate each symbol
+        let mut candidates: Vec<(usize, f64, f64, f64, f64, f64, f64, &str)> = Vec::new();
+
+        for (symbol_idx, symbol) in symbols.iter().enumerate() {
+            if symbol == "SPY" {
+                continue;
+            }
+            let all_candles = match candles_map.get(symbol) {
+                Some(c) => c,
+                None => continue,
+            };
+
+            // Slice candles up to sim_date
+            let candles: Vec<model::Candle> =
+                all_candles.iter().filter(|c| c.timestamp <= sim_ts).cloned().collect();
+
+            if candles.len() < constants::EMA_LONG_PERIOD as usize {
+                continue;
+            }
+
+            let price = candles.last().unwrap().close;
+            let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
+
+            // Compute indicators
+            let (trend_short, trend_long) = trend::calculate_trend_ratios(&closes);
+            let sharpe_ratio = match sharpe::compute_sharpe(&candles, config.risk_free_rate) {
+                Some(s) => s,
+                None => continue,
+            };
+            let (percentile_drop, ema_drop) =
+                match maxdrop::compute_max_drop_stats(&candles, period) {
+                    Some(stats) => stats,
+                    None => continue,
+                };
+            let vol = estimate_historical_volatility(&closes, config.vol_window);
+
+            // Compute strike range
+            let dte = period as u32;
+            let trend_factor = config.compute_trend_factor(trend_short);
+            let (min_strike, max_strike) = crate::option::calculate_adjusted_strike_range(
+                price,
+                percentile_drop,
+                ema_drop,
+                dte,
+                period,
+                trend_factor,
+            );
+
+            if min_strike <= 0.0 || max_strike <= 0.0 || max_strike <= min_strike {
+                continue;
+            }
+
+            // Price range for strike percentile (last 20 days)
+            let pp_start = candles
+                .len()
+                .saturating_sub(constants::PRICE_PERCENTILE_DAYS as usize);
+            let pp_candles = &candles[pp_start..];
+            let range_min = pp_candles
+                .iter()
+                .map(|c| c.close)
+                .fold(f64::INFINITY, f64::min);
+            let range_max = pp_candles
+                .iter()
+                .map(|c| c.close)
+                .fold(f64::NEG_INFINITY, f64::max);
+
+            // Generate strikes at $0.50 intervals
+            let mut strike = (min_strike / 0.5).ceil() * 0.5;
+            while strike <= max_strike {
+                let t = dte as f64 / 252.0;
+                let premium = black_scholes_put(
+                    price,
+                    strike,
+                    t,
+                    config.risk_free_rate,
+                    config.dividend_yield,
+                    vol,
+                );
+                if premium <= 0.0 {
+                    strike += 0.5;
+                    continue;
+                }
+                let rate_of_return = compute_rate_of_return(premium, strike, dte);
+                let strike_pct =
+                    model::calculate_strike_percentile(strike, range_min, range_max);
+                let sector = crate::sectors::sector_of(sectors, symbol);
+
+                match config.score_candidate(
+                    sharpe_ratio,
+                    strike_pct,
+                    rate_of_return,
+                    trend_short,
+                    trend_long,
+                    &regime,
+                ) {
+                    Some(score) => {
+                        candidates.push((
+                            symbol_idx,
+                            score,
+                            strike,
+                            rate_of_return,
+                            trend_short,
+                            trend_long,
+                            price,
+                            sector,
+                        ));
+                    }
+                    None => {}
+                }
+                strike += 0.5;
+            }
+        }
+
+        // Rank by score descending
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Select top 3, dedup by symbol and sector
+        let mut seen_symbols = std::collections::HashSet::new();
+        let mut seen_sectors = std::collections::HashSet::new();
+        let mut top_picks: Vec<(usize, f64, f64, f64, f64, f64, f64, &str)> = Vec::new();
+
+        for candidate in &candidates {
+            if top_picks.len() >= 3 {
+                break;
+            }
+            let (symbol_idx, score, strike, ror, ts, tl, price, sector) = candidate;
+            if seen_symbols.contains(symbol_idx) {
+                continue;
+            }
+            if *sector != crate::sectors::UNKNOWN_SECTOR && seen_sectors.contains(*sector) {
+                continue;
+            }
+            seen_symbols.insert(*symbol_idx);
+            if *sector != crate::sectors::UNKNOWN_SECTOR {
+                seen_sectors.insert(*sector);
+            }
+            top_picks.push(*candidate);
+        }
+
+        // Check assignment for each top pick
+        let expiry_date = *sim_date + Duration::days(period as i64);
+        let day_after = expiry_date + Duration::days(1);
+
+        for (symbol_idx, score, strike, ror, ts, tl, price, sector) in &top_picks {
+            let symbol = &symbols[*symbol_idx];
+            let (close_expiry, close_day_after, assigned) =
+                match candles_map.get(symbol) {
+                    Some(candles) => {
+                        let ec = find_close_on_date(candles, expiry_date);
+                        let dac = find_close_on_date(candles, day_after);
+                        let assigned = ec.map(|c| c < *strike).unwrap_or(false)
+                            || dac.map(|c| c < *strike).unwrap_or(false);
+                        (ec, dac, assigned)
+                    }
+                    None => (None, None, false),
+                };
+
+            picks.push(BacktestPick {
+                sim_date: *sim_date,
+                symbol: symbol.clone(),
+                sector: sector.to_string(),
+                strike: *strike,
+                price_at_pick: *price,
+                rate_of_return: *ror,
+                score: *score,
+                trend_short: *ts,
+                trend_long: *tl,
+                regime_flag: regime.flag.to_string(),
+                assigned,
+                close_at_expiry: close_expiry,
+                close_day_after: close_day_after,
+            });
+        }
+    }
+
+    // Compute aggregate metrics
+    let total_picks = picks.len();
+    let assignment_count = picks.iter().filter(|p| p.assigned).count();
+    let avg_rate_of_return = if total_picks > 0 {
+        picks.iter().map(|p| p.rate_of_return).sum::<f64>() / total_picks as f64
+    } else {
+        0.0
+    };
+    let avg_score = if total_picks > 0 {
+        picks.iter().map(|p| p.score).sum::<f64>() / total_picks as f64
+    } else {
+        0.0
+    };
+    let losses: Vec<f64> = picks
+        .iter()
+        .filter(|p| p.assigned)
+        .map(|p| {
+            let worst_close = match (p.close_at_expiry, p.close_day_after) {
+                (Some(a), Some(b)) => a.min(b),
+                (Some(a), None) => a,
+                (None, Some(b)) => b,
+                _ => p.strike,
+            };
+            (p.strike - worst_close) / p.strike
+        })
+        .collect();
+    let avg_loss_when_assigned = if losses.is_empty() {
+        0.0
+    } else {
+        losses.iter().sum::<f64>() / losses.len() as f64
+    };
+
+    BacktestMetrics {
+        config_name: config.name.clone(),
+        period: config.period,
+        from_date,
+        to_date,
+        total_simulations: mondays.len(),
+        total_picks,
+        assignment_count,
+        avg_rate_of_return,
+        avg_score,
+        avg_loss_when_assigned,
+        picks,
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────
 
 #[cfg(test)]
