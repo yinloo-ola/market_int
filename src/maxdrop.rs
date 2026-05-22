@@ -67,6 +67,16 @@ pub fn calculate_and_save(
 /// Computes max drop statistics from a candle slice using rolling windows.
 /// Returns (percentile_drop, ema_drop) or None if insufficient data.
 pub fn compute_max_drop_stats(candles: &[model::Candle], period: usize) -> Option<(f64, f64)> {
+    compute_max_drop_stats_with_percentile(candles, period, constants::PERCENTILE)
+}
+
+/// Computes max drop statistics with a configurable percentile.
+/// Returns (percentile_drop, ema_drop) or None if insufficient data.
+pub fn compute_max_drop_stats_with_percentile(
+    candles: &[model::Candle],
+    period: usize,
+    drop_percentile: f64,
+) -> Option<(f64, f64)> {
     let max_drops: Vec<f64> = candles
         .windows(period)
         .map(|window| calculate_max_drop(window))
@@ -79,7 +89,7 @@ pub fn compute_max_drop_stats(candles: &[model::Candle], period: usize) -> Optio
 
     let ema_window = std::cmp::min(5, max_drops.len()) as u32;
     let ema_drop = atr::exponential_moving_average(&max_drops, ema_window);
-    let percentile_drop = atr::percentile(&max_drops, constants::PERCENTILE).ok()?;
+    let percentile_drop = atr::percentile(&max_drops, drop_percentile).ok()?;
 
     Some((percentile_drop, ema_drop))
 }

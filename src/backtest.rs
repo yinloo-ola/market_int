@@ -111,6 +111,9 @@ pub struct BacktestConfig {
     pub risk_free_rate: f64,
     pub dividend_yield: f64,
     pub vol_window: usize,
+
+    // Max drop
+    pub drop_percentile: f64,
 }
 
 impl BacktestConfig {
@@ -141,6 +144,7 @@ impl BacktestConfig {
             risk_free_rate: 0.045,
             dividend_yield: 0.015,
             vol_window: 20,
+            drop_percentile: constants::PERCENTILE,
         }
     }
 
@@ -207,6 +211,258 @@ impl BacktestConfig {
         }
     }
 
+    // ── Sweep: safety weight redistribution (no trend) ────────────
+
+    /// No trend, safety=0.50, return=0.30 — favor higher-return picks.
+    pub fn sweep_safety_50() -> Self {
+        Self {
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.50,
+            weight_return: 0.30,
+            weight_sharpe: 0.20,
+            name: "sweep-safety-50".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// No trend, safety=0.45, sharpe=0.35 — favor high-sharpe stocks.
+    pub fn sweep_safety_45() -> Self {
+        Self {
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.45,
+            weight_sharpe: 0.35,
+            weight_return: 0.20,
+            name: "sweep-safety-45".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// No trend, safety=0.40, return=0.40 — maximize return focus.
+    pub fn sweep_safety_40() -> Self {
+        Self {
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.40,
+            weight_return: 0.40,
+            weight_sharpe: 0.20,
+            name: "sweep-safety-40".to_string(),
+            ..Self::control()
+        }
+    }
+
+    // ── Sweep: strike percentile threshold ────────────────────────
+
+    /// No trend, max_strike_percentile=0.40 — tighter strikes.
+    pub fn sweep_pct_40() -> Self {
+        Self {
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.60,
+            max_strike_percentile: 0.40,
+            name: "sweep-pct-40".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// No trend, max_strike_percentile=0.50 — moderate strikes.
+    pub fn sweep_pct_50() -> Self {
+        Self {
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.60,
+            max_strike_percentile: 0.50,
+            name: "sweep-pct-50".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// No trend, max_strike_percentile=0.70 — looser strikes.
+    pub fn sweep_pct_70() -> Self {
+        Self {
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.60,
+            max_strike_percentile: 0.70,
+            name: "sweep-pct-70".to_string(),
+            ..Self::control()
+        }
+    }
+
+    // ── Sweep: max_drop PERCENTILE ────────────────────────────────
+    // All use the leading config: no trend, safety=0.40, return=0.40, sharpe=0.20
+
+    /// PERCENTILE=0.80 — tighter strike range (expect milder drops).
+    pub fn sweep_drop_80() -> Self {
+        Self {
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.40,
+            weight_return: 0.40,
+            weight_sharpe: 0.20,
+            drop_percentile: 0.80,
+            name: "sweep-drop-80".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// PERCENTILE=0.85
+    pub fn sweep_drop_85() -> Self {
+        Self {
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.40,
+            weight_return: 0.40,
+            weight_sharpe: 0.20,
+            drop_percentile: 0.85,
+            name: "sweep-drop-85".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// PERCENTILE=0.90 (current default)
+    pub fn sweep_drop_90() -> Self {
+        Self {
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.40,
+            weight_return: 0.40,
+            weight_sharpe: 0.20,
+            drop_percentile: 0.90,
+            name: "sweep-drop-90".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// PERCENTILE=0.95 — wider strike range (expect near-worst-case drops).
+    pub fn sweep_drop_95() -> Self {
+        Self {
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.40,
+            weight_return: 0.40,
+            weight_sharpe: 0.20,
+            drop_percentile: 0.95,
+            name: "sweep-drop-95".to_string(),
+            ..Self::control()
+        }
+    }
+
+    // ── Return-prioritized configs ────────────────────────────────
+
+    /// Return weight 0.50, safety 0.30 — favor higher-return strikes.
+    pub fn return_50() -> Self {
+        Self {
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.30,
+            weight_return: 0.50,
+            weight_sharpe: 0.20,
+            name: "return-50".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// Raise MIN_RATE_OF_RETURN to 0.30 — filter out low-return picks.
+    pub fn return_min_30() -> Self {
+        Self {
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.40,
+            weight_return: 0.40,
+            weight_sharpe: 0.20,
+            min_rate_of_return: 0.30,
+            name: "return-min-30".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// Looser strikes (0.70) with return focus — strikes closer to price = higher premium.
+    pub fn return_pct70() -> Self {
+        Self {
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.30,
+            weight_return: 0.50,
+            weight_sharpe: 0.20,
+            max_strike_percentile: 0.70,
+            name: "return-pct70".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// Aggressive: higher return weight + tighter min return + looser strikes.
+    pub fn return_aggro() -> Self {
+        Self {
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.25,
+            weight_return: 0.55,
+            weight_sharpe: 0.20,
+            min_rate_of_return: 0.30,
+            max_strike_percentile: 0.70,
+            name: "return-aggro".to_string(),
+            ..Self::control()
+        }
+    }
+
     /// Returns all preset configs for ablation testing.
     pub fn all_presets() -> Vec<Self> {
         vec![
@@ -217,6 +473,20 @@ impl BacktestConfig {
             Self::no_regime(),
             Self::no_trend_at_all(),
             Self::wide_return(),
+            Self::sweep_safety_50(),
+            Self::sweep_safety_45(),
+            Self::sweep_safety_40(),
+            Self::sweep_pct_40(),
+            Self::sweep_pct_50(),
+            Self::sweep_pct_70(),
+            Self::sweep_drop_80(),
+            Self::sweep_drop_85(),
+            Self::sweep_drop_90(),
+            Self::sweep_drop_95(),
+            Self::return_50(),
+            Self::return_min_30(),
+            Self::return_pct70(),
+            Self::return_aggro(),
         ]
     }
 
@@ -483,7 +753,11 @@ pub fn run_backtest(
                 None => continue,
             };
             let (percentile_drop, ema_drop) =
-                match maxdrop::compute_max_drop_stats(&candles, period) {
+                match maxdrop::compute_max_drop_stats_with_percentile(
+                    &candles,
+                    period,
+                    config.drop_percentile,
+                ) {
                     Some(stats) => stats,
                     None => continue,
                 };
