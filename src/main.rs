@@ -57,6 +57,9 @@ mod store {
 // module storing defaults
 mod constants;
 
+// Backtest simulation
+mod backtest;
+
 use chrono::{Datelike, Local};
 use chrono_tz::America::New_York;
 use clap::{Parser, Subcommand};

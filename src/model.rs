@@ -27,7 +27,7 @@ pub enum MarketStatus {
 }
 
 /// Structure representing a candle (OHLCV data).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Candle {
     pub symbol: String, // Symbol of the asset.
     pub open: f64,      // Opening price.
