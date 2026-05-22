@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Max drop calculation now uses rolling windows instead of non-overlapping chunks, fixing underestimation of worst-case N-day drawdowns that span chunk boundaries
+
 ### Changed
 
 - Trend tightening now applies only to the upper strike bound (`strike_to`), keeping `strike_from` un-tightened to allow more lower strikes for strongly trending stocks

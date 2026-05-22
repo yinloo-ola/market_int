@@ -16,7 +16,12 @@
             "env": {
                 "RUST_LOG": "debug",
             },
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "sourceLanguages": ["rust"],
+            "initCommands": [
+                "command script import \"/Users/yinlootan/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/etc/lldb_lookup.py\"",
+                "command source /Users/yinlootan/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/etc/lldb_commands"
+            ]
         }
     ]
 }

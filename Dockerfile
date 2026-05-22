@@ -3,9 +3,6 @@
 ####################################################################################################
 FROM rust:latest AS builder
 
-RUN update-ca-certificates
-
-# Create appuser
 ENV USER=market_int
 ENV UID=10001
 
@@ -18,13 +15,22 @@ RUN adduser \
     --uid "${UID}" \
     "${USER}"
 
-
 WORKDIR /market_int
 
-COPY ./ .
+# 1. Cache dependencies: copy only manifests first
+COPY Cargo.toml Cargo.lock ./
 
-# We no longer need to use the x86_64-unknown-linux-musl target
-RUN cargo build --release
+# Create a dummy main.rs so cargo can resolve and compile dependencies
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+RUN cargo build --release --features bundled-sqlite && rm -rf src
+
+# 2. Now copy the real source — dependency layer is cached unless Cargo.toml/Cargo.lock change
+COPY src ./src
+
+# Touch main.rs so cargo sees a newer file than the cached one
+RUN touch src/main.rs
+
+RUN cargo build --release --features bundled-sqlite
 
 RUN strip -s /market_int/target/release/market_int
 
@@ -33,16 +39,13 @@ RUN strip -s /market_int/target/release/market_int
 ####################################################################################################
 FROM gcr.io/distroless/cc
 
-# Import from builder.
 COPY --from=builder /etc/passwd /etc/passwd
 COPY --from=builder /etc/group /etc/group
 
 WORKDIR /market_int
 
-# Copy our build
 COPY --from=builder /market_int/target/release/market_int ./
 
-# Use an unprivileged user.
 USER market_int:market_int
 
 ENTRYPOINT ["/market_int/market_int"]

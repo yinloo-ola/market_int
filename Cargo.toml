@@ -1,7 +1,11 @@
 [package]
 name = "market_int"
-version = "0.8.2"
+version = "0.8.3"
 edition = "2024"
+
+[features]
+default = []
+bundled-sqlite = ["rusqlite/bundled"]
 
 [dependencies]
 reqwest = { version = "0.11", features = ["json", "multipart"] }
@@ -14,7 +18,7 @@ lazy_static = "1.4"
 thiserror = "1"
 chrono = "0.4.38"
 chrono-tz = "0.4"
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+rusqlite = { version = "0.32.1" }
 clap = { version = "4.5.20", features = ["derive"] }
 log = "0.4.22"
 env_logger = "0.11.5"
@@ -23,6 +27,19 @@ telegram-bot-api = "0.1.0"
 rsa = "0.9"
 sha1 = { version = "0.10", features = ["oid"] }
 base64 = "0.21"
+
+[profile.dev]
+debug = 2               # full debug info for debugger
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+opt-level = 2           # optimize dependencies only (big speedup, keeps your code unoptimized for debugging)
+
+[profile.release]
+opt-level = 3           # max optimization
+lto = "thin"            # fast LTO — most of the benefit, much quicker than "fat"
+strip = true            # strip debug symbols from release binary
+panic = "abort"         # smaller binary, no unwind tables
 
 [dev-dependencies]
 tempfile = "3.27.0"
