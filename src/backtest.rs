@@ -2,6 +2,11 @@ use std::collections::HashMap;
 
 use chrono::{Datelike, Duration, NaiveDate, Weekday};
 
+use crate::{
+    constants, maxdrop, model, price_percentile, sharpe, trend,
+    store::candle,
+};
+
 // ── Black-Scholes ──────────────────────────────────────────────
 
 /// Standard normal CDF using Abramowitz & Stegun approximation (max error ~7.5e-8).
@@ -62,6 +67,246 @@ pub fn num_of_weeks(dte: u32) -> f64 {
 pub fn compute_rate_of_return(premium: f64, strike: f64, dte: u32) -> f64 {
     let weeks = num_of_weeks(dte);
     premium / strike / weeks * 52.0
+}
+
+// ── Configuration ──────────────────────────────────────────────
+
+/// Captures every tunable parameter for the backtest.
+/// Each preset represents a hypothesis to test via ablation.
+#[derive(Debug, Clone)]
+pub struct BacktestConfig {
+    pub name: String,
+    pub period: usize,
+
+    // Strike range
+    pub use_trend_factor: bool,
+    pub trend_tighten_multiplier: f64,
+    pub trend_tighten_cap: f64,
+    pub trend_tighten_peak: f64,
+    pub trend_tighten_ease_back: f64,
+
+    // Pre-filters
+    pub min_rate_of_return: f64,
+    pub max_rate_of_return: f64,
+    pub max_strike_percentile: f64,
+
+    // Scoring weights (must sum to 1.0)
+    pub weight_sharpe: f64,
+    pub weight_safety: f64,
+    pub weight_return: f64,
+    pub weight_trend: f64,
+
+    // Trend filters
+    pub use_trend_short_filter: bool,
+    pub use_trend_long_filter: bool,
+    pub use_trend_in_score: bool,
+
+    // Regime
+    pub use_regime: bool,
+    pub trend_threshold_bull: f64,
+    pub trend_threshold_range: f64,
+    pub bearness_max: f64,
+
+    // Black-Scholes
+    pub risk_free_rate: f64,
+    pub dividend_yield: f64,
+    pub vol_window: usize,
+}
+
+impl BacktestConfig {
+    /// Current production defaults — the control baseline.
+    pub fn control() -> Self {
+        Self {
+            name: "control".to_string(),
+            period: 5,
+            use_trend_factor: true,
+            trend_tighten_multiplier: constants::TREND_TIGHTEN_MULTIPLIER,
+            trend_tighten_cap: constants::TREND_TIGHTEN_CAP,
+            trend_tighten_peak: constants::TREND_TIGHTEN_PEAK,
+            trend_tighten_ease_back: constants::TREND_EASE_BACK,
+            min_rate_of_return: constants::MIN_RATE_OF_RETURN,
+            max_rate_of_return: constants::MAX_RATE_OF_RETURN,
+            max_strike_percentile: constants::MAX_STRIKE_PERCENTILE,
+            weight_sharpe: 0.20,
+            weight_safety: 0.30,
+            weight_return: 0.20,
+            weight_trend: 0.30,
+            use_trend_short_filter: true,
+            use_trend_long_filter: true,
+            use_trend_in_score: true,
+            use_regime: true,
+            trend_threshold_bull: constants::TREND_THRESHOLD_BULL,
+            trend_threshold_range: constants::TREND_THRESHOLD_RANGE,
+            bearness_max: constants::BEARNESS_MAX,
+            risk_free_rate: 0.045,
+            dividend_yield: 0.015,
+            vol_window: 20,
+        }
+    }
+
+    /// No trend factor — strike range never tightened.
+    pub fn no_trend_factor() -> Self {
+        Self {
+            use_trend_factor: false,
+            name: "no-trend-factor".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// No trend_long pre-filter.
+    pub fn no_trend_long() -> Self {
+        Self {
+            use_trend_long_filter: false,
+            name: "no-trend-long".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// No trend in score — redistribute trend weight to safety.
+    pub fn no_trend_score() -> Self {
+        Self {
+            use_trend_in_score: false,
+            weight_trend: 0.0,
+            weight_safety: 0.60,
+            name: "no-trend-score".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// No regime — always use bull thresholds.
+    pub fn no_regime() -> Self {
+        Self {
+            use_regime: false,
+            name: "no-regime".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// All trend features off — pure sharpe + safety + return.
+    pub fn no_trend_at_all() -> Self {
+        Self {
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.60,
+            name: "no-trend-at-all".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// Looser return filters.
+    pub fn wide_return() -> Self {
+        Self {
+            min_rate_of_return: 0.15,
+            max_rate_of_return: 1.0,
+            name: "wide-return".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// Returns all preset configs for ablation testing.
+    pub fn all_presets() -> Vec<Self> {
+        vec![
+            Self::control(),
+            Self::no_trend_factor(),
+            Self::no_trend_long(),
+            Self::no_trend_score(),
+            Self::no_regime(),
+            Self::no_trend_at_all(),
+            Self::wide_return(),
+        ]
+    }
+
+    /// Look up a preset by name (case-sensitive).
+    pub fn by_name(name: &str) -> Option<Self> {
+        Self::all_presets().into_iter().find(|p| p.name == name)
+    }
+
+    /// Compute trend_factor from trend_ratio_short using config params.
+    /// Returns 1.0 if use_trend_factor is false.
+    pub fn compute_trend_factor(&self, trend_ratio_short: f64) -> f64 {
+        if !self.use_trend_factor {
+            return 1.0;
+        }
+        if trend_ratio_short <= 1.0 {
+            return 1.0;
+        }
+
+        let cap = self.trend_tighten_cap;
+        let peak = self.trend_tighten_peak;
+
+        if trend_ratio_short <= peak {
+            let reduction = (trend_ratio_short - 1.0) * self.trend_tighten_multiplier;
+            1.0 - reduction.min(cap)
+        } else {
+            let peak_reduction =
+                ((peak - 1.0) * self.trend_tighten_multiplier).min(cap);
+            let excess = trend_ratio_short - peak;
+            let reduction =
+                (peak_reduction - excess * self.trend_tighten_ease_back).max(0.0);
+            1.0 - reduction
+        }
+    }
+
+    /// Build a MarketRegime for this config.
+    /// If use_regime is false, always returns bull defaults.
+    pub fn build_regime(&self, spy_trend_long: f64) -> crate::regime::MarketRegime {
+        if !self.use_regime {
+            return crate::regime::MarketRegime::from_spy_trend(1.05); // bull defaults
+        }
+        crate::regime::MarketRegime::from_spy_trend(spy_trend_long)
+    }
+
+    /// Score a put option candidate using config's weights and filters.
+    /// Returns None if pre-filters reject.
+    pub fn score_candidate(
+        &self,
+        sharpe: f64,
+        strike_percentile: f64,
+        rate_of_return: f64,
+        trend_ratio_short: f64,
+        trend_ratio_long: f64,
+        regime: &crate::regime::MarketRegime,
+    ) -> Option<f64> {
+        // Pre-filters
+        if rate_of_return < self.min_rate_of_return
+            || rate_of_return > self.max_rate_of_return
+        {
+            return None;
+        }
+        if sharpe <= 0.0 {
+            return None;
+        }
+        if strike_percentile > self.max_strike_percentile {
+            return None;
+        }
+        if self.use_trend_short_filter && trend_ratio_short < regime.trend_threshold {
+            return None;
+        }
+        if self.use_trend_long_filter && trend_ratio_long < regime.trend_threshold {
+            return None;
+        }
+
+        let sharpe_norm = (sharpe / 2.0).clamp(0.0, 1.0);
+        let safety_norm = 1.0 - strike_percentile.max(0.0);
+        let return_norm =
+            (1.0 - (rate_of_return - 0.35).abs() / 0.20).clamp(0.0, 1.0);
+        let trend_norm = if self.use_trend_in_score {
+            ((trend_ratio_short - regime.trend_threshold) / 0.10).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        Some(
+            self.weight_sharpe * sharpe_norm
+                + self.weight_safety * safety_norm
+                + self.weight_return * return_norm
+                + self.weight_trend * trend_norm,
+        )
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────
@@ -192,5 +437,77 @@ mod tests {
             expected,
             ror
         );
+    }
+
+    #[test]
+    fn test_control_config_trend_factor_matches_model() {
+        let config = BacktestConfig::control();
+        // At 1.05, model returns 0.90 — config should match
+        let model_factor = model::calculate_trend_factor(1.05);
+        let config_factor = config.compute_trend_factor(1.05);
+        assert!(
+            (model_factor - config_factor).abs() < 1e-10,
+            "control config should match model: model={}, config={}",
+            model_factor,
+            config_factor
+        );
+    }
+
+    #[test]
+    fn test_no_trend_factor_always_one() {
+        let config = BacktestConfig::no_trend_factor();
+        assert_eq!(config.compute_trend_factor(1.05), 1.0);
+        assert_eq!(config.compute_trend_factor(1.20), 1.0);
+    }
+
+    #[test]
+    fn test_no_regime_always_bull() {
+        let config = BacktestConfig::no_regime();
+        let regime = config.build_regime(0.92); // Even deep bear
+        assert_eq!(regime.flag, "", "no-regime should always be bull");
+    }
+
+    #[test]
+    fn test_score_rejects_below_min_return() {
+        let config = BacktestConfig::control();
+        let regime = config.build_regime(1.05);
+        let result = config.score_candidate(1.5, 0.1, 0.10, 1.03, 1.04, &regime);
+        assert!(
+            result.is_none(),
+            "should reject rate_of_return below 0.25"
+        );
+    }
+
+    #[test]
+    fn test_score_accepts_valid() {
+        let config = BacktestConfig::control();
+        let regime = config.build_regime(1.05);
+        let result = config.score_candidate(1.5, 0.1, 0.35, 1.03, 1.04, &regime);
+        assert!(result.is_some(), "should accept valid candidate");
+        let score = result.unwrap();
+        assert!(
+            score > 0.0 && score <= 1.0,
+            "score should be in [0,1], got {}",
+            score
+        );
+    }
+
+    #[test]
+    fn test_all_presets_have_valid_names() {
+        for config in BacktestConfig::all_presets() {
+            assert!(!config.name.is_empty(), "preset name should not be empty");
+            assert!(
+                !config.name.contains(' '),
+                "preset name should not have spaces: {}",
+                config.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_by_name_finds_presets() {
+        assert!(BacktestConfig::by_name("control").is_some());
+        assert!(BacktestConfig::by_name("no-trend-factor").is_some());
+        assert!(BacktestConfig::by_name("nonexistent").is_none());
     }
 }
