@@ -31,47 +31,32 @@ pub fn calculate_and_save(
             continue;
         }
 
-        let timestamp = candles.last().unwrap().timestamp;
-
-        // Calculate max drop using rolling windows of the specified period.
-        // Rolling windows capture drops that span across chunk boundaries,
-        // producing accurate worst-case drawdown estimates.
-        let max_drops: Vec<f64> = candles
-            .windows(period)
-            .map(|window| calculate_max_drop(window))
-            .filter(|&drop| drop > 0.0)
-            .collect();
-
-        // Need at least 2 samples for meaningful statistics
-        if max_drops.len() >= 2 {
-            let ema_window = std::cmp::min(5, max_drops.len()) as u32; // Use smaller window if not enough data
-            let ema_drop = atr::exponential_moving_average(&max_drops, ema_window);
-            let percentile_drop = atr::percentile(&max_drops, constants::PERCENTILE)?;
-
-            // Save the specific period data
-            store::max_drop::save_max_drop_period(
-                conn,
-                &symbol,
-                period,
-                percentile_drop,
-                ema_drop,
-                timestamp,
-            )?;
-
-            log::info!(
-                "Calculated {}-day max drop for {}: percentile={:.4}, ema={:.4}",
-                period,
-                symbol,
-                percentile_drop,
-                ema_drop
-            );
-        } else {
-            log::warn!(
-                "Not enough {}-day rolling samples for {}, need at least 2, found {}",
-                period,
-                symbol,
-                max_drops.len()
-            );
+        match compute_max_drop_stats(&candles, period) {
+            Some((percentile_drop, ema_drop)) => {
+                let timestamp = candles.last().unwrap().timestamp;
+                store::max_drop::save_max_drop_period(
+                    conn,
+                    &symbol,
+                    period,
+                    percentile_drop,
+                    ema_drop,
+                    timestamp,
+                )?;
+                log::info!(
+                    "Calculated {}-day max drop for {}: percentile={:.4}, ema={:.4}",
+                    period,
+                    symbol,
+                    percentile_drop,
+                    ema_drop
+                );
+            }
+            None => {
+                log::warn!(
+                    "Not enough {}-day rolling samples for {}, need at least 2",
+                    period,
+                    symbol
+                );
+            }
         }
     }
 
@@ -79,7 +64,29 @@ pub fn calculate_and_save(
     Ok(())
 }
 
-fn calculate_max_drop(candles: &[model::Candle]) -> f64 {
+/// Computes max drop statistics from a candle slice using rolling windows.
+/// Returns (percentile_drop, ema_drop) or None if insufficient data.
+pub fn compute_max_drop_stats(candles: &[model::Candle], period: usize) -> Option<(f64, f64)> {
+    let max_drops: Vec<f64> = candles
+        .windows(period)
+        .map(|window| calculate_max_drop(window))
+        .filter(|&drop| drop > 0.0)
+        .collect();
+
+    if max_drops.len() < 2 {
+        return None;
+    }
+
+    let ema_window = std::cmp::min(5, max_drops.len()) as u32;
+    let ema_drop = atr::exponential_moving_average(&max_drops, ema_window);
+    let percentile_drop = atr::percentile(&max_drops, constants::PERCENTILE).ok()?;
+
+    Some((percentile_drop, ema_drop))
+}
+
+/// Calculates the maximum drawdown within a window of candles.
+/// Returns the max peak-to-trough drop as a fraction of the trough price.
+pub fn calculate_max_drop(candles: &[model::Candle]) -> f64 {
     // Return 0.0 if the vector of candles is empty to prevent panicking.
     if candles.is_empty() {
         return 0.0;

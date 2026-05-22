@@ -28,7 +28,7 @@ pub fn calculate_and_save(symbols_file_path: &str, conn: &mut Connection) -> mod
         }
 
         let timestamp = candles.last().unwrap().timestamp;
-        let percentile = calculate_price_percentile(&candles);
+        let percentile = compute_price_percentile(&candles);
 
         percentiles.push(model::PricePercentile {
             symbol: symbol.clone(),
@@ -47,7 +47,9 @@ pub fn calculate_and_save(symbols_file_path: &str, conn: &mut Connection) -> mod
     Ok(())
 }
 
-fn calculate_price_percentile(candles: &[model::Candle]) -> f64 {
+/// Computes the 20-day price percentile from a candle slice.
+/// Returns 0.5 if all prices are equal.
+pub fn compute_price_percentile(candles: &[model::Candle]) -> f64 {
     let close_prices: Vec<f64> = candles.iter().map(|c| c.close).collect();
 
     let min_price = close_prices.iter().copied().fold(f64::INFINITY, f64::min);

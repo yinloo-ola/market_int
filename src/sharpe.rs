@@ -30,14 +30,24 @@ pub fn calculate_and_save(
     Ok(())
 }
 
-fn calculate_returns(candles: &[model::Candle]) -> Vec<f64> {
+/// Computes annualized Sharpe ratio from a candle slice.
+/// Returns None if insufficient data or zero std dev.
+pub fn compute_sharpe(candles: &[model::Candle], risk_free_rate: f64) -> Option<f64> {
+    if candles.len() < crate::constants::SHARPE_MIN_CANDLES {
+        return None;
+    }
+    let returns = calculate_returns(candles);
+    calculate_sharpe(&returns, risk_free_rate).ok()
+}
+
+pub fn calculate_returns(candles: &[model::Candle]) -> Vec<f64> {
     candles
         .windows(2)
         .map(|window| (window[1].close - window[0].close) / window[0].close)
         .collect()
 }
 
-fn calculate_sharpe(returns: &[f64], risk_free_rate: f64) -> model::Result<f64> {
+pub fn calculate_sharpe(returns: &[f64], risk_free_rate: f64) -> model::Result<f64> {
     if returns.is_empty() {
         return Err(model::QuotesError::InsufficientReturnData(0));
     }
