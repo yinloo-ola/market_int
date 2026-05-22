@@ -167,8 +167,6 @@ pub async fn retrieve_option_chains_with_expiry(
 
     let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
 
-    let trend_data = collect_trend_data(conn, &symbols);
-
     // Process symbols in batches of 10 (Tiger API limit)
     for chunk in symbols.chunks(10) {
         let symbols_for_expiry: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();

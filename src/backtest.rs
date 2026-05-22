@@ -29,6 +29,7 @@ pub fn cumulative_normal(x: f64) -> f64 {
 
 /// Black-Scholes put price.
 /// S = spot, K = strike, T = years to expiry, r = risk-free rate, q = dividend yield, sigma = volatility.
+#[allow(non_snake_case)]
 pub fn black_scholes_put(S: f64, K: f64, T: f64, r: f64, q: f64, sigma: f64) -> f64 {
     if T <= 0.0 || sigma <= 0.0 || S <= 0.0 || K <= 0.0 {
         return 0.0;
@@ -852,7 +853,7 @@ pub fn run_backtest(
             if top_picks.len() >= 3 {
                 break;
             }
-            let (symbol_idx, score, strike, ror, ts, tl, price, sector) = candidate;
+            let (symbol_idx, _score, _strike, _ror, _ts, _tl, _price, sector) = candidate;
             if seen_symbols.contains(symbol_idx) {
                 continue;
             }

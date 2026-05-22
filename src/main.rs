@@ -1,10 +1,3 @@
-// Main function for the market data application.
-mod marketdata {
-    // Client for fetching market data.
-    pub mod api_caller;
-    // Response structures for market data.
-    pub mod response;
-}
 // HTTP client module.
 mod http {
     // HTTP client implementation.
@@ -372,24 +365,8 @@ async fn main() {
                     return;
                 }
             };
-            // Pull option chains with 5-day expiry (short timeframe)
-            // Compute SPY-based market regime
-            let regime = match crate::regime::compute_spy_trend(&mut requester).await {
-                Ok(spy_trend) => {
-                    let r = crate::regime::MarketRegime::from_spy_trend(spy_trend);
-                    log::info!(
-                        "Market regime: bearness={:.2}, threshold={:.3}, flag={}",
-                        r.bearness,
-                        r.trend_threshold,
-                        r.flag
-                    );
-                    r
-                }
-                Err(e) => {
-                    log::warn!("Failed to compute SPY regime, using bull defaults: {}", e);
-                    crate::regime::MarketRegime::from_spy_trend(1.05)
-                }
-            };
+            // Set standard bull regime directly (bypasses dynamic SPY checks to save time/API calls)
+            let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
             let sectors = sectors::load_sectors(&symbols_file_path).unwrap_or_default();
             match option::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
