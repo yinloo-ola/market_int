@@ -80,3 +80,41 @@ pub fn get_candles(
     candles.reverse();
     Ok(candles)
 }
+
+/// Retrieves up to `count` candles for `symbol` with timestamp <= `as_of`.
+/// Returns candles in chronological order (oldest first).
+pub fn get_candles_up_to(
+    conn: &Connection,
+    symbol: &str,
+    count: u32,
+    as_of: u32,
+) -> Result<Vec<model::Candle>> {
+    let mut stmt = conn.prepare(
+        "SELECT symbol, open, high, low, close, volume, timestamp
+         FROM candle
+         WHERE symbol = ?1 AND timestamp <= ?2
+         ORDER BY timestamp DESC LIMIT ?3",
+    )?;
+    let mut rows = stmt.query(params![symbol, as_of, count])?;
+    let mut candles = Vec::new();
+    while let Some(row) = rows.next()? {
+        let symbol: String = row.get(0)?;
+        let open: f64 = row.get(1)?;
+        let high: f64 = row.get(2)?;
+        let low: f64 = row.get(3)?;
+        let close: f64 = row.get(4)?;
+        let volume: u32 = row.get(5)?;
+        let timestamp: u32 = row.get(6)?;
+        candles.push(model::Candle {
+            symbol,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            timestamp,
+        });
+    }
+    candles.reverse();
+    Ok(candles)
+}
