@@ -7,21 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added support for multiple options-scoring paradigms in the backtester (`Symmetric`, `AsymmetricStatic`, and `AsymmetricDynamic`) to test different yield targets
+- Added Net P&L per share, total premium collected, and total assignment loss tracking to backtest metrics
+- Deployed highly profitable `premium-static-080` scoring model in production, shifting `IDEAL_RETURN` to 80% with an asymmetric soft-cap and a protective `0.40` maximum strike percentile safety ceiling
+
 ### Fixed
 
-- Max drop calculation now uses rolling windows instead of non-overlapping chunks, fixing underestimation of worst-case N-day drawdowns that span chunk boundaries
+- Fixed a backtest assignment bug where weekend option expiry dates (Saturday/Sunday) skipped the Friday close and checked next Monday's close, falsely inflating assignments due to weekend gaps.
+- Adjusted all corresponding scoring unit tests in `src/model.rs` to align with the new 80% asymmetric soft-cap math, returning the entire test suite to 100% green.
 
 ### Changed
 
-- Trend tightening now applies only to the upper strike bound (`strike_to`), keeping `strike_from` un-tightened to allow more lower strikes for strongly trending stocks
-- Raised `MAX_RATE_OF_RETURN` from 0.65 to 0.80 to allow strikes with higher returns
-
-### Added
-
-- Sector column in CSV output with GICS broad sector mapping from `data/sectors.csv`
-- Top 3 Telegram picks are now diversified across different sectors (stocks with "Unknown" sector are not excluded)
-- Telegram caption shows sector label next to ticker (e.g. `AAPL (Technology)`)
-- `sectors` module with `sector_of()` helper and `UNKNOWN_SECTOR` constant
+- Lowered `MIN_RATE_OF_RETURN` from 0.30 to 0.25 to increase search-space flexibility, and lowered `MAX_STRIKE_PERCENTILE` from 0.60 to 0.40 to guarantee deeply out-of-the-money safety margins.
 
 ## [0.7.0] - 2026-05-16
 
