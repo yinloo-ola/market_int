@@ -9,7 +9,7 @@ pub const MOMENTUM_EXTENDED_THRESHOLD: f64 = 0.90;
 pub const MIN_RATE_OF_RETURN: f64 = 0.25;
 pub const MAX_RATE_OF_RETURN: f64 = 0.80;
 pub const MAX_STRIKE_PERCENTILE: f64 = 0.40;
-pub const IDEAL_RETURN: f64 = 0.80;  // Target 50% annualized yield with asymmetric soft-cap
+pub const IDEAL_RETURN: f64 = 0.80;
 
 // Trend filter constants
 pub const EMA_SHORT_PERIOD: u32 = 20;
