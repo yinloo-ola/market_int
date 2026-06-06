@@ -578,10 +578,10 @@ mod tests {
     #[test]
     fn test_put_score_good_option() {
         // sharpe=1.8, percentile=0.10, return=0.45
-        // sharpe_norm=(1.8/2.0).clamp(0,1) = 0.9, safety_norm=0.9, return_norm=(0.45/0.50).min(1.0) = 0.90
-        // score = 0.20*0.9 + 0.40*0.9 + 0.40*0.90 = 0.18 + 0.36 + 0.36 = 0.90
+        // sharpe_norm=(1.8/2.0).clamp(0,1) = 0.9, safety_norm=0.9, return_norm=(0.45/0.80).min(1.0) = 0.5625
+        // score = 0.20*0.9 + 0.40*0.9 + 0.40*0.5625 = 0.18 + 0.36 + 0.225 = 0.765
         let score = calculate_put_score(1.8, 0.10, 0.45, 1.05, 1.05, &bull_regime()).unwrap();
-        assert!((score - 0.90).abs() < 0.01);
+        assert!((score - 0.765).abs() < 0.01);
     }
 
     #[test]
@@ -679,27 +679,27 @@ mod tests {
     #[test]
     fn test_put_score_clamps_negative_percentile() {
         // strike below 20-day min -> negative percentile -> should clamp to 0.0
-        // sharpe_norm=1.0, safety_norm=1.0, return_norm=(0.35/0.50).min(1.0) = 0.70
-        // score = 0.20*1.0 + 0.40*1.0 + 0.40*0.70 = 0.20 + 0.40 + 0.28 = 0.88
+        // sharpe_norm=1.0, safety_norm=1.0, return_norm=(0.35/0.80).min(1.0) = 0.4375
+        // score = 0.20*1.0 + 0.40*1.0 + 0.40*0.4375 = 0.20 + 0.40 + 0.175 = 0.775
         let score = calculate_put_score(2.0, -0.10, 0.35, 1.05, 1.05, &bull_regime()).unwrap();
-        assert!((score - 0.88).abs() < 0.01);
+        assert!((score - 0.775).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_high_sharpe_clamps() {
         // sharpe > 2.0 should clamp sharpe_norm to 1.0
-        // sharpe_norm=1.0, safety_norm=1.0, return_norm=0.70
-        // score = 0.88
+        // sharpe_norm=1.0, safety_norm=1.0, return_norm=0.4375
+        // score = 0.775
         let score = calculate_put_score(5.0, 0.0, 0.35, 1.05, 1.05, &bull_regime()).unwrap();
-        assert!((score - 0.88).abs() < 0.01);
+        assert!((score - 0.775).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_peak_return() {
-        // return exactly at 0.50 -> return_norm = 1.0
+        // return exactly at 0.80 -> return_norm = 1.0
         // sharpe=2.0 -> sharpe_norm=1.0, percentile=0.0 -> safety_norm=1.0
         // score = 0.20 + 0.40 + 0.40 = 1.00
-        let score = calculate_put_score(2.0, 0.0, 0.50, 1.05, 1.05, &bull_regime()).unwrap();
+        let score = calculate_put_score(2.0, 0.0, 0.80, 1.05, 1.05, &bull_regime()).unwrap();
         assert!((score - 1.00).abs() < 0.01);
     }
 
