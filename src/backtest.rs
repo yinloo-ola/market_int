@@ -72,12 +72,20 @@ pub fn compute_rate_of_return(premium: f64, strike: f64, dte: u32) -> f64 {
 
 // ── Configuration ──────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScoringType {
+    Symmetric,         // Original triangle centered at ideal_return
+    AsymmetricStatic,  // Suggestion 1: min(1.0, return / ideal_return)
+    AsymmetricDynamic, // Combined: min(1.0, return / target_return_regime)
+}
+
 /// Captures every tunable parameter for the backtest.
 /// Each preset represents a hypothesis to test via ablation.
 #[derive(Debug, Clone)]
 pub struct BacktestConfig {
     pub name: String,
     pub period: usize,
+    pub scoring_type: ScoringType,
 
     // Strike range
     pub use_trend_factor: bool,
@@ -97,6 +105,10 @@ pub struct BacktestConfig {
     pub weight_return: f64,
     pub weight_trend: f64,
 
+    // Return scoring shape
+    pub ideal_return: f64,      // Peak of return_norm (default 0.35)
+    pub return_bandwidth: f64,   // Half-width of the return_norm triangle (default 0.20)
+
     // Trend filters
     pub use_trend_short_filter: bool,
     pub use_trend_long_filter: bool,
@@ -112,6 +124,7 @@ pub struct BacktestConfig {
     pub risk_free_rate: f64,
     pub dividend_yield: f64,
     pub vol_window: usize,
+    pub iv_multiplier: f64,  // Multiply historical vol to simulate IV > HV premium
 
     // Max drop
     pub drop_percentile: f64,
@@ -123,6 +136,7 @@ impl BacktestConfig {
         Self {
             name: "control".to_string(),
             period: 5,
+            scoring_type: ScoringType::Symmetric,
             use_trend_factor: true,
             trend_tighten_multiplier: constants::TREND_TIGHTEN_MULTIPLIER,
             trend_tighten_cap: constants::TREND_TIGHTEN_CAP,
@@ -145,7 +159,10 @@ impl BacktestConfig {
             risk_free_rate: 0.045,
             dividend_yield: 0.015,
             vol_window: 20,
+            iv_multiplier: 1.3,  // Real market IV is typically 1.2-1.5x historical vol
             drop_percentile: constants::PERCENTILE,
+            ideal_return: 0.35,
+            return_bandwidth: 0.20,
         }
     }
 
@@ -464,6 +481,215 @@ impl BacktestConfig {
         }
     }
 
+    // ── Premium-income configs ─────────────────────────────────
+    // Base: no trend features (matching production), safety as pre-filter.
+    // These configs test how to increase premium income while keeping
+    // assignment rate low.
+
+    /// Approach A (conservative): raise ideal return 35% → 50%, widen band,
+    /// tighten max_strike_percentile to 0.50.
+    pub fn premium_a_conservative() -> Self {
+        Self {
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.40,
+            weight_return: 0.40,
+            weight_sharpe: 0.20,
+            max_strike_percentile: 0.50,
+            min_rate_of_return: 0.25,
+            max_rate_of_return: 0.80,
+            ideal_return: 0.50,
+            return_bandwidth: 0.25,
+            name: "premium-a-conservative".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// Approach A with tighter strikes (pct 0.40): more OTM room.
+    pub fn premium_a_tight() -> Self {
+        Self {
+            max_strike_percentile: 0.40,
+            ideal_return: 0.50,
+            return_bandwidth: 0.25,
+            name: "premium-a-tight".to_string(),
+            ..Self::premium_a_conservative()
+        }
+    }
+
+    /// Approach B (aggressive): same as A but shift weights toward return (60%).
+    pub fn premium_b_return_focus() -> Self {
+        Self {
+            weight_safety: 0.20,
+            weight_return: 0.60,
+            weight_sharpe: 0.20,
+            name: "premium-b-return-focus".to_string(),
+            ..Self::premium_a_conservative()
+        }
+    }
+
+    /// Approach B with tight strikes.
+    pub fn premium_b_tight() -> Self {
+        Self {
+            max_strike_percentile: 0.40,
+            name: "premium-b-tight".to_string(),
+            ..Self::premium_b_return_focus()
+        }
+    }
+
+    /// Approach C: raise min return to 0.35 — only consider higher-premium puts.
+    pub fn premium_c_min35() -> Self {
+        Self {
+            min_rate_of_return: 0.35,
+            ideal_return: 0.50,
+            return_bandwidth: 0.25,
+            name: "premium-c-min35".to_string(),
+            ..Self::premium_a_conservative()
+        }
+    }
+
+    /// Approach C with min 0.40 — aggressive return floor.
+    pub fn premium_c_min40() -> Self {
+        Self {
+            min_rate_of_return: 0.40,
+            max_strike_percentile: 0.50,
+            ideal_return: 0.55,
+            return_bandwidth: 0.25,
+            name: "premium-c-min40".to_string(),
+            ..Self::premium_a_conservative()
+        }
+    }
+
+    /// Approach D: widen max return to 1.0 to capture deep-OTM high-premium options.
+    pub fn premium_d_wide_max() -> Self {
+        Self {
+            max_rate_of_return: 1.0,
+            ideal_return: 0.55,
+            return_bandwidth: 0.35,
+            max_strike_percentile: 0.50,
+            weight_safety: 0.30,
+            weight_return: 0.50,
+            weight_sharpe: 0.20,
+            name: "premium-d-wide-max".to_string(),
+            ..Self::premium_a_conservative()
+        }
+    }
+
+    /// Approach E: higher IV multiplier (1.5x) — simulates high-vol environment.
+    pub fn premium_e_high_iv() -> Self {
+        Self {
+            iv_multiplier: 1.5,
+            ideal_return: 0.50,
+            return_bandwidth: 0.25,
+            name: "premium-e-high-iv".to_string(),
+            ..Self::premium_a_conservative()
+        }
+    }
+
+    /// Approach F: higher IV (1.5x) + return focus + tight strikes.
+    pub fn premium_f_high_iv_return() -> Self {
+        Self {
+            iv_multiplier: 1.5,
+            weight_safety: 0.20,
+            weight_return: 0.60,
+            max_strike_percentile: 0.40,
+            ideal_return: 0.55,
+            return_bandwidth: 0.30,
+            name: "premium-f-high-iv-return".to_string(),
+            ..Self::premium_a_conservative()
+        }
+    }
+
+    /// Suggestion 1: Static Soft-Cap target at 0.50 with tight 0.40 strike percentile safety ceiling
+    pub fn suggestion_1() -> Self {
+        Self {
+            scoring_type: ScoringType::AsymmetricStatic,
+            ideal_return: 0.50,
+            max_strike_percentile: 0.40,
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: false,
+            weight_trend: 0.0,
+            weight_safety: 0.40,
+            weight_return: 0.40,
+            weight_sharpe: 0.20,
+            name: "suggestion-1".to_string(),
+            ..Self::control()
+        }
+    }
+
+    /// Static Soft-Cap target at 0.60 with tight 0.40 strike percentile safety ceiling
+    pub fn premium_static_060() -> Self {
+        Self {
+            ideal_return: 0.60,
+            name: "premium-static-060".to_string(),
+            ..Self::suggestion_1()
+        }
+    }
+
+    /// Static Soft-Cap target at 0.70 with tight 0.40 strike percentile safety ceiling
+    pub fn premium_static_070() -> Self {
+        Self {
+            ideal_return: 0.70,
+            name: "premium-static-070".to_string(),
+            ..Self::suggestion_1()
+        }
+    }
+
+    /// Static Soft-Cap target at 0.80 with tight 0.40 strike percentile safety ceiling
+    pub fn premium_static_080() -> Self {
+        Self {
+            ideal_return: 0.80,
+            max_rate_of_return: 1.00,
+            name: "premium-static-080".to_string(),
+            ..Self::suggestion_1()
+        }
+    }
+
+    /// Static Soft-Cap target at 0.90 with tight 0.40 strike percentile safety ceiling
+    pub fn premium_static_090() -> Self {
+        Self {
+            ideal_return: 0.90,
+            max_rate_of_return: 1.10,
+            name: "premium-static-090".to_string(),
+            ..Self::suggestion_1()
+        }
+    }
+
+    /// Static Soft-Cap target at 1.00 with tight 0.40 strike percentile safety ceiling
+    pub fn premium_static_100() -> Self {
+        Self {
+            ideal_return: 1.00,
+            max_rate_of_return: 1.20,
+            name: "premium-static-100".to_string(),
+            ..Self::suggestion_1()
+        }
+    }
+
+    /// Combined Approach: Dynamic Soft-Cap target (0.40-0.65) with tight 0.40 strike percentile safety ceiling
+    pub fn combined_dynamic() -> Self {
+        Self {
+            scoring_type: ScoringType::AsymmetricDynamic,
+            max_strike_percentile: 0.40,
+            use_trend_factor: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_in_score: false,
+            use_regime: true, // Requires regime for bearness tracking
+            weight_trend: 0.0,
+            weight_safety: 0.40,
+            weight_return: 0.40,
+            weight_sharpe: 0.20,
+            name: "combined-dynamic".to_string(),
+            ..Self::control()
+        }
+    }
+
     /// Returns all preset configs for ablation testing.
     pub fn all_presets() -> Vec<Self> {
         vec![
@@ -488,6 +714,24 @@ impl BacktestConfig {
             Self::return_min_30(),
             Self::return_pct70(),
             Self::return_aggro(),
+            // Premium income experiments
+            Self::premium_a_conservative(),
+            Self::premium_a_tight(),
+            Self::premium_b_return_focus(),
+            Self::premium_b_tight(),
+            Self::premium_c_min35(),
+            Self::premium_c_min40(),
+            Self::premium_d_wide_max(),
+            Self::premium_e_high_iv(),
+            Self::premium_f_high_iv_return(),
+            // Suggestion 1 vs Combined
+            Self::suggestion_1(),
+            Self::combined_dynamic(),
+            Self::premium_static_060(),
+            Self::premium_static_070(),
+            Self::premium_static_080(),
+            Self::premium_static_090(),
+            Self::premium_static_100(),
         ]
     }
 
@@ -563,8 +807,19 @@ impl BacktestConfig {
 
         let sharpe_norm = (sharpe / 2.0).clamp(0.0, 1.0);
         let safety_norm = 1.0 - strike_percentile.max(0.0);
-        let return_norm =
-            (1.0 - (rate_of_return - 0.35).abs() / 0.20).clamp(0.0, 1.0);
+        let return_norm = match self.scoring_type {
+            ScoringType::Symmetric => {
+                (1.0 - (rate_of_return - self.ideal_return).abs() / self.return_bandwidth).clamp(0.0, 1.0)
+            }
+            ScoringType::AsymmetricStatic => {
+                (rate_of_return / self.ideal_return).min(1.0)
+            }
+            ScoringType::AsymmetricDynamic => {
+                // Target return scales from BASE_TARGET_RETURN (0.40 in bull) up to BEAR_TARGET_RETURN (0.65 in bear)
+                let target = 0.40 + 0.25 * regime.bearness;
+                (rate_of_return / target).min(1.0)
+            }
+        };
         let trend_norm = if self.use_trend_in_score {
             ((trend_ratio_short - regime.trend_threshold) / 0.10).clamp(0.0, 1.0)
         } else {
@@ -590,6 +845,7 @@ pub struct BacktestPick {
     pub sector: String,
     pub strike: f64,
     pub price_at_pick: f64,
+    pub premium: f64,
     pub rate_of_return: f64,
     pub score: f64,
     pub trend_short: f64,
@@ -598,6 +854,9 @@ pub struct BacktestPick {
     pub assigned: bool,
     pub close_at_expiry: Option<f64>,
     pub close_day_after: Option<f64>,
+    /// Net P&L per share: premium collected minus assignment loss (if any).
+    /// Positive = profit, negative = loss.
+    pub net_pnl: f64,
 }
 
 /// Aggregated metrics for one config.
@@ -613,6 +872,9 @@ pub struct BacktestMetrics {
     pub avg_rate_of_return: f64,
     pub avg_score: f64,
     pub avg_loss_when_assigned: f64,
+    pub avg_net_pnl: f64,
+    pub total_premium_collected: f64,
+    pub total_assignment_loss: f64,
     pub picks: Vec<BacktestPick>,
 }
 
@@ -725,7 +987,7 @@ pub fn run_backtest(
         };
 
         // Evaluate each symbol
-        let mut candidates: Vec<(usize, f64, f64, f64, f64, f64, f64, &str)> = Vec::new();
+        let mut candidates: Vec<(usize, f64, f64, f64, f64, f64, f64, f64, &str)> = Vec::new();
 
         for (symbol_idx, symbol) in symbols.iter().enumerate() {
             if symbol == "SPY" {
@@ -736,9 +998,15 @@ pub fn run_backtest(
                 None => continue,
             };
 
-            // Slice candles up to sim_date
+            // Slice candles up to sim_date — already in ASC order (get_candles reverses internally)
             let candles: Vec<model::Candle> =
                 all_candles.iter().filter(|c| c.timestamp <= sim_ts).cloned().collect();
+
+            if candles.len() < constants::EMA_LONG_PERIOD as usize {
+                continue;
+            }
+
+            let price = candles.last().unwrap().close;
 
             if candles.len() < constants::EMA_LONG_PERIOD as usize {
                 continue;
@@ -798,13 +1066,14 @@ pub fn run_backtest(
             let mut strike = (min_strike / 0.5).ceil() * 0.5;
             while strike <= max_strike {
                 let t = dte as f64 / 252.0;
+                let iv_vol = vol * config.iv_multiplier;
                 let premium = black_scholes_put(
                     price,
                     strike,
                     t,
                     config.risk_free_rate,
                     config.dividend_yield,
-                    vol,
+                    iv_vol,
                 );
                 if premium <= 0.0 {
                     strike += 0.5;
@@ -828,6 +1097,7 @@ pub fn run_backtest(
                             symbol_idx,
                             score,
                             strike,
+                            premium,
                             rate_of_return,
                             trend_short,
                             trend_long,
@@ -847,13 +1117,13 @@ pub fn run_backtest(
         // Select top 3, dedup by symbol and sector
         let mut seen_symbols = std::collections::HashSet::new();
         let mut seen_sectors = std::collections::HashSet::new();
-        let mut top_picks: Vec<(usize, f64, f64, f64, f64, f64, f64, &str)> = Vec::new();
+        let mut top_picks: Vec<(usize, f64, f64, f64, f64, f64, f64, f64, &str)> = Vec::new();
 
         for candidate in &candidates {
             if top_picks.len() >= 3 {
                 break;
             }
-            let (symbol_idx, _score, _strike, _ror, _ts, _tl, _price, sector) = candidate;
+            let (symbol_idx, _score, _strike, _premium, _ror, _ts, _tl, _price, sector) = candidate;
             if seen_symbols.contains(symbol_idx) {
                 continue;
             }
@@ -871,19 +1141,32 @@ pub fn run_backtest(
         let expiry_date = *sim_date + Duration::days(period as i64);
         let day_after = expiry_date + Duration::days(1);
 
-        for (symbol_idx, score, strike, ror, ts, tl, price, sector) in &top_picks {
+        for (symbol_idx, score, strike, premium, ror, ts, tl, price, sector) in &top_picks {
             let symbol = &symbols[*symbol_idx];
             let (close_expiry, close_day_after, assigned) =
                 match candles_map.get(symbol) {
                     Some(candles) => {
                         let ec = find_close_on_date(candles, expiry_date);
                         let dac = find_close_on_date(candles, day_after);
-                        let assigned = ec.map(|c| c < *strike).unwrap_or(false)
-                            || dac.map(|c| c < *strike).unwrap_or(false);
+                        // Assignment: stock closes below strike at expiry.
+                        // Use day_after only as fallback when expiry date has no candle (holiday/weekend).
+                        let assigned = ec.map(|c| c < *strike).unwrap_or_else(|| {
+                            dac.map(|c| c < *strike).unwrap_or(false)
+                        });
                         (ec, dac, assigned)
                     }
                     None => (None, None, false),
                 };
+
+            // Net P&L per share: premium collected minus max(0, strike - worst_close)
+            let worst_close = match (close_expiry, close_day_after) {
+                (Some(a), Some(b)) => a.min(b),
+                (Some(a), None) => a,
+                (None, Some(b)) => b,
+                _ => *strike,
+            };
+            let assignment_loss = if assigned { (strike - worst_close).max(0.0) } else { 0.0 };
+            let net_pnl = premium - assignment_loss;
 
             picks.push(BacktestPick {
                 sim_date: *sim_date,
@@ -891,6 +1174,7 @@ pub fn run_backtest(
                 sector: sector.to_string(),
                 strike: *strike,
                 price_at_pick: *price,
+                premium: *premium,
                 rate_of_return: *ror,
                 score: *score,
                 trend_short: *ts,
@@ -899,6 +1183,7 @@ pub fn run_backtest(
                 assigned,
                 close_at_expiry: close_expiry,
                 close_day_after: close_day_after,
+                net_pnl,
             });
         }
     }
@@ -935,6 +1220,27 @@ pub fn run_backtest(
         losses.iter().sum::<f64>() / losses.len() as f64
     };
 
+    // Net P&L: premium income minus assignment losses
+    let total_premium_collected: f64 = picks.iter().map(|p| p.premium).sum();
+    let total_assignment_loss: f64 = picks.iter().map(|p| {
+        if p.assigned {
+            let worst = match (p.close_at_expiry, p.close_day_after) {
+                (Some(a), Some(b)) => a.min(b),
+                (Some(a), None) => a,
+                (None, Some(b)) => b,
+                _ => p.strike,
+            };
+            (p.strike - worst).max(0.0)
+        } else {
+            0.0
+        }
+    }).sum();
+    let avg_net_pnl = if total_picks > 0 {
+        picks.iter().map(|p| p.net_pnl).sum::<f64>() / total_picks as f64
+    } else {
+        0.0
+    };
+
     BacktestMetrics {
         config_name: config.name.clone(),
         period: config.period,
@@ -946,6 +1252,9 @@ pub fn run_backtest(
         avg_rate_of_return,
         avg_score,
         avg_loss_when_assigned,
+        avg_net_pnl,
+        total_premium_collected,
+        total_assignment_loss,
         picks,
     }
 }
@@ -982,6 +1291,15 @@ pub fn format_metrics(metrics: &BacktestMetrics) -> String {
     out.push_str(&format!(
         "Avg loss (assigned): {:.1}% below strike\n",
         metrics.avg_loss_when_assigned * 100.0
+    ));
+    out.push_str(&format!(
+        "Avg net P&L / pick:  ${:.2}/share\n",
+        metrics.avg_net_pnl
+    ));
+    out.push_str(&format!(
+        "Total premium:       ${:.0}  |  Total loss: ${:.0}\n",
+        metrics.total_premium_collected,
+        metrics.total_assignment_loss
     ));
 
     // Regime breakdown
@@ -1049,20 +1367,21 @@ pub fn write_csv(path: &str, all_metrics: &[BacktestMetrics]) -> model::Result<(
         std::fs::File::create(path).map_err(|e| model::QuotesError::CouldNotOpenFile(e))?;
     writeln!(
         file,
-        "config,sim_date,symbol,sector,strike,price,rate_of_return,score,trend_short,trend_long,regime,assigned,close_at_expiry,close_day_after"
+        "config,sim_date,symbol,sector,strike,price,premium,rate_of_return,score,trend_short,trend_long,regime,assigned,close_at_expiry,close_day_after,net_pnl"
     )
     .map_err(|e| model::QuotesError::CouldNotOpenFile(e))?;
     for metrics in all_metrics {
         for pick in &metrics.picks {
             writeln!(
                 file,
-                "{},{},{},{},{:.2},{:.2},{:.4},{:.3},{:.3},{:.3},{},{},{},{}",
+                "{},{},{},{},{:.2},{:.2},{:.2},{:.4},{:.3},{:.3},{:.3},{},{},{},{},{:.2}",
                 metrics.config_name,
                 pick.sim_date,
                 pick.symbol,
                 pick.sector,
                 pick.strike,
                 pick.price_at_pick,
+                pick.premium,
                 pick.rate_of_return,
                 pick.score,
                 pick.trend_short,
@@ -1075,6 +1394,7 @@ pub fn write_csv(path: &str, all_metrics: &[BacktestMetrics]) -> model::Result<(
                 pick.close_day_after
                     .map(|v| format!("{:.2}", v))
                     .unwrap_or_default(),
+                pick.net_pnl,
             )
             .map_err(|e| model::QuotesError::CouldNotOpenFile(e))?;
         }

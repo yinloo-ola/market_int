@@ -168,7 +168,9 @@ pub fn calculate_put_score(
 
     let sharpe_norm = (sharpe / 2.0).clamp(0.0, 1.0);
     let safety_norm = 1.0 - strike_percentile.max(0.0);
-    let return_norm = (1.0 - (rate_of_return - 0.35).abs() / 0.20).clamp(0.0, 1.0);
+
+    // Asymmetric soft-cap: linear return score up to IDEAL_RETURN (0.50), no penalty above it
+    let return_norm = (rate_of_return / constants::IDEAL_RETURN).min(1.0);
 
     // Static weights for safety, return, and sharpe (no trend weight)
     let weight_sharpe = 0.20;
@@ -575,17 +577,17 @@ mod tests {
 
     #[test]
     fn test_put_score_good_option() {
-        // sharpe=1.8, percentile=0.10, return=0.32, trend_short=1.05, trend_long=1.05
-        // sharpe_norm=(1.8/2.0).clamp(0,1) = 0.9, safety_norm=0.9, return_norm=1.0 - (0.32-0.35).abs()/0.20 = 0.85
-        // score = 0.20*0.9 + 0.40*0.9 + 0.40*0.85 = 0.18 + 0.36 + 0.34 = 0.88
-        let score = calculate_put_score(1.8, 0.10, 0.32, 1.05, 1.05, &bull_regime()).unwrap();
-        assert!((score - 0.88).abs() < 0.01);
+        // sharpe=1.8, percentile=0.10, return=0.45
+        // sharpe_norm=(1.8/2.0).clamp(0,1) = 0.9, safety_norm=0.9, return_norm=(0.45/0.50).min(1.0) = 0.90
+        // score = 0.20*0.9 + 0.40*0.9 + 0.40*0.90 = 0.18 + 0.36 + 0.36 = 0.90
+        let score = calculate_put_score(1.8, 0.10, 0.45, 1.05, 1.05, &bull_regime()).unwrap();
+        assert!((score - 0.90).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_filtered_low_return() {
-        assert!(calculate_put_score(1.5, 0.10, 0.30, 1.05, 1.05, &bull_regime()).is_some());
-        assert!(calculate_put_score(1.5, 0.10, 0.29, 1.05, 1.05, &bull_regime()).is_none());
+        assert!(calculate_put_score(1.5, 0.10, 0.25, 1.05, 1.05, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.5, 0.10, 0.24, 1.05, 1.05, &bull_regime()).is_none());
     }
 
     #[test]
@@ -596,22 +598,22 @@ mod tests {
 
     #[test]
     fn test_put_score_filtered_negative_sharpe() {
-        assert!(calculate_put_score(-0.5, 0.10, 0.35, 1.05, 1.05, &bull_regime()).is_none());
+        assert!(calculate_put_score(-0.5, 0.10, 0.45, 1.05, 1.05, &bull_regime()).is_none());
     }
 
     #[test]
     fn test_put_score_filtered_zero_sharpe() {
-        assert!(calculate_put_score(0.0, 0.10, 0.35, 1.05, 1.05, &bull_regime()).is_none());
+        assert!(calculate_put_score(0.0, 0.10, 0.45, 1.05, 1.05, &bull_regime()).is_none());
     }
 
     #[test]
     fn test_put_score_filtered_high_percentile() {
-        assert!(calculate_put_score(1.5, 0.61, 0.35, 1.05, 1.05, &bull_regime()).is_none());
+        assert!(calculate_put_score(1.5, 0.41, 0.45, 1.05, 1.05, &bull_regime()).is_none());
     }
 
     #[test]
     fn test_put_score_boundary_return_low() {
-        assert!(calculate_put_score(1.0, 0.10, 0.30, 1.05, 1.05, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.0, 0.10, 0.25, 1.05, 1.05, &bull_regime()).is_some());
     }
 
     #[test]
@@ -621,27 +623,27 @@ mod tests {
 
     #[test]
     fn test_put_score_boundary_percentile() {
-        assert!(calculate_put_score(1.0, 0.60, 0.35, 1.05, 1.05, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.0, 0.40, 0.45, 1.05, 1.05, &bull_regime()).is_some());
     }
 
     #[test]
     fn test_put_score_just_below_return_floor() {
-        assert!(calculate_put_score(1.0, 0.10, 0.29, 1.05, 1.05, &bull_regime()).is_none());
+        assert!(calculate_put_score(1.0, 0.10, 0.24, 1.05, 1.05, &bull_regime()).is_none());
     }
 
     #[test]
     fn test_put_score_at_return_floor() {
-        assert!(calculate_put_score(1.0, 0.10, 0.30, 1.05, 1.05, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.0, 0.10, 0.25, 1.05, 1.05, &bull_regime()).is_some());
     }
 
     #[test]
     fn test_put_score_at_strike_percentile_boundary() {
-        assert!(calculate_put_score(1.0, 0.60, 0.35, 1.05, 1.05, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.0, 0.40, 0.45, 1.05, 1.05, &bull_regime()).is_some());
     }
 
     #[test]
     fn test_put_score_above_strike_percentile_boundary() {
-        assert!(calculate_put_score(1.0, 0.61, 0.35, 1.05, 1.05, &bull_regime()).is_none());
+        assert!(calculate_put_score(1.0, 0.41, 0.45, 1.05, 1.05, &bull_regime()).is_none());
     }
 
     #[test]
@@ -677,27 +679,27 @@ mod tests {
     #[test]
     fn test_put_score_clamps_negative_percentile() {
         // strike below 20-day min -> negative percentile -> should clamp to 0.0
-        // sharpe_norm=1.0, safety_norm=1.0, return_norm=1.0
-        // score = 0.20 + 0.40 + 0.40 = 1.00
+        // sharpe_norm=1.0, safety_norm=1.0, return_norm=(0.35/0.50).min(1.0) = 0.70
+        // score = 0.20*1.0 + 0.40*1.0 + 0.40*0.70 = 0.20 + 0.40 + 0.28 = 0.88
         let score = calculate_put_score(2.0, -0.10, 0.35, 1.05, 1.05, &bull_regime()).unwrap();
-        assert!((score - 1.00).abs() < 0.01);
+        assert!((score - 0.88).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_high_sharpe_clamps() {
         // sharpe > 2.0 should clamp sharpe_norm to 1.0
-        // sharpe_norm=1.0, safety_norm=1.0, return_norm=1.0
-        // score = 1.00
+        // sharpe_norm=1.0, safety_norm=1.0, return_norm=0.70
+        // score = 0.88
         let score = calculate_put_score(5.0, 0.0, 0.35, 1.05, 1.05, &bull_regime()).unwrap();
-        assert!((score - 1.00).abs() < 0.01);
+        assert!((score - 0.88).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_peak_return() {
-        // return exactly at 0.35 -> return_norm = 1.0
+        // return exactly at 0.50 -> return_norm = 1.0
         // sharpe=2.0 -> sharpe_norm=1.0, percentile=0.0 -> safety_norm=1.0
         // score = 0.20 + 0.40 + 0.40 = 1.00
-        let score = calculate_put_score(2.0, 0.0, 0.35, 1.05, 1.05, &bull_regime()).unwrap();
+        let score = calculate_put_score(2.0, 0.0, 0.50, 1.05, 1.05, &bull_regime()).unwrap();
         assert!((score - 1.00).abs() < 0.01);
     }
 
@@ -752,14 +754,14 @@ mod tests {
             "TSLA".to_string(),
             PutPriceRange {
                 min: 150.0,
-                max: 250.0,
+                max: 280.0,
             },
         );
         ranges.insert(
             "NVDA".to_string(),
             PutPriceRange {
                 min: 100.0,
-                max: 160.0,
+                max: 180.0,
             },
         );
 
@@ -890,8 +892,8 @@ mod tests {
     fn test_top_picks_trend_filter_blocks_weak_stock() {
         // Since trend filters are removed, both stocks should pass.
         let chains = vec![
-            make_chain("AAPL", 90.0, 0.35),
-            make_chain("MSFT", 380.0, 0.40),
+            make_chain("AAPL", 90.0, 0.50),
+            make_chain("MSFT", 380.0, 0.35),
         ];
 
         let mut sharpe = HashMap::new();
@@ -910,7 +912,7 @@ mod tests {
             "MSFT".to_string(),
             PutPriceRange {
                 min: 350.0,
-                max: 420.0,
+                max: 430.0,
             },
         );
 
@@ -1006,14 +1008,14 @@ mod tests {
             "MSFT".to_string(),
             PutPriceRange {
                 min: 300.0,
-                max: 400.0,
+                max: 430.0,
             },
         );
         ranges.insert(
             "TSLA".to_string(),
             PutPriceRange {
                 min: 150.0,
-                max: 250.0,
+                max: 280.0,
             },
         );
         ranges.insert(
@@ -1027,7 +1029,7 @@ mod tests {
             "GOOG".to_string(),
             PutPriceRange {
                 min: 130.0,
-                max: 180.0,
+                max: 190.0,
             },
         );
 
@@ -1092,10 +1094,10 @@ mod tests {
 
         let mut ranges = HashMap::new();
         ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
-        ranges.insert("MSFT".to_string(), PutPriceRange { min: 300.0, max: 400.0 });
-        ranges.insert("NVDA".to_string(), PutPriceRange { min: 100.0, max: 160.0 });
-        ranges.insert("XOM".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
-        ranges.insert("JPM".to_string(), PutPriceRange { min: 180.0, max: 220.0 });
+        ranges.insert("MSFT".to_string(), PutPriceRange { min: 300.0, max: 430.0 });
+        ranges.insert("NVDA".to_string(), PutPriceRange { min: 100.0, max: 180.0 });
+        ranges.insert("XOM".to_string(), PutPriceRange { min: 80.0, max: 135.0 });
+        ranges.insert("JPM".to_string(), PutPriceRange { min: 180.0, max: 235.0 });
 
         let mut sectors = HashMap::new();
         sectors.insert("AAPL".to_string(), "Technology".to_string());
