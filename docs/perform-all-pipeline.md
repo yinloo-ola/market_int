@@ -301,20 +301,21 @@ Calls `publish_to_telegram()`, which orchestrates:
 `model::option_chain_to_csv_vec()` processes each `OptionStrikeCandle`:
 1. **Strike percentile**: `calculate_strike_percentile(strike, min_price_20d, max_price_20d)` — where does this strike sit within the 20-day price range? A percentile of 0.0 means the strike equals the 20-day low (deeply in-the-money); 1.0 means it equals the 20-day high.
 2. **Composite score** via `calculate_put_score(sharpe, strike_percentile, rate_of_return, trend_short, trend_long, regime)`:
-   - **Pre-filters** (any failure → `None`, excluded from picks):
-     - `rate_of_return ∈ [0.30, 0.80]` — avoids too-small premiums and too-risky deep OTM puts.
-     - `sharpe > 0` — only stocks with positive risk-adjusted returns.
-     - `strike_percentile ≤ 0.60` — strike must be in the lower 60% of the 20-day range.
-   - **Score formula** (static weights, regime-independent in current code):
-     ```
-     score = 0.20 × sharpe_norm + 0.40 × safety_norm + 0.40 × return_norm
-     
-     where:
-       sharpe_norm = clamp(sharpe / 2.0, 0..1)
-       safety_norm = 1.0 − clamp(strike_percentile, 0..∞)
-       return_norm = 1.0 − |rate_of_return − 0.35| / 0.20  (ideal = 35% return)
-     ```
-   - The ideal put has: high Sharpe (consistent winner), low strike percentile (safe, near support), and ~35% annualized return (sweet spot for premium collection).
+      - **Pre-filters** (any failure → `None`, excluded from picks):
+        - `rate_of_return ∈ [0.25, 0.80]` — avoids too-small premiums and too-risky puts.
+        - `sharpe > 0` — only stocks with positive risk-adjusted returns.
+        - `strike_percentile ≤ 0.40` — strike must be in the lower 40% of the 20-day range.
+        - Note: trend pre-filters were removed — trend data is collected and displayed but not scored.
+      - **Score formula** (static weights, regime-independent):
+        ```
+        score = 0.20 × sharpe_norm + 0.40 × safety_norm + 0.40 × return_norm
+        
+        where:
+          sharpe_norm = clamp(sharpe / 2.0, 0..1)
+          safety_norm = 1.0 − clamp(strike_percentile, 0..∞)
+          return_norm = (rate_of_return / IDEAL_RETURN).min(1.0)  (IDEAL_RETURN = 0.80, asymmetric soft-cap)
+        ```
+      - The ideal put has: high Sharpe (consistent winner), low strike percentile (safe, near support), and high annualized return up to 80%.
 
 ##### 10f-ii. Select Top 3 picks with diversity
 - All scored options are sorted by score (descending).
@@ -446,9 +447,10 @@ All tunable parameters are centralized in `src/constants.rs`:
 | `PRICE_PERCENTILE_DAYS` | 20 | Window for price percentile |
 | `EMA_SHORT_PERIOD` | 20 | Short EMA for trend |
 | `EMA_LONG_PERIOD` | 50 | Long EMA for trend |
-| `MIN_RATE_OF_RETURN` | 0.30 | Pre-filter: minimum put return |
+| `MIN_RATE_OF_RETURN` | 0.25 | Pre-filter: minimum put return |
 | `MAX_RATE_OF_RETURN` | 0.80 | Pre-filter: maximum put return |
-| `MAX_STRIKE_PERCENTILE` | 0.60 | Pre-filter: max strike percentile |
+| `MAX_STRIKE_PERCENTILE` | 0.40 | Pre-filter: max strike percentile |
+| `IDEAL_RETURN` | 0.80 | Asymmetric soft-cap for return norm (no penalty above it) |
 | `BEARNESS_MAX` | 0.08 | SPY drop mapping to full bear (8% below EMA50) |
 
 ---

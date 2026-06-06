@@ -4,17 +4,17 @@
 
 📋 *Field Reference*
 
-• `rate_of_return` — Annualised premium yield. `(mid price / strike) ÷ weeks to expiry × 52`. Good: 0.25–0.65
+• `rate_of_return` — Annualised premium yield. `(mid price / strike) ÷ weeks to expiry × 52`. Good: 0.25–0.80
 
 • `sharpe_ratio` — Risk-adjusted return of the underlying stock. Higher = better reward per unit of risk. Good: > 1.0
 
-• `strike_percentile` — Where the strike sits within the stock's expected support range. 0 = deep support, 1 = at resistance. Good: ≤ 0.60
+• `strike_percentile` — Where the strike sits within the stock's expected support range. 0 = deep support, 1 = at resistance. Good: ≤ 0.40
 
 • `trend_short` — Where current price sits relative to its 20-day EMA. > 1.0 = above trend, < 1.0 = below trend. Good: > 0.98
 
 • `trend_long` — Where current price sits relative to its 50-day EMA. Captures intermediate trend direction. Good: > 0.98
 
-• `score` — Composite quality score (0–1). Combines Trend (30%), strike safety (30%), Sharpe (20%), return quality (20%). Options failing pre-filters are blank. Good: > 0.6
+• `score` — Composite quality score (0–1). Combines strike safety (40%), return quality (40%), Sharpe (20%). Options failing pre-filters are blank. Good: > 0.6
 
 • `price_percentile` — Where current price sits within its 20-day range. Drives momentum flag: NORMAL (≤80%), HIGH (80–90%), EXTENDED (>90%). Good: ≤ 0.80
 
@@ -22,33 +22,28 @@
 
 ━━━━━━━━━━━━━━━━━━
 
-✅ *Quick Filter — 5 Rules*
+✅ *Quick Filter — 4 Rules*
 
-1️⃣ `score > 0.6` — Primary gate. Bundles trend, Sharpe, safety, and return checks.
+1️⃣ `score > 0.6` — Primary gate. Bundles Sharpe, safety, and return checks.
 
 2️⃣ `earnings_before_expiry` is empty — Earnings cause gap risk and IV crush. Avoid.
 
 3️⃣ `price_percentile ≤ 0.80` — Stock trading at top of range = overextended. Stick to NORMAL momentum.
 
-4️⃣ `rate_of_return` between 0.25 and 0.65 — Below 0.25 not worth capital. Above 0.65 = market pricing in high risk.
-
-5️⃣ `trend_short > 0.98 AND trend_long > 0.98` — Stocks below their moving average are in a downtrend. Selling puts on them exposes you to sustained declines.
+4️⃣ `rate_of_return` between 0.25 and 0.80 — Below 0.25 not worth capital. Above 0.80 = market pricing in high risk.
 
 ━━━━━━━━━━━━━━━━━━
 
 📊 *Score Breakdown*
 
-📈 Trend (EMA ratio) — 30%
-Most forward-looking signal. Stocks above their EMAs tend to keep rising.
-
-🛡 Safety (strike percentile) — 30%
+🛡 Safety (strike percentile) — 40%
 Lower strike vs support = more room before you're at risk.
+
+💰 Return quality — 40%
+Soft-cap at 80% annualised. Higher returns are proportionally rewarded up to the cap.
 
 📊 Sharpe ratio — 20%
 Historical risk-adjusted return quality.
-
-💰 Return quality — 20%
-Prefers ~35% annualised. Penalises extreme returns signalling danger.
 
 ━━━━━━━━━━━━━━━━━━
 
@@ -60,6 +55,3 @@ Prefers ~35% annualised. Penalises extreme returns signalling danger.
 
 ❌ `price_percentile > 0.90` (EXTENDED) — Stock at 20-day high. May overshoot before reverting.
 
-❌ `rate_of_return > 0.65` — Market is pricing high probability of a drop. You're being paid for real risk.
-
-❌ `trend_short < 0.98 or trend_long < 0.98` — Stock is below its moving average = downtrend. Selling puts on falling stocks catches falling knives.
