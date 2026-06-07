@@ -4,7 +4,7 @@ use crate::store;
 use crate::symbols;
 
 /// Runs the full metric-calculation pipeline for all symbols.
-/// Reads symbols once; each metric fetches the candle window it needs.
+/// Loads candles once per symbol, slices for each metric's window, saves results.
 pub fn run_all(
     symbols_file_path: &str,
     conn: &mut rusqlite::Connection,
@@ -19,46 +19,52 @@ pub fn run_all(
     store::price_percentile::create_table(conn)?;
 
     for symbol in symbols {
-        // ATR (weekly candles, needs CANDLE_COUNT for full window)
-        compute_and_save_atr(conn, &symbol);
+        // Load candles once — CANDLE_COUNT is the largest window any metric needs
+        let candles = match store::candle::get_candles(conn, &symbol, constants::CANDLE_COUNT) {
+            Ok(c) => c,
+            Err(_) => {
+                log::warn!("No candles for {}, skipping", symbol);
+                continue;
+            }
+        };
 
-        // Max drop — periods 5 and 20 (needs CANDLE_COUNT for full rolling window)
-        compute_and_save_max_drop(conn, &symbol, 5);
-        compute_and_save_max_drop(conn, &symbol, 20);
+        if candles.len() < constants::CANDLE_COUNT as usize {
+            log::warn!(
+                "Only {} candles for {}, need {}, skipping",
+                candles.len(),
+                symbol,
+                constants::CANDLE_COUNT
+            );
+            continue;
+        }
+
+        let timestamp = candles.last().unwrap().timestamp;
+
+        // ATR — weekly aggregation from full candle set
+        save_atr(conn, &symbol, &candles);
+
+        // Max drop — periods 5 and 20, full rolling window
+        save_max_drop(conn, &symbol, &candles, timestamp, 5);
+        save_max_drop(conn, &symbol, &candles, timestamp, 20);
 
         // Sharpe ratio
-        compute_and_save_sharpe(conn, &symbol);
+        save_sharpe(conn, &symbol, &candles, timestamp);
 
-        // Trend (EMA20/EMA50, needs EMA_LONG_PERIOD)
-        compute_and_save_trend(conn, &symbol);
+        // Trend — last EMA_LONG_PERIOD candles
+        let trend_offset = candles.len() - constants::EMA_LONG_PERIOD as usize;
+        save_trend(conn, &symbol, &candles[trend_offset..], timestamp);
 
-        // Price percentile (20-day window)
-        compute_and_save_price_percentile(conn, &symbol);
+        // Price percentile — last PRICE_PERCENTILE_DAYS candles
+        let pp_offset = candles.len() - constants::PRICE_PERCENTILE_DAYS as usize;
+        save_price_percentile(conn, &symbol, &candles[pp_offset..], timestamp);
     }
 
     log::info!("Completed metric calculation pipeline");
     Ok(())
 }
 
-fn compute_and_save_atr(
-    conn: &mut rusqlite::Connection,
-    symbol: &str,
-) {
-    // ATR needs the full CANDLE_COUNT of candles — refetch independently
-    let full_candles = match store::candle::get_candles(conn, symbol, constants::CANDLE_COUNT) {
-        Ok(c) => c,
-        Err(_) => {
-            log::warn!("No candles for {} ATR, skipping", symbol);
-            return;
-        }
-    };
-
-    if full_candles.is_empty() {
-        log::warn!("No candles for {} ATR, skipping", symbol);
-        return;
-    }
-
-    let weekly_candles: Vec<model::Candle> = full_candles
+fn save_atr(conn: &mut rusqlite::Connection, symbol: &str, candles: &[model::Candle]) {
+    let weekly_candles: Vec<model::Candle> = candles
         .chunks(5)
         .map(|chunk| {
             let open = chunk.first().map_or(0.0, |c| c.open);
@@ -87,15 +93,13 @@ fn compute_and_save_atr(
         .collect();
 
     if weekly_candles.len() < 4 {
-        log::warn!("Not enough candles for {}, skipping ATR", symbol);
+        log::warn!("Not enough weekly candles for {}, skipping ATR", symbol);
         return;
     }
 
     let trs = crate::atr::true_ranges_ratio(&weekly_candles);
     let ema_atr = crate::atr::exponential_moving_average(&trs, 5);
-    let percentile_atr = crate::atr::percentile(&trs, constants::PERCENTILE);
-
-    let percentile_atr = match percentile_atr {
+    let percentile_atr = match crate::atr::percentile(&trs, constants::PERCENTILE) {
         Ok(v) => v,
         Err(e) => {
             log::warn!("Failed to compute ATR percentile for {}: {}", symbol, e);
@@ -115,28 +119,15 @@ fn compute_and_save_atr(
     }
 }
 
-fn compute_and_save_max_drop(
+fn save_max_drop(
     conn: &mut rusqlite::Connection,
     symbol: &str,
+    candles: &[model::Candle],
+    timestamp: u32,
     period: usize,
 ) {
-    // Max drop needs CANDLE_COUNT for full rolling window — fetch independently
-    let candles = match store::candle::get_candles(conn, symbol, constants::CANDLE_COUNT) {
-        Ok(c) => c,
-        Err(_) => {
-            log::warn!("No candles for {} max drop, skipping", symbol);
-            return;
-        }
-    };
-
-    if candles.is_empty() {
-        log::warn!("No candles for {} max drop, skipping", symbol);
-        return;
-    }
-
-    match crate::maxdrop::compute_max_drop_stats(&candles, period) {
+    match crate::maxdrop::compute_max_drop_stats(candles, period) {
         Some((percentile_drop, ema_drop)) => {
-            let timestamp = candles.last().unwrap().timestamp;
             if let Err(e) = store::max_drop::save_max_drop_period(
                 conn,
                 symbol,
@@ -158,26 +149,14 @@ fn compute_and_save_max_drop(
     }
 }
 
-fn compute_and_save_sharpe(
+fn save_sharpe(
     conn: &mut rusqlite::Connection,
     symbol: &str,
+    candles: &[model::Candle],
+    timestamp: u32,
 ) {
-    let candles = match store::candle::get_candles(conn, symbol, constants::CANDLE_COUNT) {
-        Ok(c) => c,
-        Err(_) => {
-            log::warn!("No candles for {} Sharpe, skipping", symbol);
-            return;
-        }
-    };
-
-    if candles.is_empty() {
-        log::warn!("No candles for {} Sharpe, skipping", symbol);
-        return;
-    }
-
-    match crate::sharpe::compute_sharpe(&candles, constants::DEFAULT_RISK_FREE_RATE) {
+    match crate::sharpe::compute_sharpe(candles, constants::DEFAULT_RISK_FREE_RATE) {
         Some(sharpe) => {
-            let timestamp = candles.last().unwrap().timestamp;
             if let Err(e) = store::sharpe_ratio::save_sharpe_ratio(conn, symbol, sharpe, timestamp) {
                 log::error!("Failed to save Sharpe for {}: {}", symbol, e);
             }
@@ -188,25 +167,13 @@ fn compute_and_save_sharpe(
     }
 }
 
-fn compute_and_save_trend(
+fn save_trend(
     conn: &mut rusqlite::Connection,
     symbol: &str,
+    candles: &[model::Candle],
+    timestamp: u32,
 ) {
-    // Trend needs EMA_LONG_PERIOD candles — fetch independently
-    let candles = match store::candle::get_candles(conn, symbol, constants::EMA_LONG_PERIOD) {
-        Ok(c) if c.len() >= constants::EMA_LONG_PERIOD as usize => c,
-        Ok(_) => {
-            log::warn!("Not enough candles for trend on {}, skipping", symbol);
-            return;
-        }
-        Err(_) => {
-            log::warn!("No candles for {} trend, skipping", symbol);
-            return;
-        }
-    };
-
     let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
-    let timestamp = candles.last().unwrap().timestamp;
 
     let ema_short = crate::atr::exponential_moving_average(&closes, constants::EMA_SHORT_PERIOD);
     let ema_long = crate::atr::exponential_moving_average(&closes, constants::EMA_LONG_PERIOD);
@@ -227,26 +194,13 @@ fn compute_and_save_trend(
     }
 }
 
-fn compute_and_save_price_percentile(
+fn save_price_percentile(
     conn: &mut rusqlite::Connection,
     symbol: &str,
+    candles: &[model::Candle],
+    timestamp: u32,
 ) {
-    // Price percentile uses PRICE_PERCENTILE_DAYS window — fetch independently
-    let candles = match store::candle::get_candles(conn, symbol, constants::PRICE_PERCENTILE_DAYS) {
-        Ok(c) => c,
-        Err(_) => {
-            log::warn!("No candles for {} price percentile, skipping", symbol);
-            return;
-        }
-    };
-
-    if candles.is_empty() {
-        log::warn!("No candles for {} price percentile, skipping", symbol);
-        return;
-    }
-
-    let timestamp = candles.last().unwrap().timestamp;
-    let percentile = crate::price_percentile::compute_price_percentile(&candles);
+    let percentile = crate::price_percentile::compute_price_percentile(candles);
     if let Err(e) = store::price_percentile::save_price_percentiles(
         conn,
         &[model::PricePercentile {
