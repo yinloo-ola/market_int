@@ -1,4 +1,4 @@
-use crate::{atr, constants, model};
+use crate::{atr, constants};
 
 /// Calculates trend ratios from a slice of close prices.
 /// Returns (trend_ratio_short, trend_ratio_long) = (price/EMA20, price/EMA50).

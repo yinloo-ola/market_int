@@ -1,4 +1,4 @@
-use crate::{constants, model};
+use crate::model;
 
 pub(crate) fn true_ranges_ratio(candles: &[model::Candle]) -> Vec<f64> {
     candles

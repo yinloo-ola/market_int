@@ -14,11 +14,11 @@ mod atr;
 mod maxdrop;
 /// Pull option chains from API based on ATR retrieved from database.
 mod option;
-// Sharpe ratio calculation and storage.
+// Sharpe ratio calculation.
 mod sharpe;
-// Trend calculation and storage.
+// Trend calculation.
 mod trend;
-// Price percentile calculation and storage.
+// Price percentile calculation.
 mod price_percentile;
 /// module to read symbols from symbol file
 mod symbols;
@@ -142,22 +142,6 @@ enum Commands {
     PerformAll {
         symbols_file_path: String,
     },
-    CalculateAtr {
-        symbols_file_path: String,
-    },
-    CalculateMaxDrop {
-        symbols_file_path: String,
-        period: String, // "5" or "20"
-    },
-    CalculateSharpeRatio {
-        symbols_file_path: String,
-    },
-    CalculatePricePercentile {
-        symbols_file_path: String,
-    },
-    CalculateTrend {
-        symbols_file_path: String,
-    },
     // Test Tiger API
     TestTiger {
         symbols: String,
@@ -205,39 +189,7 @@ async fn main() {
                 Ok(_) => log::info!("Successfully pulled and saved quotes"),
                 Err(err) => log::error!("Error pulling and saving quotes: {}", err),
             }
-            match atr::calculate_and_save(&symbols_file_path, &mut conn) {
-                Ok(_) => log::info!("Successfully calculated ATR and saved to DB"),
-                Err(err) => log::error!("Error calculating ATR: {}", err),
-            }
         }
-
-        Commands::CalculateAtr { symbols_file_path } => {
-            match atr::calculate_and_save(&symbols_file_path, &mut conn) {
-                Ok(_) => log::info!("Successfully calculated ATR and saved to DB"),
-                Err(err) => log::error!("Error calculating ATR: {}", err),
-            }
-        }
-
-        Commands::CalculateMaxDrop {
-            symbols_file_path,
-            period,
-        } => match period.parse::<usize>() {
-            Ok(period_num) => {
-                match maxdrop::calculate_and_save(&symbols_file_path, &mut conn, period_num) {
-                    Ok(_) => log::info!(
-                        "Successfully calculated {}-day Max Drop and saved to DB",
-                        period_num
-                    ),
-                    Err(err) => log::error!("Error calculating Max Drop: {}", err),
-                }
-            }
-            Err(_) => {
-                log::error!(
-                    "Invalid period: {}. Use a positive integer (e.g., 5, 10, 20)",
-                    period
-                );
-            }
-        },
 
         Commands::PullOptionChain5Day { symbols_file_path } => {
             let mut requester = match tiger::api_caller::Requester::new().await {
@@ -303,61 +255,14 @@ async fn main() {
             }
         }
 
-        Commands::CalculateSharpeRatio { symbols_file_path } => {
-            match sharpe::calculate_and_save(
-                &symbols_file_path,
-                &mut conn,
-                constants::DEFAULT_RISK_FREE_RATE,
-            ) {
-                Ok(_) => log::info!("Successfully calculated and saved Sharpe ratios"),
-                Err(err) => log::error!("Error calculating Sharpe ratios: {}", err),
-            }
-        }
-
-        Commands::CalculatePricePercentile { symbols_file_path } => {
-            match price_percentile::calculate_and_save(&symbols_file_path, &mut conn) {
-                Ok(_) => log::info!("Successfully calculated and saved price percentiles"),
-                Err(err) => log::error!("Error calculating price percentiles: {}", err),
-            }
-        }
-
-        Commands::CalculateTrend { symbols_file_path } => {
-            match trend::calculate_and_save(&symbols_file_path, &mut conn) {
-                Ok(_) => log::info!("Successfully calculated and saved trend data"),
-                Err(err) => log::error!("Error calculating trend data: {}", err),
-            }
-        }
-
         Commands::PerformAll { symbols_file_path } => {
             match quotes::pull_and_save(&symbols_file_path, &mut conn).await {
                 Ok(_) => log::info!("Successfully pulled and saved quotes"),
                 Err(err) => log::error!("Error pulling and saving quotes: {}", err),
             }
-            // Calculate 5-day max drops
-            match maxdrop::calculate_and_save(&symbols_file_path, &mut conn, 5) {
-                Ok(_) => log::info!("Successfully calculated 5-day Max Drop and saved to DB"),
-                Err(err) => log::error!("Error calculating 5-day Max Drop: {}", err),
-            }
-            // Calculate 20-day max drops
-            match maxdrop::calculate_and_save(&symbols_file_path, &mut conn, 20) {
-                Ok(_) => log::info!("Successfully calculated 20-day Max Drop and saved to DB"),
-                Err(err) => log::error!("Error calculating 20-day Max Drop: {}", err),
-            }
-            match sharpe::calculate_and_save(
-                &symbols_file_path,
-                &mut conn,
-                constants::DEFAULT_RISK_FREE_RATE,
-            ) {
-                Ok(_) => log::info!("Successfully calculated and saved Sharpe ratios"),
-                Err(err) => log::error!("Error calculating Sharpe ratios: {}", err),
-            }
-            match price_percentile::calculate_and_save(&symbols_file_path, &mut conn) {
-                Ok(_) => log::info!("Successfully calculated and saved price percentiles"),
-                Err(err) => log::error!("Error calculating price percentiles: {}", err),
-            }
-            match trend::calculate_and_save(&symbols_file_path, &mut conn) {
-                Ok(_) => log::info!("Successfully calculated and saved trend data"),
-                Err(err) => log::error!("Error calculating trend data: {}", err),
+            match metrics::run_all(&symbols_file_path, &mut conn) {
+                Ok(_) => log::info!("Successfully completed metric calculation pipeline"),
+                Err(err) => log::error!("Error running metric pipeline: {}", err),
             }
             // Initialize Tiger API requester once to cache option expiration data
             let mut requester = match tiger::api_caller::Requester::new().await {

@@ -1,4 +1,4 @@
-use crate::{constants, model};
+use crate::model;
 
 /// Computes annualized Sharpe ratio from a candle slice.
 /// Returns None if insufficient data or zero std dev.
