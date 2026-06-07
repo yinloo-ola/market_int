@@ -159,7 +159,7 @@ The `perform-all` subcommand is the **full end-to-end pipeline** of `market_int`
 
 ### Step 7 — Initialize Tiger API Requester
 
-**Source:** `src/main.rs:359`
+**Source:** `src/main.rs:361`
 
 ```rust
 let mut requester = match tiger::api_caller::Requester::new().await { ... }
@@ -179,7 +179,7 @@ let mut requester = match tiger::api_caller::Requester::new().await { ... }
 
 ### Step 8 — Set Market Regime (Hardcoded Bull)
 
-**Source:** `src/main.rs:368`
+**Source:** `src/main.rs:369`
 
 ```rust
 let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
@@ -202,7 +202,7 @@ let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
 
 ### Step 9 — Load Sector Mappings
 
-**Source:** `src/main.rs:369`
+**Source:** `src/main.rs:370`
 
 ```rust
 let sectors = sectors::load_sectors(&symbols_file_path).unwrap_or_default();
@@ -221,9 +221,17 @@ let sectors = sectors::load_sectors(&symbols_file_path).unwrap_or_default();
 
 ### Step 10 — `option::retrieve_option_chains_with_expiry(Short / 5-day)`
 
-**Source:** `src/option.rs:100`
+**Source:** `src/option.rs:290`
 
-This is the most complex step. Here's the detailed breakdown:
+The orchestrator delegates to three extracted functions and then publishes:
+
+```
+retrieve_option_chains_with_expiry()
+  → fetch_option_chains_in_batches()     // batch API loop → filter → save → return chains
+  → collect_metrics_from_db()            // 4 DB queries bundled
+  → fetch_earnings_map()                 // earnings calendar from Tiger API
+  → publish_to_telegram()                // score → rank → CSV → Telegram
+```
 
 #### 10a. Read symbols & create table
 - Reads symbols from file, creates the `option_strike` table in SQLite.
@@ -231,68 +239,61 @@ This is the most complex step. Here's the detailed breakdown:
 #### 10b. Determine period
 - `ExpiryTimeframe::Short` → `period = 5`.
 
-#### 10c. For each batch of 10 symbols:
+#### 10c. `fetch_option_chains_in_batches()`
 
-##### 10c-i. Get option expirations from Tiger API
-- Calls `requester.option_expiration()` to get all available expiration dates for the symbols.
-- Results are **cached** by symbol — the same expiration data is reused for the 20-day retrieval in Step 11.
+**Source:** `src/option.rs:147`
 
-##### 10c-ii. Calculate target expiration date
-- `get_expiration_date(Short)` returns a date ~5–7 calendar days from now, using a lookup table indexed by weekday (`SHORT_DAYS`). This ensures we always target the nearest standard weekly expiry.
+Processes symbols in batches of 10 (Tiger API limit). For each batch:
 
-##### 10c-iii. Find nearest actual expiration
-- `Requester::find_nearest_expiration()` matches the computed target date against the actual exchange expiration dates returned by the API, selecting the closest one.
-
-##### 10c-iv. Calculate DTE (Days to Expiry)
-- `calculate_trading_days_to_expiry()` counts trading days (excludes weekends) between now and the expiration date. This is critical for scaling the strike range.
-
-##### 10c-v. Compute adjusted strike ranges
-- For each symbol in the batch:
-  1. Fetches the 5-day `percentile_drop` and `ema_drop` from the `max_drop` table (computed in Step 2).
-  2. Fetches the latest close price from the `candle` table.
-  3. Calls `calculate_adjusted_strike_range()` with:
-     - `trend_factor = 1.0` (hardcoded — no tightening).
-     - `adjustment_factor = dte / period` (scales drops to the actual DTE).
-  4. The function computes:
+1. **Get option expirations** — calls `requester.option_expiration()` to get all available expiration dates. Results are **cached** by symbol — reused for the 20-day retrieval in Step 11.
+2. **Calculate target expiration date** — `get_expiration_date(Short)` returns ~5–7 calendar days from now using `SHORT_DAYS` lookup table indexed by weekday.
+3. **Find nearest actual expiration** — `Requester::find_nearest_expiration()` matches the target against actual exchange expiration dates.
+4. **Calculate DTE** — `calculate_trading_days_to_expiry()` counts trading days (excludes weekends).
+5. **Compute adjusted strike ranges** — for each symbol in the batch:
+   - Fetches `percentile_drop` and `ema_drop` from the `max_drop` table.
+   - Fetches latest close price from the `candle` table.
+   - Calls `calculate_adjusted_strike_range()` with `trend_factor = 1.0` (no tightening):
      - `adjusted_percentile_drop = percentile_drop × (dte / period)`
      - `adjusted_ema_drop = ema_drop × (dte / period)`
-     - `v1 = price × (1 − adjusted_ema_drop)` — EMA-based strike
-     - `v2 = price × (1 − adjusted_percentile_drop)` — percentile-based strike
+     - `v1 = price × (1 − adjusted_ema_drop)`, `v2 = price × (1 − adjusted_percentile_drop)`
      - `min_strike = min(v1, v2)`, `max_strike = max(v1, v2)` after safety adjustment
-  5. The **strike range** `[min_strike, max_strike]` defines which put strikes to query from the API.
+   - The **strike range** `[min_strike, max_strike]` defines which put strikes to query.
+6. **Query option chain** — calls `requester.query_option_chain()` with strike ranges, underlying prices, expiration date, and `MIN_OPEN_INTEREST = 50`.
+7. **Filter low-quality chains** — `filter_option_chains()` applies quality thresholds:
+   | Criterion | Minimum |
+   |---|---|
+   | bid_size | 3 |
+   | ask_size | 3 |
+   | volume | 3 |
+   | open_interest | 3 |
+   | bid price | $0.03 |
+   | ask price | $0.05 |
+   | ask/bid ratio | ≤ 5.0 |
+8. **Save to SQLite** — filtered chains saved to `option_strike` table.
+9. Sleeps **1 second** between batches to respect API rate limits.
 
-##### 10c-vi. Query option chain from Tiger API
-- Calls `requester.query_option_chain()` with the computed strike ranges, underlying prices, expiration date, and minimum open interest filter (`MIN_OPEN_INTEREST = 50`).
-- Returns a `Vec<OptionStrikeCandle>` — each representing one put option contract with bid/ask, volume, open interest, implied return, etc.
+Returns `Vec<OptionStrikeCandle>` — all chains collected across batches.
 
-##### 10c-vii. Filter low-quality chains
-- `filter_option_chains()` applies quality thresholds:
-  | Criterion | Minimum |
-  |---|---|
-  | bid_size | 3 |
-  | ask_size | 3 |
-  | volume | 3 |
-  | open_interest | 3 |
-  | bid price | $0.03 |
-  | ask price | $0.05 |
-  | ask/bid ratio | ≤ 5.0 |
+#### 10d. `collect_metrics_from_db()`
 
-  This removes illiquid or wide-spread options that are impractical to trade.
+**Source:** `src/option.rs:551`
 
-##### 10c-viii. Save to SQLite
-- Filtered chains are saved to the `option_strike` table via `store::option_chain::save_option_strike()`.
-
-#### 10d. Collect enrichment data from SQLite
-After all batches are processed, the function collects **supplementary metrics** from the database for scoring:
+Bundles four DB queries into a single call:
 - **Sharpe ratios** → `collect_sharpe_ratios()` — from `sharpe_ratio` table.
 - **Price ranges** → `collect_price_ranges()` — 20-day min/max close from `candle` table (for strike percentile calculation).
 - **Price percentiles** → `collect_price_percentiles()` — from `price_percentile` table.
 - **Trend data** → `collect_trend_data()` — `(trend_ratio_short, trend_ratio_long)` from `trend` table.
 
-#### 10e. Fetch earnings calendar
+Returns a 4-tuple of HashMaps.
+
+#### 10e. `fetch_earnings_map()`
+
+**Source:** `src/option.rs:250`
+
 - Calls `requester.query_earnings_calendar("US", today, today + period + 7 days)` to get upcoming earnings dates.
 - Builds a `HashMap<String, EarningsInfo>` keyed by symbol.
 - If a symbol reports earnings before option expiry, that information is surfaced in the Telegram message as a **⚠️ Earnings warning**.
+- On failure: logs a warning and returns an empty HashMap (best-effort).
 
 #### 10f. Score, rank, and publish to Telegram
 Calls `publish_to_telegram()`, which orchestrates:
@@ -345,7 +346,7 @@ Calls `publish_to_telegram()`, which orchestrates:
 
 ### Step 11 — `option::retrieve_option_chains_with_expiry(Medium / 20-day)`
 
-**Source:** `src/option.rs:100` (same function, `ExpiryTimeframe::Medium`)
+**Source:** `src/option.rs:290` (same function, `ExpiryTimeframe::Medium`)
 
 **What it does:**
 - **Structurally identical** to Step 10, with two differences:
@@ -398,6 +399,31 @@ Calls `publish_to_telegram()`, which orchestrates:
                    │ (.csv file)│         │ caption msg  │
                    └────────────┘         └──────────────┘
 ```
+
+---
+
+## `option.rs` Internal Structure
+
+The option module is organized into focused internal functions:
+
+| Function | Visibility | Source | Purpose |
+|---|---|---|---|
+| `retrieve_option_chains_with_expiry()` | `pub async` | `option.rs:290` | Orchestrator: fetch chains → collect metrics → fetch earnings → publish to Telegram |
+| `publish_option_chains()` | `pub async` | `option.rs:373` | Re-publish from DB: load chains → collect metrics → publish to Telegram (used by standalone `PublishOptionChain` command) |
+| `publish_to_telegram()` | `pub async` | `option.rs:565` | Score chains → generate CSV → send CSV + caption to Telegram |
+| `fetch_option_chains_in_batches()` | private `async` | `option.rs:147` | Batch API loop: expirations → strike ranges → query chains → filter → save to DB |
+| `fetch_earnings_map()` | private `async` | `option.rs:250` | Fetch earnings calendar from Tiger API → `HashMap<String, EarningsInfo>` |
+| `load_chains_from_db()` | private | `option.rs:355` | Load previously saved option chains from SQLite for re-publishing |
+| `collect_metrics_from_db()` | private | `option.rs:551` | Bundle 4 DB metric queries (sharpe, price ranges, percentiles, trends) into one call |
+| `collect_sharpe_ratios()` | private | `option.rs:407` | Collect Sharpe ratios for all symbols |
+| `collect_price_ranges()` | private | `option.rs:431` | Collect 20-day min/max close prices |
+| `collect_price_percentiles()` | private | `option.rs:518` | Collect price percentiles |
+| `collect_trend_data()` | private | `option.rs:541` | Collect trend ratio pairs |
+| `filter_option_chains()` | private | `option.rs:128` | Apply quality thresholds (bid/ask size, volume, OI, prices, spread) |
+| `format_telegram_caption()` | private | `option.rs:462` | Format top picks into Telegram caption text |
+| `calculate_adjusted_strike_range()` | `pub(crate)` | `option.rs:52` | Compute strike range from max drop stats, DTE, and trend factor |
+| `calculate_trading_days_to_expiry()` | private | `option.rs:33` | Count trading days excluding weekends |
+| `get_expiration_date()` | private | `option.rs:361` | Target expiration date from `SHORT_DAYS`/`MEDIUM_DAYS` lookup tables |
 
 ---
 

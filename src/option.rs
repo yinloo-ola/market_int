@@ -144,69 +144,47 @@ fn filter_option_chains(
         .collect()
 }
 
-/// Pulls option chains with configurable expiry timeframe
-pub async fn retrieve_option_chains_with_expiry(
-    symbols_file_path: &str,
-    side: &model::OptionChainSide,
+async fn fetch_option_chains_in_batches(
+    symbols: &[String],
     conn: &mut Connection,
+    side: &model::OptionChainSide,
+    period: usize,
     expiry_timeframe: ExpiryTimeframe,
     requester: &mut Requester,
-    regime: &crate::regime::MarketRegime,
-    sectors: &HashMap<String, String>,
-) -> model::Result<()> {
-    let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
-
-    // Initialize the option_strike table in the database.
-    option_chain::create_table(conn)?;
-
-    let period = if expiry_timeframe == ExpiryTimeframe::Medium {
-        20
-    } else {
-        5
-    };
-
+) -> model::Result<Vec<model::OptionStrikeCandle>> {
     let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
 
-    // Process symbols in batches of 10 (Tiger API limit)
     for chunk in symbols.chunks(10) {
         let symbols_for_expiry: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
 
-        // Get all eligible expiry dates for symbols in this batch
         let expirations = match requester.option_expiration(&symbols_for_expiry).await {
             Ok(expirations) => expirations,
             Err(e) => {
                 log::error!("Failed to get option expirations for batch. Err: {}", e);
-                // Log which symbols failed
                 for symbol in &symbols_for_expiry {
                     log::error!("Failed symbol in batch: {}", symbol);
                 }
-                continue; // Skip this batch and continue with the next one
+                continue;
             }
         };
 
-        // Get expiration date range based on timeframe and convert to New York timezone
         let expiration_date = get_expiration_date(expiry_timeframe);
-        let target_date = expiration_date;
-        let target_date_ny = target_date.with_timezone(&New_York);
+        let target_date_ny = expiration_date.with_timezone(&New_York);
 
-        // Add a 1-second sleep between API calls to avoid overwhelming the Tiger API
         sleep(Duration::from_secs(1)).await;
 
-        // Find the nearest expiration date to our target date
         let expiration_date_ny =
             match Requester::find_nearest_expiration(&expirations, &target_date_ny) {
                 Some(expiration_date) => expiration_date,
                 None => {
                     log::error!("Failed to find nearest expiration date for batch");
-                    // Log which symbols failed
                     for symbol in &symbols_for_expiry {
                         log::error!("Failed symbol in batch: {}", symbol);
                     }
-                    continue; // Skip this batch and continue with the next one
+                    continue;
                 }
             };
 
-        // Calculate trading days to expiry
         let current_date_ny = Local::now().with_timezone(&New_York);
         let dte = calculate_trading_days_to_expiry(current_date_ny, expiration_date_ny);
         log::debug!(
@@ -215,17 +193,14 @@ pub async fn retrieve_option_chains_with_expiry(
             expiry_timeframe
         );
 
-        // Prepare symbol-strike range pairs for this batch with adjusted ranges
         let mut symbol_strike_ranges: Vec<(&str, (f64, f64))> = Vec::new();
         let mut underlying_prices: HashMap<String, f64> = HashMap::new();
 
-        // Collect adjusted strike ranges for all symbols in this batch
         for symbol in chunk {
             let (percentile_drop, ema_drop) = max_drop::get_max_drop(conn, symbol, period)?;
             let latest_candle = &candle::get_candles(conn, symbol, 1)?[0];
             underlying_prices.insert(symbol.to_string(), latest_candle.close);
 
-            // Default to 1.0 (no tightening) matching the winning return-min-30 backtest config
             let trend_factor = 1.0;
 
             let (min_strike, max_strike) = calculate_adjusted_strike_range(
@@ -240,7 +215,6 @@ pub async fn retrieve_option_chains_with_expiry(
             symbol_strike_ranges.push((symbol, (min_strike, max_strike)));
         }
 
-        // Query Tiger API for option chains
         let chains = requester
             .query_option_chain(
                 &symbol_strike_ranges,
@@ -251,22 +225,18 @@ pub async fn retrieve_option_chains_with_expiry(
             )
             .await;
 
-        // Add a 1-second sleep between API calls to avoid overwhelming the Tiger API
         sleep(Duration::from_secs(1)).await;
 
         match chains {
             Ok(chains) => {
-                // Filter out low quality chains
                 let filtered_chains =
                     filter_option_chains(chains, &OptionChainFilterConfig::default());
 
-                // save to DB
                 option_chain::save_option_strike(conn, &filtered_chains)?;
                 all_chains.extend(filtered_chains);
             }
             Err(e) => {
                 log::error!("Fail to retrieve option chain for batch. Err: {}", e);
-                // Log which symbols failed
                 for (symbol, _) in &symbol_strike_ranges {
                     log::error!("Failed symbol in batch: {}", symbol);
                 }
@@ -274,15 +244,16 @@ pub async fn retrieve_option_chains_with_expiry(
         }
     }
 
-    let sharpe_ratios = collect_sharpe_ratios(conn, &symbols);
-    let price_ranges = collect_price_ranges(conn, &symbols);
-    let price_percentiles = collect_price_percentiles(conn, &symbols);
-    let trend_data = collect_trend_data(conn, &symbols);
+    Ok(all_chains)
+}
 
-    // Fetch earnings calendar from now to the end of the option period
+async fn fetch_earnings_map(
+    requester: &mut Requester,
+    period: usize,
+) -> HashMap<String, model::EarningsInfo> {
     let today_ny = Local::now().with_timezone(&New_York);
     let end_date_ny = today_ny + chrono::Duration::days(period as i64 + 7);
-    let earnings_map = match requester
+    match requester
         .query_earnings_calendar("US", &today_ny, &end_date_ny)
         .await
     {
@@ -312,7 +283,43 @@ pub async fn retrieve_option_chains_with_expiry(
             );
             HashMap::new()
         }
+    }
+}
+
+/// Pulls option chains with configurable expiry timeframe
+pub async fn retrieve_option_chains_with_expiry(
+    symbols_file_path: &str,
+    side: &model::OptionChainSide,
+    conn: &mut Connection,
+    expiry_timeframe: ExpiryTimeframe,
+    requester: &mut Requester,
+    regime: &crate::regime::MarketRegime,
+    sectors: &HashMap<String, String>,
+) -> model::Result<()> {
+    let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
+
+    option_chain::create_table(conn)?;
+
+    let period = if expiry_timeframe == ExpiryTimeframe::Medium {
+        20
+    } else {
+        5
     };
+
+    let all_chains = fetch_option_chains_in_batches(
+        &symbols,
+        conn,
+        side,
+        period,
+        expiry_timeframe,
+        requester,
+    )
+    .await?;
+
+    let (sharpe_ratios, price_ranges, price_percentiles, trend_data) =
+        collect_metrics_from_db(conn, &symbols);
+
+    let earnings_map = fetch_earnings_map(requester, period).await;
 
     publish_to_telegram(
         &all_chains,
@@ -345,6 +352,23 @@ fn get_expiration_date(timeframe: ExpiryTimeframe) -> DateTime<Local> {
     now + Days::new(table[now.weekday().num_days_from_sunday() as usize])
 }
 
+fn load_chains_from_db(
+    conn: &mut Connection,
+    symbols: &[String],
+) -> Vec<model::OptionStrikeCandle> {
+    let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
+    for symbol in symbols {
+        match option_chain::retrieve_option_chain(conn, symbol) {
+            Ok(chains) => all_chains.extend(chains),
+            Err(err) => {
+                log::error!("fail to retrieve chain for {}. Error: {}.", symbol, err);
+                continue;
+            }
+        };
+    }
+    all_chains
+}
+
 /// Publishes option chains for already retrieved data
 pub async fn publish_option_chains(
     symbols_file_path: &str,
@@ -356,23 +380,11 @@ pub async fn publish_option_chains(
     option_chain::create_table(&conn)?;
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
-    let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
+    let all_chains = load_chains_from_db(&mut conn, &symbols);
 
-    for symbol in &symbols {
-        match option_chain::retrieve_option_chain(&mut conn, symbol) {
-            Ok(chains) => all_chains.extend(chains),
-            Err(err) => {
-                log::error!("fail to retrieve chain for {}. Error: {}.", symbol, err);
-                continue;
-            }
-        };
-    }
-
-    let sharpe_ratios = collect_sharpe_ratios(&conn, &symbols);
-    let price_ranges = collect_price_ranges(&conn, &symbols);
+    let (sharpe_ratios, price_ranges, price_percentiles, trend_data) =
+        collect_metrics_from_db(&conn, &symbols);
     let earnings_map = HashMap::new();
-    let price_percentiles = collect_price_percentiles(&conn, &symbols);
-    let trend_data = collect_trend_data(&conn, &symbols);
 
     publish_to_telegram(
         &all_chains,
@@ -534,6 +546,22 @@ fn collect_trend_data(conn: &Connection, symbols: &[String]) -> HashMap<String, 
         }
     }
     trends
+}
+
+fn collect_metrics_from_db(
+    conn: &Connection,
+    symbols: &[String],
+) -> (
+    HashMap<String, f64>,
+    HashMap<String, model::PutPriceRange>,
+    HashMap<String, f64>,
+    HashMap<String, (f64, f64)>,
+) {
+    let sharpe_ratios = collect_sharpe_ratios(conn, symbols);
+    let price_ranges = collect_price_ranges(conn, symbols);
+    let price_percentiles = collect_price_percentiles(conn, symbols);
+    let trend_data = collect_trend_data(conn, symbols);
+    (sharpe_ratios, price_ranges, price_percentiles, trend_data)
 }
 
 /// Publishes option chain data to Telegram
