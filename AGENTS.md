@@ -51,17 +51,13 @@
 
 | Subcommand | Description |
 |---|---|
-| `pull-quotes <path>` | Fetch candles, then calculate ATR |
-| `calculate-atr <path>` | Calculate Average True Range only |
-| `calculate-max-drop <path> <period>` | Calculate max drop (period: integer, e.g. 5 or 20) |
-| `calculate-sharpe-ratio <path>` | Calculate Sharpe ratios |
-| `calculate-price-percentile <path>` | Calculate 20-day price percentiles |
-| `calculate-trend <path>` | Calculate EMA20/EMA50 trend ratios |
+| `pull-quotes <path>` | Fetch candles from MarketData API |
+| `perform-all <path>` | Run full pipeline (quotes → ATR → max drop → Sharpe → trend → price percentile → option chains) |
 | `pull-option-chain5-day <path>` | Pull option chains with ~5-day expiry |
 | `pull-option-chain20-day <path>` | Pull option chains with ~20-day expiry |
 | `publish-option-chain <path>` | Publish top picks to Telegram |
-| `perform-all <path>` | Run full pipeline (quotes → metrics → option chains) |
 | `test-tiger <symbols>` | Test Tiger API with comma-separated symbols |
+| `backtest <path>` | Run backtest simulation |
 
 ### Makefile Targets
 
