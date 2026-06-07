@@ -76,25 +76,25 @@ pub fn calculate_and_save(
     Ok(())
 }
 
-fn true_ranges_ratio(candles: &[model::Candle]) -> Vec<f64> {
+pub(crate) fn true_ranges_ratio(candles: &[model::Candle]) -> Vec<f64> {
     candles
         .windows(2)
         .map(|w| true_range_ratio(&w[1], &w[0]))
         .collect()
 }
 
-fn true_range_ratio(current: &model::Candle, previous: &model::Candle) -> f64 {
+pub(crate) fn true_range_ratio(current: &model::Candle, previous: &model::Candle) -> f64 {
     let range1 = (current.high - current.low) / current.low;
     let range2 = calculate_range(current.high, previous.close);
     let range3 = calculate_range(current.low, previous.close);
     range1.max(range2).max(range3)
 }
 
-fn calculate_range(value: f64, reference: f64) -> f64 {
+pub(crate) fn calculate_range(value: f64, reference: f64) -> f64 {
     (value - reference).abs() / value.min(reference)
 }
 
-fn ema(prev: f64, current: f64, multiplier: f64) -> f64 {
+pub(crate) fn ema(prev: f64, current: f64, multiplier: f64) -> f64 {
     current * multiplier + prev * (1.0 - multiplier)
 }
 

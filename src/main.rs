@@ -49,6 +49,8 @@ mod store {
 }
 // module storing defaults
 mod constants;
+// Consolidated metrics pipeline
+mod metrics;
 
 // Backtest simulation
 mod backtest;
