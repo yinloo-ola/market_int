@@ -5,25 +5,23 @@
 pull-quotes:
 	RUST_LOG=debug cargo run -- pull-quotes /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
-# Calculate Average True Range (ATR)
-calculate-atr:
-	RUST_LOG=debug cargo run -- calculate-atr /Volumes/Ext/code/personal/market_int/data/symbols.csv
+# Calculate Average True Range (ATR) — now part of perform-all
+# calculate-atr:
+# 	RUST_LOG=debug cargo run -- calculate-atr /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
-# Calculate Maximum Drop for 5-day period
-calculate-maxdrop-5:
-	RUST_LOG=debug cargo run -- calculate-max-drop /Volumes/Ext/code/personal/market_int/data/symbols.csv 5
+# Calculate Maximum Drop — now part of perform-all
+# calculate-maxdrop-5:
+# 	RUST_LOG=debug cargo run -- calculate-max-drop /Volumes/Ext/code/personal/market_int/data/symbols.csv 5
+# calculate-maxdrop-20:
+# 	RUST_LOG=debug cargo run -- calculate-max-drop /Volumes/Ext/code/personal/market_int/data/symbols.csv 20
 
-# Calculate Maximum Drop for 20-day period
-calculate-maxdrop-20:
-	RUST_LOG=debug cargo run -- calculate-max-drop /Volumes/Ext/code/personal/market_int/data/symbols.csv 20
+# Calculate Sharpe Ratio — now part of perform-all
+# calculate-sharpe:
+# 	RUST_LOG=debug cargo run -- calculate-sharpe-ratio /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
-# Calculate Sharpe Ratio
-calculate-sharpe:
-	RUST_LOG=debug cargo run -- calculate-sharpe-ratio /Volumes/Ext/code/personal/market_int/data/symbols.csv
-
-# Calculate Price Percentile
-calculate-price-percentile:
-	RUST_LOG=debug cargo run -- calculate-price-percentile /Volumes/Ext/code/personal/market_int/data/symbols.csv
+# Calculate Price Percentile — now part of perform-all
+# calculate-price-percentile:
+# 	RUST_LOG=debug cargo run -- calculate-price-percentile /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
 # Pull option chain data with 5-day expiry
 pull-option-chain-5day:
@@ -82,12 +80,7 @@ gcloud-job:
 help:
 	@echo "Available targets:"
 	@echo "  pull-quotes          - Pull quotes for symbols"
-	@echo "  calculate-atr        - Calculate ATR"
-	@echo "  calculate-maxdrop-5  - Calculate 5-day max drop"
-	@echo "  calculate-maxdrop-20 - Calculate 20-day max drop"
-	@echo "  calculate-sharpe       - Calculate Sharpe ratio"
-	@echo "  calculate-price-percentile - Calculate price percentile"
-	@echo "  pull-option-chain-5day  - Pull 5-day option chains"
+	@echo "  perform-all          - Run full pipeline (quotes + all metrics + option chains)"
 	@echo "  pull-option-chain-20day - Pull 20-day option chains"
 	@echo "  pull-option-chain    - Legacy: same as pull-option-chain-5day"
 	@echo "  publish-option-chain - Publish option chains to Telegram"
