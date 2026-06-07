@@ -1,34 +1,4 @@
-use crate::{
-    constants, model,
-    store::{self, sharpe_ratio},
-    symbols,
-};
-use rusqlite::Connection;
-
-pub fn calculate_and_save(
-    symbols_file_path: &str,
-    conn: &mut Connection,
-    risk_free_rate: f64,
-) -> model::Result<()> {
-    let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
-
-    for symbol in symbols {
-        let candles = store::candle::get_candles(conn, &symbol, constants::CANDLE_COUNT)?;
-
-        if candles.len() < constants::SHARPE_MIN_CANDLES {
-            return Err(model::QuotesError::InsufficientReturnData(
-                constants::SHARPE_MIN_CANDLES,
-            ));
-        }
-
-        let returns = calculate_returns(&candles);
-        let sharpe = calculate_sharpe(&returns, risk_free_rate)?;
-
-        sharpe_ratio::save_sharpe_ratio(conn, &symbol, sharpe, candles.last().unwrap().timestamp)?;
-    }
-
-    Ok(())
-}
+use crate::{constants, model};
 
 /// Computes annualized Sharpe ratio from a candle slice.
 /// Returns None if insufficient data or zero std dev.
