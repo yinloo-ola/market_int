@@ -14,3 +14,5 @@ Retire rules that no longer apply during finalizing.
 - API responses may not be arrays. Check the actual shape (e.g., a map keyed by dates) before parsing.
 - The `edit` tool requires exact whitespace matching. When oldText fails, use `cat -v -e -t` or `xxd` to inspect invisible characters like double newlines.
 - When testing continuous ranges with boundary assertions (e.g., `bearness == 0.50`), account for floating-point imprecision. Use tolerance (`abs() < epsilon`) or test at exact integer multiples rather than trusting division to produce clean values.
+- In a refactor, when consolidating orchestration into a single function, every metric's data window must be preserved exactly. Fetch once with the max window, then slice for shorter windows. Verify each metric's original fetch count against the new shared buffer.
+- "Load once, pass slices" beats "each helper fetches its own" — it keeps helpers as pure compute+save, centralizes I/O, and avoids redundant database reads.
