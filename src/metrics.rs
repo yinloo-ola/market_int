@@ -12,7 +12,6 @@ pub fn run_all(
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
     // Ensure all target tables exist
-    store::true_range::create_table(conn)?;
     store::max_drop::create_table(conn)?;
     store::sharpe_ratio::create_table(conn)?;
     store::trend::create_table(conn)?;
@@ -28,20 +27,12 @@ pub fn run_all(
             }
         };
 
-        if candles.len() < constants::CANDLE_COUNT as usize {
-            log::warn!(
-                "Only {} candles for {}, need {}, skipping",
-                candles.len(),
-                symbol,
-                constants::CANDLE_COUNT
-            );
+        if candles.is_empty() {
+            log::warn!("No candles for {}, skipping", symbol);
             continue;
         }
 
         let timestamp = candles.last().unwrap().timestamp;
-
-        // ATR — weekly aggregation from full candle set
-        save_atr(conn, &symbol, &candles);
 
         // Max drop — periods 5 and 20, full rolling window
         save_max_drop(conn, &symbol, &candles, timestamp, 5);
@@ -51,72 +42,27 @@ pub fn run_all(
         save_sharpe(conn, &symbol, &candles, timestamp);
 
         // Trend — last EMA_LONG_PERIOD candles
-        let trend_offset = candles.len() - constants::EMA_LONG_PERIOD as usize;
-        save_trend(conn, &symbol, &candles[trend_offset..], timestamp);
+        if candles.len() >= constants::EMA_LONG_PERIOD as usize {
+            let trend_offset = candles.len() - constants::EMA_LONG_PERIOD as usize;
+            save_trend(conn, &symbol, &candles[trend_offset..], timestamp);
+        } else {
+            log::warn!(
+                "Not enough candles for trend calculation on {}, skipping",
+                symbol
+            );
+        }
 
         // Price percentile — last PRICE_PERCENTILE_DAYS candles
-        let pp_offset = candles.len() - constants::PRICE_PERCENTILE_DAYS as usize;
-        save_price_percentile(conn, &symbol, &candles[pp_offset..], timestamp);
+        if candles.len() >= constants::PRICE_PERCENTILE_DAYS as usize {
+            let pp_offset = candles.len() - constants::PRICE_PERCENTILE_DAYS as usize;
+            save_price_percentile(conn, &symbol, &candles[pp_offset..], timestamp);
+        } else {
+            log::warn!("Not enough candles for price percentile on {}, skipping", symbol);
+        }
     }
 
     log::info!("Completed metric calculation pipeline");
     Ok(())
-}
-
-fn save_atr(conn: &mut rusqlite::Connection, symbol: &str, candles: &[model::Candle]) {
-    let weekly_candles: Vec<model::Candle> = candles
-        .chunks(5)
-        .map(|chunk| {
-            let open = chunk.first().map_or(0.0, |c| c.open);
-            let close = chunk.last().map_or(0.0, |c| c.close);
-            let high = chunk
-                .iter()
-                .map(|c| c.high)
-                .max_by(|a, b| a.partial_cmp(b).unwrap())
-                .unwrap();
-            let low = chunk
-                .iter()
-                .map(|c| c.low)
-                .min_by(|a, b| a.partial_cmp(b).unwrap())
-                .unwrap();
-            let volume: u64 = chunk.iter().map(|c| c.volume as u64).sum();
-            model::Candle {
-                symbol: symbol.to_string(),
-                open,
-                high,
-                low,
-                close,
-                volume: volume as u32,
-                timestamp: chunk.first().map_or(0, |c| c.timestamp),
-            }
-        })
-        .collect();
-
-    if weekly_candles.len() < 4 {
-        log::warn!("Not enough weekly candles for {}, skipping ATR", symbol);
-        return;
-    }
-
-    let trs = crate::atr::true_ranges_ratio(&weekly_candles);
-    let ema_atr = crate::atr::exponential_moving_average(&trs, 5);
-    let percentile_atr = match crate::atr::percentile(&trs, constants::PERCENTILE) {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!("Failed to compute ATR percentile for {}: {}", symbol, e);
-            return;
-        }
-    };
-
-    let true_range = model::TrueRange {
-        symbol: symbol.to_string(),
-        percentile_range: percentile_atr,
-        ema_range: ema_atr,
-        timestamp: weekly_candles.last().unwrap().timestamp,
-    };
-
-    if let Err(e) = store::true_range::save_true_ranges(conn, &[true_range]) {
-        log::error!("Failed to save ATR for {}: {}", symbol, e);
-    }
 }
 
 fn save_max_drop(
@@ -210,5 +156,266 @@ fn save_price_percentile(
         }],
     ) {
         log::error!("Failed to save price percentile for {}: {}", symbol, e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn in_memory_db() -> Connection {
+        Connection::open_in_memory().unwrap()
+    }
+
+    /// Build `count` candles for `symbol` with a gentle uptrend starting at `start`.
+    /// Timestamps are ascending (0, 1, 2, …) so last().timestamp == count-1.
+    fn make_candles(symbol: &str, count: usize, start: f64) -> Vec<model::Candle> {
+        (0..count)
+            .map(|i| {
+                let close = start + i as f64;
+                model::Candle {
+                    symbol: symbol.to_string(),
+                    open: close - 0.5,
+                    high: close + 1.0,
+                    low: close - 1.0,
+                    close,
+                    volume: 1000,
+                    timestamp: i as u32,
+                }
+            })
+            .collect()
+    }
+
+    // ------------------------------------------------------------------
+    // save_max_drop
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_save_max_drop_stores_both_periods() {
+        let mut conn = in_memory_db();
+        store::max_drop::create_table(&conn).unwrap();
+        let candles = make_candles("AAPL", 100, 100.0);
+        let ts = candles.last().unwrap().timestamp;
+
+        save_max_drop(&mut conn, "AAPL", &candles, ts, 5);
+        save_max_drop(&mut conn, "AAPL", &candles, ts, 20);
+
+        let (p5, _) = store::max_drop::get_max_drop(&conn, "AAPL", 5).unwrap();
+        let (p20, _) = store::max_drop::get_max_drop(&conn, "AAPL", 20).unwrap();
+        assert!(p5 > 0.0, "5-day max drop should be positive");
+        assert!(p20 > 0.0, "20-day max drop should be positive");
+    }
+
+    #[test]
+    fn test_save_max_drop_skips_insufficient_data() {
+        let mut conn = in_memory_db();
+        store::max_drop::create_table(&conn).unwrap();
+        // Only 3 candles — not enough for even period=5 to produce 2 rolling samples
+        let candles = make_candles("AAPL", 3, 100.0);
+        save_max_drop(&mut conn, "AAPL", &candles, 2, 5);
+
+        // Should not have been saved
+        let result = store::max_drop::get_max_drop(&conn, "AAPL", 5);
+        assert!(result.is_err(), "should not save with insufficient data");
+    }
+
+    // ------------------------------------------------------------------
+    // save_sharpe
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_save_sharpe_stores_value() {
+        let mut conn = in_memory_db();
+        store::sharpe_ratio::create_table(&conn).unwrap();
+        let candles = make_candles("AAPL", 100, 100.0);
+        let ts = candles.last().unwrap().timestamp;
+
+        save_sharpe(&mut conn, "AAPL", &candles, ts);
+
+        let sharpe = store::sharpe_ratio::get_sharpe_ratio(&conn, "AAPL").unwrap();
+        assert!(sharpe.is_some(), "Sharpe should be stored");
+    }
+
+    #[test]
+    fn test_save_sharpe_skips_insufficient_candles() {
+        let mut conn = in_memory_db();
+        store::sharpe_ratio::create_table(&conn).unwrap();
+        // 5 candles < SHARPE_MIN_CANDLES (14)
+        let candles = make_candles("AAPL", 5, 100.0);
+        save_sharpe(&mut conn, "AAPL", &candles, 4);
+
+        let sharpe = store::sharpe_ratio::get_sharpe_ratio(&conn, "AAPL").unwrap();
+        assert!(sharpe.is_none(), "should not store Sharpe with too few candles");
+    }
+
+    // ------------------------------------------------------------------
+    // save_trend
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_save_trend_stores_ratios() {
+        let mut conn = in_memory_db();
+        store::trend::create_table(&conn).unwrap();
+        // Exactly EMA_LONG_PERIOD (50) candles in an uptrend
+        let candles = make_candles("AAPL", constants::EMA_LONG_PERIOD as usize, 100.0);
+        let ts = candles.last().unwrap().timestamp;
+
+        save_trend(&mut conn, "AAPL", &candles, ts);
+
+        let (short, long) = store::trend::get_trend(&conn, "AAPL").unwrap().unwrap();
+        assert!(short > 1.0, "uptrend → short ratio > 1.0, got {}", short);
+        assert!(long > 1.0, "uptrend → long ratio > 1.0, got {}", long);
+    }
+
+    // ------------------------------------------------------------------
+    // save_price_percentile
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_save_price_percentile_stores_value() {
+        let mut conn = in_memory_db();
+        store::price_percentile::create_table(&conn).unwrap();
+        // PRICE_PERCENTILE_DAYS (20) candles in uptrend → high percentile
+        let candles = make_candles("AAPL", constants::PRICE_PERCENTILE_DAYS as usize, 100.0);
+        let ts = candles.last().unwrap().timestamp;
+
+        save_price_percentile(&mut conn, "AAPL", &candles, ts);
+
+        let pp = store::price_percentile::get_price_percentile(&conn, "AAPL").unwrap();
+        assert!(pp.is_some(), "price percentile should be stored");
+        let val = pp.unwrap();
+        assert!(
+            (val - 1.0).abs() < 0.01,
+            "uptrend with 20 candles → percentile ≈ 1.0, got {}",
+            val
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Gating / slicing guards in run_all
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_run_all_skips_empty_candles() {
+        let mut conn = in_memory_db();
+        store::candle::create_table(&conn).unwrap();
+        store::max_drop::create_table(&conn).unwrap();
+        store::sharpe_ratio::create_table(&conn).unwrap();
+        store::trend::create_table(&conn).unwrap();
+        store::price_percentile::create_table(&conn).unwrap();
+        // Insert a symbol with zero candles
+        run_all(&no_such_file(), &mut conn).unwrap_err();
+    }
+
+    #[test]
+    fn test_run_all_trend_guarded_when_short() {
+        let mut conn = in_memory_db();
+        store::candle::create_table(&conn).unwrap();
+        store::max_drop::create_table(&conn).unwrap();
+        store::sharpe_ratio::create_table(&conn).unwrap();
+        store::trend::create_table(&conn).unwrap();
+        store::price_percentile::create_table(&conn).unwrap();
+
+        // 30 candles: enough for price_percentile (20) and sharpe (14),
+        // but NOT enough for trend (EMA_LONG_PERIOD=50)
+        let candles = make_candles("AAPL", 30, 100.0);
+        store::candle::save_candles(&mut conn, &candles).unwrap();
+
+        // Seed symbols file
+        let dir = std::env::temp_dir().join("metrics_test_trend_guard");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("symbols.csv");
+        std::fs::write(&path, "AAPL\n").unwrap();
+
+        run_all(path.to_str().unwrap(), &mut conn).unwrap();
+
+        // Trend should NOT have been saved
+        let trend = store::trend::get_trend(&conn, "AAPL").unwrap();
+        assert!(trend.is_none(), "trend should be skipped with < EMA_LONG_PERIOD candles");
+
+        // But max_drop should have been saved (30 > 5+1)
+        let md = store::max_drop::get_max_drop(&conn, "AAPL", 5);
+        assert!(md.is_ok(), "max_drop should still be saved");
+
+        // Price percentile should have been saved
+        let pp = store::price_percentile::get_price_percentile(&conn, "AAPL").unwrap();
+        assert!(pp.is_some(), "price percentile should still be saved");
+    }
+
+    #[test]
+    fn test_run_all_price_percentile_guarded_when_short() {
+        let mut conn = in_memory_db();
+        store::candle::create_table(&conn).unwrap();
+        store::max_drop::create_table(&conn).unwrap();
+        store::sharpe_ratio::create_table(&conn).unwrap();
+        store::trend::create_table(&conn).unwrap();
+        store::price_percentile::create_table(&conn).unwrap();
+
+        // 10 candles: enough for sharpe (14? no), too few for PP (20) and trend (50)
+        // Actually 10 < SHARPE_MIN_CANDLES=14, so sharpe also skipped.
+        // Only max_drop period=5 might produce results.
+        let candles = make_candles("AAPL", 10, 100.0);
+        store::candle::save_candles(&mut conn, &candles).unwrap();
+
+        let dir = std::env::temp_dir().join("metrics_test_pp_guard");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("symbols.csv");
+        std::fs::write(&path, "AAPL\n").unwrap();
+
+        run_all(path.to_str().unwrap(), &mut conn).unwrap();
+
+        // Price percentile should NOT have been saved (need 20, have 10)
+        let pp = store::price_percentile::get_price_percentile(&conn, "AAPL").unwrap();
+        assert!(pp.is_none(), "price percentile should be skipped with < PRICE_PERCENTILE_DAYS candles");
+
+        // Trend should NOT have been saved (need 50, have 10)
+        let trend = store::trend::get_trend(&conn, "AAPL").unwrap();
+        assert!(trend.is_none(), "trend should be skipped with < EMA_LONG_PERIOD candles");
+
+        // Sharpe should NOT have been saved (need 14, have 10)
+        let sharpe = store::sharpe_ratio::get_sharpe_ratio(&conn, "AAPL").unwrap();
+        assert!(sharpe.is_none(), "sharpe should be skipped with < SHARPE_MIN_CANDLES candles");
+    }
+
+    #[test]
+    fn test_run_all_full_pipeline() {
+        let mut conn = in_memory_db();
+        store::candle::create_table(&conn).unwrap();
+        store::max_drop::create_table(&conn).unwrap();
+        store::sharpe_ratio::create_table(&conn).unwrap();
+        store::trend::create_table(&conn).unwrap();
+        store::price_percentile::create_table(&conn).unwrap();
+
+        let candles = make_candles("AAPL", 100, 100.0);
+        store::candle::save_candles(&mut conn, &candles).unwrap();
+
+        let dir = std::env::temp_dir().join("metrics_test_full");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("symbols.csv");
+        std::fs::write(&path, "AAPL\n").unwrap();
+
+        run_all(path.to_str().unwrap(), &mut conn).unwrap();
+
+        // All four metrics should be saved
+        let md5 = store::max_drop::get_max_drop(&conn, "AAPL", 5);
+        assert!(md5.is_ok(), "max_drop period 5 should be saved");
+
+        let md20 = store::max_drop::get_max_drop(&conn, "AAPL", 20);
+        assert!(md20.is_ok(), "max_drop period 20 should be saved");
+
+        let sharpe = store::sharpe_ratio::get_sharpe_ratio(&conn, "AAPL").unwrap();
+        assert!(sharpe.is_some(), "sharpe should be saved");
+
+        let trend = store::trend::get_trend(&conn, "AAPL").unwrap();
+        assert!(trend.is_some(), "trend should be saved");
+
+        let pp = store::price_percentile::get_price_percentile(&conn, "AAPL").unwrap();
+        assert!(pp.is_some(), "price percentile should be saved");
+    }
+
+    /// Helper: returns a path that definitely doesn't exist.
+    fn no_such_file() -> String {
+        "/tmp/__nonexistent_metrics_test_file__".to_string()
     }
 }
