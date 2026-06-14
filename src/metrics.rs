@@ -164,6 +164,17 @@ mod tests {
         Connection::open_in_memory().unwrap()
     }
 
+    /// In-memory DB with candle + all metric tables created, for run_all tests.
+    fn setup_db() -> Connection {
+        let conn = in_memory_db();
+        store::candle::create_table(&conn).unwrap();
+        store::max_drop::create_table(&conn).unwrap();
+        store::sharpe_ratio::create_table(&conn).unwrap();
+        store::trend::create_table(&conn).unwrap();
+        store::price_percentile::create_table(&conn).unwrap();
+        conn
+    }
+
     /// Build `count` candles for `symbol` with a gentle uptrend starting at `start`.
     /// Timestamps are ascending (0, 1, 2, …) so last().timestamp == count-1.
     fn make_candles(symbol: &str, count: usize, start: f64) -> Vec<model::Candle> {
@@ -294,12 +305,7 @@ mod tests {
 
     #[test]
     fn test_run_all_skips_empty_candles() {
-        let mut conn = in_memory_db();
-        store::candle::create_table(&conn).unwrap();
-        store::max_drop::create_table(&conn).unwrap();
-        store::sharpe_ratio::create_table(&conn).unwrap();
-        store::trend::create_table(&conn).unwrap();
-        store::price_percentile::create_table(&conn).unwrap();
+        let mut conn = setup_db();
 
         // Symbol is in the file but has ZERO candle rows — exercises the
         // candles.is_empty() continue-branch in run_all.
@@ -333,12 +339,7 @@ mod tests {
 
     #[test]
     fn test_run_all_trend_guarded_when_short() {
-        let mut conn = in_memory_db();
-        store::candle::create_table(&conn).unwrap();
-        store::max_drop::create_table(&conn).unwrap();
-        store::sharpe_ratio::create_table(&conn).unwrap();
-        store::trend::create_table(&conn).unwrap();
-        store::price_percentile::create_table(&conn).unwrap();
+        let mut conn = setup_db();
 
         // 30 candles: enough for price_percentile (20) and sharpe (14),
         // but NOT enough for trend (EMA_LONG_PERIOD=50)
@@ -364,12 +365,7 @@ mod tests {
 
     #[test]
     fn test_run_all_price_percentile_guarded_when_short() {
-        let mut conn = in_memory_db();
-        store::candle::create_table(&conn).unwrap();
-        store::max_drop::create_table(&conn).unwrap();
-        store::sharpe_ratio::create_table(&conn).unwrap();
-        store::trend::create_table(&conn).unwrap();
-        store::price_percentile::create_table(&conn).unwrap();
+        let mut conn = setup_db();
 
         // 10 candles: enough for sharpe (14? no), too few for PP (20) and trend (50)
         // Actually 10 < SHARPE_MIN_CANDLES=14, so sharpe also skipped.
@@ -396,12 +392,7 @@ mod tests {
 
     #[test]
     fn test_run_all_full_pipeline() {
-        let mut conn = in_memory_db();
-        store::candle::create_table(&conn).unwrap();
-        store::max_drop::create_table(&conn).unwrap();
-        store::sharpe_ratio::create_table(&conn).unwrap();
-        store::trend::create_table(&conn).unwrap();
-        store::price_percentile::create_table(&conn).unwrap();
+        let mut conn = setup_db();
 
         let candles = make_candles("AAPL", 100, 100.0);
         store::candle::save_candles(&mut conn, &candles).unwrap();
