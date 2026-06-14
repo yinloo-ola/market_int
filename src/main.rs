@@ -8,8 +8,8 @@ mod model;
 mod regime;
 // Pull quotes from API.
 mod quotes;
-// Average True Range (ATR) calculation.
-mod atr;
+// Statistical helpers: EMA smoothing and percentile.
+mod stats;
 // Maximum drop calculation.
 mod maxdrop;
 /// Pull option chains from API based on ATR retrieved from database.
@@ -44,8 +44,6 @@ mod store {
     pub mod sqlite;
     /// Trend data storage.
     pub mod trend;
-    /// true range storage.
-    pub mod true_range;
 }
 // module storing defaults
 mod constants;

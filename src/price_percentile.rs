@@ -1,8 +1,11 @@
 use crate::model;
 
 /// Computes the 20-day price percentile from a candle slice.
-/// Returns 0.5 if all prices are equal.
+/// Returns 0.5 for an empty slice or when all prices are equal.
 pub fn compute_price_percentile(candles: &[model::Candle]) -> f64 {
+    if candles.is_empty() {
+        return 0.5;
+    }
     let close_prices: Vec<f64> = candles.iter().map(|c| c.close).collect();
 
     let min_price = close_prices.iter().copied().fold(f64::INFINITY, f64::min);

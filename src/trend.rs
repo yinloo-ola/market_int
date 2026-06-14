@@ -1,12 +1,22 @@
-use crate::{atr, constants};
+use crate::{stats, constants};
+
+/// Computes EMA short, EMA long, and both trend ratios from a slice of close prices.
+/// Returns `(ema_short, ema_long, ratio_short, ratio_long)` where
+/// `ratio_short = price/EMA20` and `ratio_long = price/EMA50`.
+///
+/// Caller must guarantee `closes` is non-empty (its last element is the reference price).
+pub fn trend_components(closes: &[f64]) -> (f64, f64, f64, f64) {
+    let ema_short = stats::exponential_moving_average(closes, constants::EMA_SHORT_PERIOD);
+    let ema_long = stats::exponential_moving_average(closes, constants::EMA_LONG_PERIOD);
+    let price = closes.last().unwrap();
+    (ema_short, ema_long, price / ema_short, price / ema_long)
+}
 
 /// Calculates trend ratios from a slice of close prices.
 /// Returns (trend_ratio_short, trend_ratio_long) = (price/EMA20, price/EMA50).
 pub fn calculate_trend_ratios(closes: &[f64]) -> (f64, f64) {
-    let ema_short = atr::exponential_moving_average(closes, constants::EMA_SHORT_PERIOD);
-    let ema_long = atr::exponential_moving_average(closes, constants::EMA_LONG_PERIOD);
-    let price = closes.last().unwrap();
-    (price / ema_short, price / ema_long)
+    let (_, _, ratio_short, ratio_long) = trend_components(closes);
+    (ratio_short, ratio_long)
 }
 
 #[cfg(test)]

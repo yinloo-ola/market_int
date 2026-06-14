@@ -65,7 +65,7 @@ pub async fn compute_spy_trend(
     }
 
     let ema_long =
-        crate::atr::exponential_moving_average(&closes, crate::constants::EMA_LONG_PERIOD);
+        crate::stats::exponential_moving_average(&closes, crate::constants::EMA_LONG_PERIOD);
     let current_price = closes.last().unwrap();
     let trend_ratio_long = current_price / ema_long;
 
