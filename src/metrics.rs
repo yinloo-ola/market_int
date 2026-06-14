@@ -120,12 +120,8 @@ fn save_trend(
     timestamp: u32,
 ) {
     let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
-
-    let ema_short = crate::atr::exponential_moving_average(&closes, constants::EMA_SHORT_PERIOD);
-    let ema_long = crate::atr::exponential_moving_average(&closes, constants::EMA_LONG_PERIOD);
-    let price = closes.last().unwrap();
-    let trend_ratio_short = price / ema_short;
-    let trend_ratio_long = price / ema_long;
+    let (ema_short, ema_long, trend_ratio_short, trend_ratio_long) =
+        crate::trend::trend_components(&closes);
 
     if let Err(e) = store::trend::save_trend(
         conn,
@@ -304,8 +300,35 @@ mod tests {
         store::sharpe_ratio::create_table(&conn).unwrap();
         store::trend::create_table(&conn).unwrap();
         store::price_percentile::create_table(&conn).unwrap();
-        // Insert a symbol with zero candles
-        run_all(&no_such_file(), &mut conn).unwrap_err();
+
+        // Symbol is in the file but has ZERO candle rows — exercises the
+        // candles.is_empty() continue-branch in run_all.
+        let (_dir, path) = seed_symbols_file(&["NOPE"]);
+
+        // run_all must succeed, silently skipping the symbol.
+        run_all(&path, &mut conn).unwrap();
+
+        // Nothing should have been written for NOPE.
+        assert!(
+            store::max_drop::get_max_drop(&conn, "NOPE", 5).is_err(),
+            "no max_drop should exist for a symbol with no candles"
+        );
+        assert!(
+            store::sharpe_ratio::get_sharpe_ratio(&conn, "NOPE")
+                .unwrap()
+                .is_none(),
+            "no sharpe should exist for a symbol with no candles"
+        );
+        assert!(
+            store::trend::get_trend(&conn, "NOPE").unwrap().is_none(),
+            "no trend should exist for a symbol with no candles"
+        );
+        assert!(
+            store::price_percentile::get_price_percentile(&conn, "NOPE")
+                .unwrap()
+                .is_none(),
+            "no price percentile should exist for a symbol with no candles"
+        );
     }
 
     #[test]
@@ -322,13 +345,9 @@ mod tests {
         let candles = make_candles("AAPL", 30, 100.0);
         store::candle::save_candles(&mut conn, &candles).unwrap();
 
-        // Seed symbols file
-        let dir = std::env::temp_dir().join("metrics_test_trend_guard");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("symbols.csv");
-        std::fs::write(&path, "AAPL\n").unwrap();
+        let (_dir, path) = seed_symbols_file(&["AAPL"]);
 
-        run_all(path.to_str().unwrap(), &mut conn).unwrap();
+        run_all(&path, &mut conn).unwrap();
 
         // Trend should NOT have been saved
         let trend = store::trend::get_trend(&conn, "AAPL").unwrap();
@@ -358,12 +377,9 @@ mod tests {
         let candles = make_candles("AAPL", 10, 100.0);
         store::candle::save_candles(&mut conn, &candles).unwrap();
 
-        let dir = std::env::temp_dir().join("metrics_test_pp_guard");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("symbols.csv");
-        std::fs::write(&path, "AAPL\n").unwrap();
+        let (_dir, path) = seed_symbols_file(&["AAPL"]);
 
-        run_all(path.to_str().unwrap(), &mut conn).unwrap();
+        run_all(&path, &mut conn).unwrap();
 
         // Price percentile should NOT have been saved (need 20, have 10)
         let pp = store::price_percentile::get_price_percentile(&conn, "AAPL").unwrap();
@@ -390,12 +406,9 @@ mod tests {
         let candles = make_candles("AAPL", 100, 100.0);
         store::candle::save_candles(&mut conn, &candles).unwrap();
 
-        let dir = std::env::temp_dir().join("metrics_test_full");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("symbols.csv");
-        std::fs::write(&path, "AAPL\n").unwrap();
+        let (_dir, path) = seed_symbols_file(&["AAPL"]);
 
-        run_all(path.to_str().unwrap(), &mut conn).unwrap();
+        run_all(&path, &mut conn).unwrap();
 
         // All four metrics should be saved
         let md5 = store::max_drop::get_max_drop(&conn, "AAPL", 5);
@@ -414,8 +427,13 @@ mod tests {
         assert!(pp.is_some(), "price percentile should be saved");
     }
 
-    /// Helper: returns a path that definitely doesn't exist.
-    fn no_such_file() -> String {
-        "/tmp/__nonexistent_metrics_test_file__".to_string()
+    /// Creates a unique temp dir, writes `symbols` (one per line) into `symbols.csv`,
+    /// and returns the file path alongside the owning `TempDir`. The `TempDir` deletes
+    /// itself when dropped, so the caller must keep it alive for the test's duration.
+    fn seed_symbols_file(symbols: &[&str]) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("symbols.csv");
+        std::fs::write(&path, symbols.join("\n") + "\n").unwrap();
+        (dir, path.to_str().unwrap().to_string())
     }
 }

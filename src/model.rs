@@ -39,14 +39,6 @@ pub struct Candle {
 }
 
 #[derive(Debug)]
-pub struct TrueRange {
-    pub symbol: String, // Symbol of the asset.
-    pub percentile_range: f64,
-    pub ema_range: f64,
-    pub timestamp: u32,
-}
-
-#[derive(Debug)]
 pub struct MaxDropPeriod {
     pub symbol: String,
     pub period: usize,
