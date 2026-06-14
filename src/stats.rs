@@ -14,9 +14,9 @@ pub fn exponential_moving_average(array: &[f64], period: u32) -> f64 {
         return sum / array.len() as f64;
     }
     let multiplier = 2.0 / (period as f64 + 1.0);
-    let mut ema_value = array[0]; // Initialize with the first value
-    for i in 1..array.len() {
-        ema_value = ema(ema_value, array[i], multiplier);
+    let mut ema_value = array[0];
+    for &val in array.iter().skip(1) {
+        ema_value = ema(ema_value, val, multiplier);
     }
     ema_value
 }
@@ -33,22 +33,14 @@ pub fn percentile(values: &[f64], percentile: f64) -> model::Result<f64> {
         ));
     }
 
-    let mut values = values.to_vec();
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let index = percentile * (values.len() as f64 - 1.0);
-
-    if index < 0.0 {
-        return Ok(values[0]);
-    }
-
-    if index >= values.len() as f64 {
-        return Ok(*values.last().unwrap());
-    }
-
+    // percentile ∈ [0,1] (validated above) and len ≥ 1 ⇒ index ∈ [0, len-1], so bounds below are safe.
+    let index = percentile * (sorted.len() as f64 - 1.0);
     let lower = index.floor() as usize;
     let upper = index.ceil() as usize;
     let weight = index - index.floor();
 
-    Ok(values[lower] * (1.0 - weight) + values[upper] * weight)
+    Ok(sorted[lower] * (1.0 - weight) + sorted[upper] * weight)
 }
