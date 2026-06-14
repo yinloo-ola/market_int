@@ -1,7 +1,4 @@
-use crate::constants;
-use crate::model;
-use crate::store;
-use crate::symbols;
+use crate::{constants, maxdrop, model, price_percentile, sharpe, store, symbols, trend};
 
 /// Runs the full metric-calculation pipeline for all symbols.
 /// Loads candles once per symbol, slices for each metric's window, saves results.
@@ -19,14 +16,8 @@ pub fn run_all(
 
     for symbol in symbols {
         // Load candles once — CANDLE_COUNT is the largest window any metric needs
-        let candles = match store::candle::get_candles(conn, &symbol, constants::CANDLE_COUNT) {
-            Ok(c) => c,
-            Err(_) => {
-                log::warn!("No candles for {}, skipping", symbol);
-                continue;
-            }
-        };
-
+        let candles =
+            store::candle::get_candles(conn, &symbol, constants::CANDLE_COUNT).unwrap_or_default();
         if candles.is_empty() {
             log::warn!("No candles for {}, skipping", symbol);
             continue;
@@ -72,7 +63,7 @@ fn save_max_drop(
     timestamp: u32,
     period: usize,
 ) {
-    match crate::maxdrop::compute_max_drop_stats(candles, period) {
+    match maxdrop::compute_max_drop_stats(candles, period) {
         Some((percentile_drop, ema_drop)) => {
             if let Err(e) = store::max_drop::save_max_drop_period(
                 conn,
@@ -101,7 +92,7 @@ fn save_sharpe(
     candles: &[model::Candle],
     timestamp: u32,
 ) {
-    match crate::sharpe::compute_sharpe(candles, constants::DEFAULT_RISK_FREE_RATE) {
+    match sharpe::compute_sharpe(candles, constants::DEFAULT_RISK_FREE_RATE) {
         Some(sharpe) => {
             if let Err(e) = store::sharpe_ratio::save_sharpe_ratio(conn, symbol, sharpe, timestamp) {
                 log::error!("Failed to save Sharpe for {}: {}", symbol, e);
@@ -121,7 +112,7 @@ fn save_trend(
 ) {
     let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
     let (ema_short, ema_long, trend_ratio_short, trend_ratio_long) =
-        crate::trend::trend_components(&closes);
+        trend::trend_components(&closes);
 
     if let Err(e) = store::trend::save_trend(
         conn,
@@ -142,7 +133,7 @@ fn save_price_percentile(
     candles: &[model::Candle],
     timestamp: u32,
 ) {
-    let percentile = crate::price_percentile::compute_price_percentile(candles);
+    let percentile = price_percentile::compute_price_percentile(candles);
     if let Err(e) = store::price_percentile::save_price_percentiles(
         conn,
         &[model::PricePercentile {
