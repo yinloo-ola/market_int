@@ -94,6 +94,21 @@ pub fn calculate_strike_percentile(strike: f64, min: f64, max: f64) -> f64 {
     (strike - min) / (max - min)
 }
 
+/// Calculates safety as the strike's position within the max_drop band
+/// `[strike_from, strike_to]` — the strike range the filter computed from
+/// `ema_drop` (typical) and `percentile_drop` (stress), scaled by DTE.
+///
+/// Returns 1.0 at the deep end (`strike_from` — rarely breached), 0.0 at the
+/// shallow end (`strike_to` — frequently breached), and 0.5 for a degenerate
+/// (zero-width) band. Values outside the band are clamped to [0, 1].
+pub fn calculate_max_drop_safety(strike: f64, strike_from: f64, strike_to: f64) -> f64 {
+    let band = strike_to - strike_from;
+    if band.abs() < 1e-9 {
+        return 0.5;
+    }
+    ((strike_to - strike) / band).clamp(0.0, 1.0)
+}
+
 /// Calculates the trend factor for strike tightening.
 /// Returns a value in [0.85, 1.0] — never widens strikes.
 ///
@@ -129,42 +144,41 @@ pub fn calculate_trend_factor(trend_ratio_short: f64) -> f64 {
 /// Calculates a composite score [0, 1] for a put option.
 /// Returns None if the option fails any pre-filter.
 ///
-/// Pre-filters:
-///   - rate_of_return in [MIN_RATE_OF_RETURN, MAX_RATE_OF_RETURN]
-///   - sharpe > 0
-///   - strike_percentile <= MAX_STRIKE_PERCENTILE
-///   - trend_ratio_short >= regime.trend_threshold
-///   - trend_ratio_long >= regime.trend_threshold
+/// `safety` is the strike's position within the max_drop band
+/// `[strike_from, strike_to]` (see `calculate_max_drop_safety`): 1.0 at the
+/// deep / rarely-breached end, 0.0 at the shallow / frequently-breached end.
 ///
-/// Score = weight_sharpe * sharpe_norm + weight_safety * safety_norm + weight_return * return_norm + weight_trend * trend_norm
+/// Pre-filters:
+///   - rate_of_return >= MIN_RATE_OF_RETURN  (no upper cap — return is a
+///     soft-capped reward via `return_norm`; danger is expressed via `safety`)
+///   - sharpe > 0
+///
+/// Score = weight_sharpe * sharpe_norm + weight_safety * safety + weight_return * return_norm
 pub fn calculate_put_score(
     sharpe: f64,
-    strike_percentile: f64,
+    safety: f64,
     rate_of_return: f64,
     _trend_ratio_short: f64,
     _trend_ratio_long: f64,
     _regime: &crate::regime::MarketRegime,
 ) -> Option<f64> {
-    // Pre-filters
-    if rate_of_return < constants::MIN_RATE_OF_RETURN
-        || rate_of_return > constants::MAX_RATE_OF_RETURN
-    {
+    // Pre-filters: keep the min-return floor and the positive-Sharpe requirement.
+    // The hard rate-of-return cap and the strike_percentile cap were removed —
+    // danger is now expressed via the max_drop band position (`safety`).
+    if rate_of_return < constants::MIN_RATE_OF_RETURN {
         return None;
     }
     if sharpe <= 0.0 {
         return None;
     }
-    if strike_percentile > constants::MAX_STRIKE_PERCENTILE {
-        return None;
-    }
 
     let sharpe_norm = (sharpe / 2.0).clamp(0.0, 1.0);
-    let safety_norm = 1.0 - strike_percentile.max(0.0);
+    let safety_norm = safety.clamp(0.0, 1.0);
 
-    // Asymmetric soft-cap: linear return score up to IDEAL_RETURN (0.50), no penalty above it
+    // Soft-cap: return reward ramps linearly to IDEAL_RETURN, then flattens
+    // (no further credit above it, but no exclusion either).
     let return_norm = (rate_of_return / constants::IDEAL_RETURN).min(1.0);
 
-    // Static weights for safety, return, and sharpe (no trend weight)
     let weight_sharpe = 0.20;
     let weight_safety = 0.40;
     let weight_return = 0.40;
@@ -172,7 +186,7 @@ pub fn calculate_put_score(
     Some(
         weight_sharpe * sharpe_norm
             + weight_safety * safety_norm
-            + weight_return * return_norm
+            + weight_return * return_norm,
     )
 }
 
@@ -325,20 +339,23 @@ pub fn option_chain_to_csv_vec(
         let sharpe_ratio = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
         let price_percentile = price_percentiles.get(&chain.underlying).copied();
 
-        let (strike_percentile_str, score_str) = match price_ranges.get(&chain.underlying) {
-            Some(range) => {
-                let sp = calculate_strike_percentile(chain.strike, range.min, range.max);
-                let (ts, tl) = trend_data
-                    .get(&chain.underlying)
-                    .copied()
-                    .unwrap_or((1.0, 1.0));
-                let score =
-                    calculate_put_score(sharpe_ratio, sp, chain.rate_of_return, ts, tl, regime);
-                let sp_str = format!("{:.3}", sp);
-                let score_str = score.map(|s| format!("{:.3}", s)).unwrap_or_default();
-                (sp_str, score_str)
-            }
-            None => (String::new(), String::new()),
+        // Safety from the max_drop band (always available — stored per chain);
+        // strike_percentile stays as a CSV-only diagnostic (needs 20-day range).
+        let safety =
+            calculate_max_drop_safety(chain.strike, chain.strike_from, chain.strike_to);
+        let (ts, tl) = trend_data
+            .get(&chain.underlying)
+            .copied()
+            .unwrap_or((1.0, 1.0));
+        let score =
+            calculate_put_score(sharpe_ratio, safety, chain.rate_of_return, ts, tl, regime);
+        let score_str = score.map(|s| format!("{:.3}", s)).unwrap_or_default();
+        let strike_percentile_str = match price_ranges.get(&chain.underlying) {
+            Some(range) => format!(
+                "{:.3}",
+                calculate_strike_percentile(chain.strike, range.min, range.max)
+            ),
+            None => String::new(),
         };
 
         let momentum = price_percentile
@@ -401,13 +418,13 @@ pub fn option_chain_to_csv_vec(
         .enumerate()
         .filter_map(|(i, chain)| {
             let sharpe = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
-            let range = price_ranges.get(&chain.underlying)?;
-            let sp = calculate_strike_percentile(chain.strike, range.min, range.max);
+            let safety =
+                calculate_max_drop_safety(chain.strike, chain.strike_from, chain.strike_to);
             let (ts, tl) = trend_data
                 .get(&chain.underlying)
                 .copied()
                 .unwrap_or((1.0, 1.0));
-            let score = calculate_put_score(sharpe, sp, chain.rate_of_return, ts, tl, regime)?;
+            let score = calculate_put_score(sharpe, safety, chain.rate_of_return, ts, tl, regime)?;
             Some((i, score))
         })
         .collect();
@@ -568,74 +585,100 @@ mod tests {
     }
 
     #[test]
+    fn test_max_drop_safety_deep_end() {
+        // strike at strike_from (deep, rarely breached) -> 1.0
+        assert!((calculate_max_drop_safety(90.0, 90.0, 100.0) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_max_drop_safety_shallow_end() {
+        // strike at strike_to (shallow, frequently breached) -> 0.0
+        assert!((calculate_max_drop_safety(100.0, 90.0, 100.0) - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_max_drop_safety_mid() {
+        assert!((calculate_max_drop_safety(95.0, 90.0, 100.0) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_max_drop_safety_below_band_clamps() {
+        // deeper than strike_from -> clamps to 1.0
+        assert!((calculate_max_drop_safety(85.0, 90.0, 100.0) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_max_drop_safety_above_band_clamps() {
+        // shallower than strike_to -> clamps to 0.0
+        assert!((calculate_max_drop_safety(105.0, 90.0, 100.0) - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_max_drop_safety_degenerate_band() {
+        // zero-width band -> 0.5
+        assert!((calculate_max_drop_safety(100.0, 100.0, 100.0) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
     fn test_put_score_good_option() {
-        // sharpe=1.8, percentile=0.10, return=0.45
-        // sharpe_norm=(1.8/2.0).clamp(0,1) = 0.9, safety_norm=0.9, return_norm=(0.45/0.80).min(1.0) = 0.5625
-        // score = 0.20*0.9 + 0.40*0.9 + 0.40*0.5625 = 0.18 + 0.36 + 0.225 = 0.765
-        let score = calculate_put_score(1.8, 0.10, 0.45, 1.05, 1.05, &bull_regime()).unwrap();
+        // deep/safe strike (safety=0.90), sharpe=1.8, return=0.45
+        // sharpe_norm=0.9, safety_norm=0.9, return_norm=(0.45/0.80)=0.5625
+        // score = 0.20*0.9 + 0.40*0.9 + 0.40*0.5625 = 0.765
+        let score = calculate_put_score(1.8, 0.90, 0.45, 1.05, 1.05, &bull_regime()).unwrap();
         assert!((score - 0.765).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_filtered_low_return() {
-        assert!(calculate_put_score(1.5, 0.10, 0.25, 1.05, 1.05, &bull_regime()).is_some());
-        assert!(calculate_put_score(1.5, 0.10, 0.24, 1.05, 1.05, &bull_regime()).is_none());
+        // MIN_RATE_OF_RETURN floor still applies
+        assert!(calculate_put_score(1.5, 0.90, 0.25, 1.05, 1.05, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.5, 0.90, 0.24, 1.05, 1.05, &bull_regime()).is_none());
     }
 
     #[test]
-    fn test_put_score_filtered_high_return() {
-        // 0.85 > MAX_RATE_OF_RETURN (0.80)
-        assert!(calculate_put_score(1.5, 0.10, 0.85, 1.05, 1.05, &bull_regime()).is_none());
+    fn test_put_score_high_return_accepted() {
+        // no upper cap: high return is accepted — danger now comes from safety
+        assert!(calculate_put_score(1.5, 0.90, 0.85, 1.05, 1.05, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.5, 0.90, 5.0, 1.05, 1.05, &bull_regime()).is_some());
     }
 
     #[test]
     fn test_put_score_filtered_negative_sharpe() {
-        assert!(calculate_put_score(-0.5, 0.10, 0.45, 1.05, 1.05, &bull_regime()).is_none());
+        assert!(calculate_put_score(-0.5, 0.90, 0.45, 1.05, 1.05, &bull_regime()).is_none());
     }
 
     #[test]
     fn test_put_score_filtered_zero_sharpe() {
-        assert!(calculate_put_score(0.0, 0.10, 0.45, 1.05, 1.05, &bull_regime()).is_none());
-    }
-
-    #[test]
-    fn test_put_score_filtered_high_percentile() {
-        assert!(calculate_put_score(1.5, 0.41, 0.45, 1.05, 1.05, &bull_regime()).is_none());
+        assert!(calculate_put_score(0.0, 0.90, 0.45, 1.05, 1.05, &bull_regime()).is_none());
     }
 
     #[test]
     fn test_put_score_boundary_return_low() {
-        assert!(calculate_put_score(1.0, 0.10, 0.25, 1.05, 1.05, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.0, 0.90, 0.25, 1.05, 1.05, &bull_regime()).is_some());
     }
 
     #[test]
     fn test_put_score_boundary_return_high() {
-        assert!(calculate_put_score(1.0, 0.10, 0.80, 1.05, 1.05, &bull_regime()).is_some());
-    }
-
-    #[test]
-    fn test_put_score_boundary_percentile() {
-        assert!(calculate_put_score(1.0, 0.40, 0.45, 1.05, 1.05, &bull_regime()).is_some());
+        // 0.80 == IDEAL_RETURN, accepted (soft-cap saturation point)
+        assert!(calculate_put_score(1.0, 0.90, 0.80, 1.05, 1.05, &bull_regime()).is_some());
     }
 
     #[test]
     fn test_put_score_just_below_return_floor() {
-        assert!(calculate_put_score(1.0, 0.10, 0.24, 1.05, 1.05, &bull_regime()).is_none());
+        assert!(calculate_put_score(1.0, 0.90, 0.24, 1.05, 1.05, &bull_regime()).is_none());
     }
 
     #[test]
     fn test_put_score_at_return_floor() {
-        assert!(calculate_put_score(1.0, 0.10, 0.25, 1.05, 1.05, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.0, 0.90, 0.25, 1.05, 1.05, &bull_regime()).is_some());
     }
 
     #[test]
-    fn test_put_score_at_strike_percentile_boundary() {
-        assert!(calculate_put_score(1.0, 0.40, 0.45, 1.05, 1.05, &bull_regime()).is_some());
-    }
-
-    #[test]
-    fn test_put_score_above_strike_percentile_boundary() {
-        assert!(calculate_put_score(1.0, 0.41, 0.45, 1.05, 1.05, &bull_regime()).is_none());
+    fn test_put_score_safety_direction() {
+        // same sharpe/return: deep strike (high safety) outscores shallow
+        let shallow = calculate_put_score(1.5, 0.10, 0.45, 1.05, 1.05, &bull_regime()).unwrap();
+        let deep = calculate_put_score(1.5, 0.90, 0.45, 1.05, 1.05, &bull_regime()).unwrap();
+        assert!(deep > shallow);
     }
 
     #[test]
@@ -669,30 +712,39 @@ mod tests {
     }
 
     #[test]
-    fn test_put_score_clamps_negative_percentile() {
-        // strike below 20-day min -> negative percentile -> should clamp to 0.0
-        // sharpe_norm=1.0, safety_norm=1.0, return_norm=(0.35/0.80).min(1.0) = 0.4375
-        // score = 0.20*1.0 + 0.40*1.0 + 0.40*0.4375 = 0.20 + 0.40 + 0.175 = 0.775
+    fn test_put_score_clamps_safety() {
+        // safety below 0 clamps to 0.0 (shallow/risky end)
+        // sharpe=2.0 -> sharpe_norm=1.0, safety_norm=0.0, return_norm=(0.35/0.80)=0.4375
+        // score = 0.20*1.0 + 0.40*0.0 + 0.40*0.4375 = 0.375
         let score = calculate_put_score(2.0, -0.10, 0.35, 1.05, 1.05, &bull_regime()).unwrap();
-        assert!((score - 0.775).abs() < 0.01);
+        assert!((score - 0.375).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_high_sharpe_clamps() {
-        // sharpe > 2.0 should clamp sharpe_norm to 1.0
+        // sharpe > 2.0 clamps sharpe_norm to 1.0; deep strike safety=1.0
         // sharpe_norm=1.0, safety_norm=1.0, return_norm=0.4375
-        // score = 0.775
-        let score = calculate_put_score(5.0, 0.0, 0.35, 1.05, 1.05, &bull_regime()).unwrap();
+        // score = 0.20 + 0.40 + 0.175 = 0.775
+        let score = calculate_put_score(5.0, 1.0, 0.35, 1.05, 1.05, &bull_regime()).unwrap();
         assert!((score - 0.775).abs() < 0.01);
     }
 
     #[test]
-    fn test_put_score_peak_return() {
-        // return exactly at 0.80 -> return_norm = 1.0
-        // sharpe=2.0 -> sharpe_norm=1.0, percentile=0.0 -> safety_norm=1.0
+    fn test_put_score_peak() {
+        // deep strike (safety=1.0), sharpe=2.0 (clamped 1.0), return=0.80 (return_norm=1.0)
         // score = 0.20 + 0.40 + 0.40 = 1.00
-        let score = calculate_put_score(2.0, 0.0, 0.80, 1.05, 1.05, &bull_regime()).unwrap();
+        let score = calculate_put_score(2.0, 1.0, 0.80, 1.05, 1.05, &bull_regime()).unwrap();
         assert!((score - 1.00).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_put_score_return_soft_cap() {
+        // return above IDEAL_RETURN saturates return_norm at 1.0: no extra
+        // credit, but still accepted (no hard cap).
+        let at_cap = calculate_put_score(2.0, 1.0, 0.80, 1.05, 1.05, &bull_regime()).unwrap();
+        let above_cap = calculate_put_score(2.0, 1.0, 2.00, 1.05, 1.05, &bull_regime()).unwrap();
+        assert!((at_cap - above_cap).abs() < 1e-9);
+        assert!((at_cap - 1.00).abs() < 0.01);
     }
 
     fn make_chain(underlying: &str, strike: f64, rate_of_return: f64) -> OptionStrikeCandle {

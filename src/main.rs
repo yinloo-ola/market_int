@@ -49,6 +49,9 @@ mod store {
 mod constants;
 // Consolidated metrics pipeline
 mod metrics;
+// Transient experiment harnesses (remove after decisions land).
+#[cfg(test)]
+mod experiments;
 
 // Backtest simulation
 mod backtest;
