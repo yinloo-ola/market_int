@@ -4,17 +4,19 @@
 
 📋 *Field Reference*
 
-• `rate_of_return` — Annualised premium yield. `(mid price / strike) ÷ weeks to expiry × 52`. Good: 0.25–0.80
+• `rate_of_return` — Annualised premium yield. `(mid price / strike) ÷ weeks to expiry × 52`. Good: ≥ 0.25 (no upper cap — higher return = more reward, soft-capped in the score at 80%)
 
 • `sharpe_ratio` — Risk-adjusted return of the underlying stock. Higher = better reward per unit of risk. Good: > 1.0
 
-• `strike_percentile` — Where the strike sits within the stock's expected support range. 0 = deep support, 1 = at resistance. Good: ≤ 0.40
+• `strike_percentile` — Where the strike sits within the 20-day price range. **Diagnostic only — not used in scoring.** 0 = at the 20-day low, 1 = at the 20-day high.
+
+• `strike_from` / `strike_to` — The max_drop band: the deep (safe) and shallow (risky) strike boundaries derived from the stock's historical drawdowns. A strike near `strike_from` is rarely breached; near `strike_to` is frequently breached.
 
 • `trend_short` — Where current price sits relative to its 20-day EMA. > 1.0 = above trend, < 1.0 = below trend. Good: > 0.98
 
 • `trend_long` — Where current price sits relative to its 50-day EMA. Captures intermediate trend direction. Good: > 0.98
 
-• `score` — Composite quality score (0–1). Combines strike safety (40%), return quality (40%), Sharpe (20%). Options failing pre-filters are blank. Good: > 0.6
+• `score` — Composite quality score (0–1). Combines max_drop-band safety (40%), return quality (40%), Sharpe (20%). Options failing pre-filters are blank. Good: > 0.6
 
 • `price_percentile` — Where current price sits within its 20-day range. Drives momentum flag: NORMAL (≤80%), HIGH (80–90%), EXTENDED (>90%). Good: ≤ 0.80
 
@@ -30,17 +32,17 @@
 
 3️⃣ `price_percentile ≤ 0.80` — Stock trading at top of range = overextended. Stick to NORMAL momentum.
 
-4️⃣ `rate_of_return` between 0.25 and 0.80 — Below 0.25 not worth capital. Above 0.80 = market pricing in high risk.
+4️⃣ `rate_of_return` ≥ 0.25 — Below 0.25 not worth the capital. No upper limit: a high return is a reward, not a danger signal (danger comes from the max_drop band, reflected in the score).
 
 ━━━━━━━━━━━━━━━━━━
 
 📊 *Score Breakdown*
 
-🛡 Safety (strike percentile) — 40%
-Lower strike vs support = more room before you're at risk.
+🛡 Safety (max_drop band) — 40%
+Strike near `strike_from` (deep, rare historical drop) = safer. Strike near `strike_to` (shallow, typical drop) = riskier.
 
 💰 Return quality — 40%
-Soft-cap at 80% annualised. Higher returns are proportionally rewarded up to the cap.
+Soft-cap at 80% annualised. Rewarded up to 80%; above 80% still accepted (no penalty, no exclusion).
 
 📊 Sharpe ratio — 20%
 Historical risk-adjusted return quality.
@@ -49,7 +51,7 @@ Historical risk-adjusted return quality.
 
 🚩 *Red Flags — Avoid These*
 
-❌ `score` is blank — Failed pre-filter. Return too low/high, negative Sharpe, or strike above resistance.
+❌ `score` is blank — Failed pre-filter: return below 0.25 or non-positive Sharpe.
 
 ❌ `earnings_before_expiry` has a date — Stock can gap well below your strike.
 

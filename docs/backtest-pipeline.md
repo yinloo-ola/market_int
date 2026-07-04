@@ -27,7 +27,7 @@ The `backtest` subcommand is a **historical simulation engine** that replays the
 ├─────────────────────────────────────┤
 │  2. Read symbols & sectors          │  Load from symbols file + sector mappings
 ├─────────────────────────────────────┤
-│  3. Resolve config(s)               │  "all" → 35 presets, or single named config
+│  3. Resolve config(s)               │  "all" → 38 presets, or single named config
 ├─────────────────────────────────────┤
 │  4. For each config:                │
 │  ┌─────────────────────────────────┐│
@@ -86,7 +86,7 @@ The `backtest` subcommand is a **historical simulation engine** that replays the
 **Source:** `src/main.rs:527–558`
 
 **What it does:**
-1. If `--config all`, loads all **35 preset configurations** from `BacktestConfig::all_presets()`.
+1. If `--config all`, loads all **38 preset configurations** from `BacktestConfig::all_presets()`.
 2. If a named config (e.g., `"control"`), loads that single preset.
 3. The optional `--period` flag overrides the default `period` (5) for all resolved configs.
 
@@ -160,8 +160,8 @@ For each non-SPY symbol:
    - `sigma = historical_vol × iv_multiplier` (default 1.3× to simulate the IV > HV premium typical in real markets).
    - Calls `black_scholes_put(price, strike, T, risk_free_rate, dividend_yield, iv_vol)`.
 6. **Compute rate of return** using `compute_rate_of_return(premium, strike, dte)` — matches Tiger API's formula: `premium / strike / num_of_weeks × 52`.
-7. **Compute strike percentile** via `calculate_strike_percentile()` using the last 20 days of close prices (same as live pipeline).
-8. **Score each candidate** via `config.score_candidate()` — applies the config's pre-filters and weighted scoring formula.
+7. **Compute strike percentile** via `calculate_strike_percentile()` using the last 20 days of close prices. Used only by `StrikePercentile` configs (and as a diagnostic); `MaxDropBand` configs ignore it.
+8. **Score each candidate** via `config.score_candidate(sharpe, strike_pct, rate_of_return, trend_short, trend_long, regime, band_safety)` — applies the config's pre-filters and weighted scoring. `band_safety = calculate_max_drop_safety(strike, min_strike, max_strike)` is computed only when `safety_source == MaxDropBand` (skipped otherwise). Under `MaxDropBand`, safety = band position and the `rate>max` / `strike_percentile>max` pre-filters are skipped, matching production.
 
 **Intent:**
 - **Synthetically replicate the live pipeline** without calling any external API. Black-Scholes replaces the Tiger option chain API. All indicator calculations are identical to the live code, ensuring the backtest faithfully represents what the model would have picked.
@@ -244,13 +244,16 @@ Also breaks down picks by regime (Bull / Correction / Bear) with per-regime assi
 
 ## Configuration Presets (Ablation Matrix)
 
-The backtest ships with **35 presets** organized into experimental groups:
+The backtest ships with **38 presets** organized into experimental groups:
 
-### Baseline
+### Baseline & Production Mirror
 
 | Config | Description |
 |---|---|
-| `control` | Production defaults with all features enabled (trend, regime, symmetric scoring) |
+| `control` | Research baseline — all features enabled (trend, regime, symmetric scoring, `StrikePercentile` safety). **Not** a mirror of live production scoring. |
+| `production-mirror` | Faithful mirror of the **live production** scoring after the 2026-07 redesign: `MaxDropBand` safety, weights 0.40/0.40/0.20 (no trend), `AsymmetricStatic` (`ideal_return=0.80`), no hard caps, no trend pre-filters, `drop_percentile=0.97`, `risk_free_rate=0`. A pinning test asserts its `score_candidate` equals `model::calculate_put_score`. |
+
+> **`SafetySource`** (added 2026-07): each config selects the safety dimension — `StrikePercentile` (old: `1 − strike_percentile`, with `rate>max` and `strike_percentile>max` pre-filters) or `MaxDropBand` (new: position in `[strike_from, strike_to]`, no hard caps — matches production). `control` and the ablation presets use `StrikePercentile`; only `production-mirror` uses `MaxDropBand`.
 
 ### Ablation: Trend Features
 
@@ -354,7 +357,7 @@ The backtest uses a **Black-Scholes put pricer** instead of live option chain da
               ▼            ▼                    ▼
      ┌────────────────┐  ┌──────────────┐  ┌──────────────┐
      │ SQLite (read)  │  │ BacktestConfig│  │ Sector map   │
-     │ candles (850d) │  │ (35 presets)  │  │ (from CSV)   │
+     │ candles (850d) │  │ (38 presets)  │  │ (from CSV)   │
      └───────┬────────┘  └──────┬───────┘  └──────┬───────┘
              │                  │                  │
              ▼                  ▼                  ▼
@@ -404,7 +407,7 @@ This ensures that even if some symbols lack data, the backtest still produces re
 | **Weekly (Monday) cadence** | Matches the typical put-selling cycle: enter Monday, expire Friday. Also keeps simulation count manageable. |
 | **No look-ahead** | Candles are sliced at each sim_date so indicators only use past data. SPY regime is recomputed per sim_date. |
 | **$0.50 strike intervals** | Standard US equity option strike increment for most underlyings. |
-| **35 config presets** | Enables systematic ablation testing to identify which features (trend, regime, safety weight, etc.) contribute most to performance. |
+| **38 config presets** | Enables systematic ablation testing to identify which features (trend, regime, safety weight, etc.) contribute most to performance. |
 | **Top-3 dedup** | Same symbol + sector diversity as live pipeline — tests the real selection logic. |
 | **Net P&L tracking** | Goes beyond just scoring — measures actual profit/loss including assignment scenarios. |
 | **Regime breakdown** | Metrics are segmented by Bull/Correction/Bear to show whether configs perform differently across market conditions. |

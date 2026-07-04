@@ -68,7 +68,7 @@ The `perform-all` subcommand is the **full end-to-end pipeline** of `market_int`
    - For each 5-day window, tracks the highest high (`peak`) and finds the largest peak-to-trough drop: `max_drop = (peak - low) / trough`.
    - This produces a series of max-drop values — one per overlapping window.
 4. From these rolling max-drops, it computes two summary statistics:
-   - **`percentile_drop`**: The 90th percentile of all rolling max-drops (via `atr::percentile()` with `PERCENTILE = 0.9`). This represents the "worst case" drop that occurs ~10% of the time.
+   - **`percentile_drop`**: The 97th percentile of all rolling max-drops (`PERCENTILE = 0.97`). This represents the "worst case" drop that occurs ~3% of the time, and defines the **deep (safe) end** of the put strike range.
    - **`ema_drop`**: A 5-period exponential moving average of the rolling max-drops. This represents the "recent average" max drop.
 5. Saves `(symbol, period=5, percentile_drop, ema_drop, timestamp)` to SQLite.
 
@@ -300,23 +300,23 @@ Calls `publish_to_telegram()`, which orchestrates:
 
 ##### 10f-i. Score every option chain
 `model::option_chain_to_csv_vec()` processes each `OptionStrikeCandle`:
-1. **Strike percentile**: `calculate_strike_percentile(strike, min_price_20d, max_price_20d)` — where does this strike sit within the 20-day price range? A percentile of 0.0 means the strike equals the 20-day low (deeply in-the-money); 1.0 means it equals the 20-day high.
-2. **Composite score** via `calculate_put_score(sharpe, strike_percentile, rate_of_return, trend_short, trend_long, regime)`:
+1. **Strike percentile** (diagnostic only): `calculate_strike_percentile(strike, min_price_20d, max_price_20d)` — where the strike sits within the 20-day price range. **No longer used for scoring** (kept as a CSV column for context); safety now comes from the max_drop band (next).
+2. **Band safety**: `calculate_max_drop_safety(strike, strike_from, strike_to)` — the strike's position within the max_drop band `[strike_from, strike_to]` (the range computed in 10c-v from `ema_drop`/`percentile_drop`, scaled by DTE). Returns 1.0 at the deep end (`strike_from` — rarely breached), 0.0 at the shallow end (`strike_to` — frequently breached).
+3. **Composite score** via `calculate_put_score(sharpe, safety, rate_of_return, &regime)` (regime accepted but ignored):
       - **Pre-filters** (any failure → `None`, excluded from picks):
-        - `rate_of_return ∈ [0.25, 0.80]` — avoids too-small premiums and too-risky puts.
+        - `rate_of_return ≥ MIN_RATE_OF_RETURN (0.25)` — floor on worthwhile premiums. **No upper cap** — a high return is a reward, not a danger signal (danger is expressed via band safety).
         - `sharpe > 0` — only stocks with positive risk-adjusted returns.
-        - `strike_percentile ≤ 0.40` — strike must be in the lower 40% of the 20-day range.
-        - Note: trend pre-filters were removed — trend data is collected and displayed but not scored.
+        - Note: the old `rate_of_return > 0.80` and `strike_percentile > 0.40` pre-filters were **removed** in the 2026-07 redesign. Trend is collected/displayed but not scored.
       - **Score formula** (static weights, regime-independent):
         ```
-        score = 0.20 × sharpe_norm + 0.40 × safety_norm + 0.40 × return_norm
+        score = 0.20 × sharpe_norm + 0.40 × safety + 0.40 × return_norm
         
         where:
           sharpe_norm = clamp(sharpe / 2.0, 0..1)
-          safety_norm = 1.0 − clamp(strike_percentile, 0..∞)
-          return_norm = (rate_of_return / IDEAL_RETURN).min(1.0)  (IDEAL_RETURN = 0.80, asymmetric soft-cap)
+          safety      = band position in [strike_from, strike_to]  (deep end = 1.0)
+          return_norm = (rate_of_return / IDEAL_RETURN).min(1.0)  (IDEAL_RETURN = 0.80; soft-cap — no further credit above, but no exclusion)
         ```
-      - The ideal put has: high Sharpe (consistent winner), low strike percentile (safe, near support), and high annualized return up to 80%.
+      - The ideal put has: high Sharpe, a strike deep within the max_drop band (rarely breached), and a high annualized return (rewarded up to 80%, accepted beyond).
 
 ##### 10f-ii. Select Top 3 picks with diversity
 - All scored options are sorted by score (descending).
@@ -450,7 +450,7 @@ match step_function(...) {
 |---|---|
 | **850-day candle history** | Enough for meaningful 50-day EMA and multi-year backtesting. |
 | **Batches of 10** | Tiger API rate limit per request. 1s sleep between batches. |
-| **90th percentile max drop** | Captures tail risk without being dominated by extreme outliers. |
+| **97th percentile max drop** | Captures tail risk without being dominated by extreme outliers; defines the deep/safe end of the strike range. |
 | **Hardcoded bull regime** | Saves an API call in the full pipeline. Standalone commands (`pull-option-chain-5-day`) use dynamic SPY checks. |
 | **Static scoring weights** (40/40/20) | Simplifies the model. Regime-based dynamic weights were removed after testing showed static weights performed better in backtests. |
 | **Sector diversity in top 3** | Prevents concentration risk — e.g., 3 tech puts all dropping on the same NASDAQ selloff. |
@@ -467,15 +467,15 @@ All tunable parameters are centralized in `src/constants.rs`:
 |---|---|---|
 | `CANDLE_COUNT` | 850 | Number of daily candles fetched |
 | `MIN_OPEN_INTEREST` | 50 | Minimum OI for option chain queries |
-| `PERCENTILE` | 0.9 | 90th percentile for max drop and ATR |
+| `PERCENTILE` | 0.97 | 97th percentile for max drop — defines the deep/safe end of the strike range |
 | `SHARPE_MIN_CANDLES` | 14 | Minimum candles for Sharpe calculation |
 | `DEFAULT_RISK_FREE_RATE` | 0.0 | Risk-free rate for Sharpe (effectively raw return/vol) |
 | `PRICE_PERCENTILE_DAYS` | 20 | Window for price percentile |
 | `EMA_SHORT_PERIOD` | 20 | Short EMA for trend |
 | `EMA_LONG_PERIOD` | 50 | Long EMA for trend |
 | `MIN_RATE_OF_RETURN` | 0.25 | Pre-filter: minimum put return |
-| `MAX_RATE_OF_RETURN` | 0.80 | Pre-filter: maximum put return |
-| `MAX_STRIKE_PERCENTILE` | 0.40 | Pre-filter: max strike percentile |
+| `MAX_RATE_OF_RETURN` | 0.80 | Unused in production scoring since the 2026-07 redesign (no upper cap); still referenced by backtest presets |
+| `MAX_STRIKE_PERCENTILE` | 0.40 | Unused in production scoring since the 2026-07 redesign; still referenced by backtest presets |
 | `IDEAL_RETURN` | 0.80 | Asymmetric soft-cap for return norm (no penalty above it) |
 | `BEARNESS_MAX` | 0.08 | SPY drop mapping to full bear (8% below EMA50) |
 
