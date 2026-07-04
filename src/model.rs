@@ -337,8 +337,11 @@ pub fn option_chain_to_csv_vec(
         let sharpe_ratio = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
         let price_percentile = price_percentiles.get(&chain.underlying).copied();
 
-        // Safety from the max_drop band (always available — stored per chain);
-        // strike_percentile stays as a CSV-only diagnostic (needs 20-day range).
+        // Safety from the max_drop band (always available — stored per chain).
+        // NOTE (T-002): scoring is no longer gated on a 20-day price_range, so
+        // every chain receives a score and is eligible for top-3 even when its
+        // 20-day range is missing (then `strike_percentile` below is blank).
+        // The band safety doesn't need the 20-day range — this is intentional.
         let safety =
             calculate_max_drop_safety(chain.strike, chain.strike_from, chain.strike_to);
         let score =
