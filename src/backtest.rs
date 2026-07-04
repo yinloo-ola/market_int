@@ -1132,8 +1132,11 @@ pub fn run_backtest(
                 let rate_of_return = compute_rate_of_return(premium, strike, dte);
                 let strike_pct =
                     model::calculate_strike_percentile(strike, range_min, range_max);
-                let band_safety =
-                    model::calculate_max_drop_safety(strike, min_strike, max_strike);
+                let band_safety = if config.safety_source == SafetySource::MaxDropBand {
+                    model::calculate_max_drop_safety(strike, min_strike, max_strike)
+                } else {
+                    0.0 // unused by score_candidate under StrikePercentile
+                };
                 let sector = crate::sectors::sector_of(sectors, symbol);
 
                 match config.score_candidate(
