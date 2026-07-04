@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Lowered `MIN_RATE_OF_RETURN` from 0.30 to 0.25 to increase search-space flexibility, and lowered `MAX_STRIKE_PERCENTILE` from 0.60 to 0.40 to guarantee deeply out-of-the-money safety margins.
+- **Put-option safety is now derived from the max_drop band** (`calculate_max_drop_safety` over `[strike_from, strike_to]`) instead of the 20-day `strike_percentile`. Deep strikes (rarely-breached historical drops) now score highest; the score and the strike-range filter agree on what "safe" means.
+- `PERCENTILE` raised 0.9 → 0.97 — wider strike bands (median 5-day band ~2.4% → ~5.3%), fixing narrow-band cases where calm stocks had no candidate strikes.
+- Backtest: added `SafetySource` (`StrikePercentile` / `MaxDropBand`) and a `production-mirror` preset that faithfully reproduces live scoring (pinned by a regression test).
+
+### Removed
+
+- The `rate_of_return > 0.80` hard cap and the `strike_percentile > 0.40` pre-filter from put scoring. `rate_of_return` is now a pure soft-capped reward (no upper exclusion); danger is expressed entirely via the max_drop band. `strike_percentile` remains in the CSV as a diagnostic.
 
 ## [0.7.0] - 2026-05-16
 

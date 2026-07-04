@@ -1,18 +1,30 @@
 # Lessons Learned
 
 <!--
-Agent: read this at the start of each task during executing-tasks.
+Agent: read this at the start of each task during ptk-execute.
 Follow every rule. Add new rules when you catch yourself making repeat mistakes.
+Rules must be generic patterns applicable to any domain or feature — not
+specific to one service, entity, or use case.
 Retire rules that no longer apply during finalizing.
 -->
 
 ## Rules
 
-- When adding columns to SQLite tables, `CREATE TABLE IF NOT EXISTS` won't alter existing tables. Always add an `ALTER TABLE ADD COLUMN` migration (with `.ok()` to ignore "column already exists" errors).
-- The `telegram-bot-api` crate's multipart upload serializes JSON values via `.to_string()`, which double-escapes newlines in captions. Send caption as a separate `sendMessage` instead.
-- When using constants, replace ALL magic numbers — don't leave some hardcoded and some constant.
-- API responses may not be arrays. Check the actual shape (e.g., a map keyed by dates) before parsing.
-- The `edit` tool requires exact whitespace matching. When oldText fails, use `cat -v -e -t` or `xxd` to inspect invisible characters like double newlines.
-- When testing continuous ranges with boundary assertions (e.g., `bearness == 0.50`), account for floating-point imprecision. Use tolerance (`abs() < epsilon`) or test at exact integer multiples rather than trusting division to produce clean values.
-- In a refactor, when consolidating orchestration into a single function, every metric's data window must be preserved exactly. Fetch once with the max window, then slice for shorter windows. Verify each metric's original fetch count against the new shared buffer.
-- "Load once, pass slices" beats "each helper fetches its own" — it keeps helpers as pure compute+save, centralizes I/O, and avoids redundant database reads.
+- (append new rules here during execution)
+
+## Tool Usage
+
+- The workflow guard commits the **entire working tree** on `git commit`, not just staged paths. Before committing, `git restore` or stash unrelated changes, and always verify with `git show --stat HEAD` that only the intended files landed.
+- For portable bulk in-place edits (e.g., stripping a uniform argument suffix from many call sites), use `perl -i -pe 's/.../.../g'`. macOS `sed -i` requires an empty backup arg (`-i ''`) and otherwise silently mis-parses the command.
+- Before documenting a count (presets, configs, table rows), measure it (`grep -c` / `awk`) — stale counts in prose are common and erode trust in the docs.
+
+## Testing Patterns
+
+- When the same logic exists in two places (e.g., a production scorer and a research/backtest copy), add a **pinning regression test** asserting they produce identical output on a shared input vector. It catches divergence the moment either side is edited — far cheaper than de-duplicating the implementations.
+- A pure refactor (removing already-unused parameters, reordering) legitimately produces **zero** test reds — that is correct, not suspicious. "Zero reds is suspicious" applies to *behavior*-changing edits, not signature cleanups where call sites are merely updated for compilation.
+
+## Architecture Rules
+
+- Keep the "research baseline" and the "production mirror" configs distinct and named honestly. A backtest `control` that diverges from production scoring will mislead anyone who reads its results as the live strategy's performance — always provide an explicit, pinned mirror.
+- A function parameter that is accepted but ignored is a **false contract**. Prefix it `_` immediately; if full removal's cascade is large, schedule removal as its own task rather than leaving the false seam in place.
+- When a hard cutoff (e.g., a max-value reject) and a continuous score dimension encode the same idea (e.g., "danger"), pick **one**. Keeping both lets them disagree silently and discards the cases where they disagree for good reasons (e.g., a high value that a continuous model correctly rates as safe).
