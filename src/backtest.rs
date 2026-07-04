@@ -191,6 +191,30 @@ impl BacktestConfig {
         }
     }
 
+    /// Mirrors the live production scoring after the 2026-07 redesign: max_drop
+    /// band safety, weights 0.40/0.40/0.20 (no trend), AsymmetricStatic return
+    /// (ideal_return=0.80), no hard caps, no trend pre-filters, no strike-range
+    /// tightening (production hardcodes trend_factor=1.0), drop_percentile=0.97.
+    pub fn production_mirror() -> Self {
+        Self {
+            name: "production-mirror".to_string(),
+            safety_source: SafetySource::MaxDropBand,
+            scoring_type: ScoringType::AsymmetricStatic,
+            weight_sharpe: 0.20,
+            weight_safety: 0.40,
+            weight_return: 0.40,
+            weight_trend: 0.0,
+            use_trend_in_score: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_factor: false,
+            ideal_return: constants::IDEAL_RETURN,
+            drop_percentile: constants::PERCENTILE,
+            min_rate_of_return: constants::MIN_RATE_OF_RETURN,
+            ..Self::control()
+        }
+    }
+
     /// No trend factor — strike range never tightened.
     pub fn no_trend_factor() -> Self {
         Self {
@@ -720,6 +744,7 @@ impl BacktestConfig {
         vec![
             Self::control(),
             Self::new_strategy(),
+            Self::production_mirror(),
             Self::no_trend_factor(),
             Self::no_trend_long(),
             Self::no_trend_score(),
