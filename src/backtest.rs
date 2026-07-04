@@ -1639,6 +1639,33 @@ mod tests {
     }
 
     #[test]
+    fn test_production_mirror_matches_calculate_put_score() {
+        // Pin (verification report O-001): production_mirror's score_candidate
+        // must equal calculate_put_score for the same inputs — both encode the
+        // shipped production scoring. Catches divergence if either is edited
+        // without the other.
+        let config = BacktestConfig::production_mirror();
+        let regime = config.build_regime(1.05);
+        for &(sharpe, safety, rate) in &[
+            (1.5_f64, 0.95, 0.45),
+            (2.0, 1.0, 0.80),
+            (0.5, 0.10, 0.30),
+            (1.8, 0.50, 0.85),
+            (3.0, 0.20, 5.0),
+        ] {
+            let bt = config
+                .score_candidate(sharpe, 0.5, rate, 1.03, 1.04, &regime, safety)
+                .unwrap();
+            let prod =
+                model::calculate_put_score(sharpe, safety, rate, &regime).unwrap();
+            assert!(
+                (bt - prod).abs() < 1e-9,
+                "divergence at sharpe={sharpe} safety={safety} rate={rate}: backtest={bt} prod={prod}"
+            );
+        }
+    }
+
+    #[test]
     fn test_all_presets_have_valid_names() {
         for config in BacktestConfig::all_presets() {
             assert!(!config.name.is_empty(), "preset name should not be empty");
