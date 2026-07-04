@@ -180,17 +180,6 @@ impl BacktestConfig {
         }
     }
 
-    /// New strategy (2026-07 redesign): max_drop band safety, no hard rate/sp
-    /// caps. Otherwise identical to `control()` to isolate the safety-source
-    /// variable when swept side-by-side in `all_presets()`.
-    pub fn new_strategy() -> Self {
-        Self {
-            name: "new-strategy".to_string(),
-            safety_source: SafetySource::MaxDropBand,
-            ..Self::control()
-        }
-    }
-
     /// Mirrors the live production scoring after the 2026-07 redesign: max_drop
     /// band safety, weights 0.40/0.40/0.20 (no trend), AsymmetricStatic return
     /// (ideal_return=0.80), no hard caps, no trend pre-filters, no strike-range
@@ -743,7 +732,6 @@ impl BacktestConfig {
     pub fn all_presets() -> Vec<Self> {
         vec![
             Self::control(),
-            Self::new_strategy(),
             Self::production_mirror(),
             Self::no_trend_factor(),
             Self::no_trend_long(),
@@ -1645,35 +1633,6 @@ mod tests {
             score > 0.0 && score <= 1.0,
             "score should be in [0,1], got {}",
             score
-        );
-    }
-
-    #[test]
-    fn test_new_strategy_uses_band_safety_and_no_cap() {
-        let config = BacktestConfig::new_strategy();
-        let regime = config.build_regime(1.05);
-        // deep strike (band safety 0.95) outscores shallow (0.10), all else equal
-        let deep = config
-            .score_candidate(1.5, 0.9, 0.35, 1.03, 1.04, &regime, 0.95)
-            .unwrap();
-        let shallow = config
-            .score_candidate(1.5, 0.9, 0.35, 1.03, 1.04, &regime, 0.10)
-            .unwrap();
-        assert!(deep > shallow, "deep strike should score higher");
-        // rate=0.85 > max_rate_of_return (0.80) would be rejected by the old
-        // contract, but new_strategy (MaxDropBand) accepts it.
-        assert!(
-            config
-                .score_candidate(1.5, 0.9, 0.85, 1.03, 1.04, &regime, 0.5)
-                .is_some(),
-            "new strategy should not apply the hard rate cap"
-        );
-        // strike_percentile>max would reject under the old contract; ignored here.
-        assert!(
-            config
-                .score_candidate(1.5, 0.95, 0.35, 1.03, 1.04, &regime, 0.5)
-                .is_some(),
-            "new strategy should not apply the strike_percentile cap"
         );
     }
 
