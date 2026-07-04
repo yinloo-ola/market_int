@@ -79,6 +79,18 @@ pub enum ScoringType {
     AsymmetricDynamic, // Combined: min(1.0, return / target_return_regime)
 }
 
+/// Source of the safety dimension in `score_candidate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SafetySource {
+    /// Old contract: safety = 1 − strike_percentile (vs 20-day price range),
+    /// with rate>max and strike_percentile>max pre-filters.
+    StrikePercentile,
+    /// New contract (2026-07 redesign): safety = position within the max_drop
+    /// band [strike_from, strike_to]; the rate>max and strike_percentile>max
+    /// pre-filters are skipped (danger comes from the band).
+    MaxDropBand,
+}
+
 /// Captures every tunable parameter for the backtest.
 /// Each preset represents a hypothesis to test via ablation.
 #[derive(Debug, Clone)]
@@ -86,6 +98,7 @@ pub struct BacktestConfig {
     pub name: String,
     pub period: usize,
     pub scoring_type: ScoringType,
+    pub safety_source: SafetySource,
 
     // Strike range
     pub use_trend_factor: bool,
@@ -137,6 +150,7 @@ impl BacktestConfig {
             name: "control".to_string(),
             period: 5,
             scoring_type: ScoringType::Symmetric,
+            safety_source: SafetySource::StrikePercentile,
             use_trend_factor: true,
             trend_tighten_multiplier: constants::TREND_TIGHTEN_MULTIPLIER,
             trend_tighten_cap: constants::TREND_TIGHTEN_CAP,
@@ -163,6 +177,17 @@ impl BacktestConfig {
             drop_percentile: constants::PERCENTILE,
             ideal_return: 0.35,
             return_bandwidth: 0.20,
+        }
+    }
+
+    /// New strategy (2026-07 redesign): max_drop band safety, no hard rate/sp
+    /// caps. Otherwise identical to `control()` to isolate the safety-source
+    /// variable when swept side-by-side in `all_presets()`.
+    pub fn new_strategy() -> Self {
+        Self {
+            name: "new-strategy".to_string(),
+            safety_source: SafetySource::MaxDropBand,
+            ..Self::control()
         }
     }
 
@@ -694,6 +719,7 @@ impl BacktestConfig {
     pub fn all_presets() -> Vec<Self> {
         vec![
             Self::control(),
+            Self::new_strategy(),
             Self::no_trend_factor(),
             Self::no_trend_long(),
             Self::no_trend_score(),
@@ -785,18 +811,24 @@ impl BacktestConfig {
         trend_ratio_short: f64,
         trend_ratio_long: f64,
         regime: &crate::regime::MarketRegime,
+        max_drop_safety: f64,
     ) -> Option<f64> {
-        // Pre-filters
-        if rate_of_return < self.min_rate_of_return
-            || rate_of_return > self.max_rate_of_return
-        {
+        // Pre-filters. The rate>max and strike_percentile>max caps belong to
+        // the OLD (StrikePercentile) contract; the new (MaxDropBand) contract
+        // drops them — danger is expressed via the band position.
+        if rate_of_return < self.min_rate_of_return {
             return None;
         }
         if sharpe <= 0.0 {
             return None;
         }
-        if strike_percentile > self.max_strike_percentile {
-            return None;
+        if self.safety_source == SafetySource::StrikePercentile {
+            if rate_of_return > self.max_rate_of_return {
+                return None;
+            }
+            if strike_percentile > self.max_strike_percentile {
+                return None;
+            }
         }
         if self.use_trend_short_filter && trend_ratio_short < regime.trend_threshold {
             return None;
@@ -806,7 +838,10 @@ impl BacktestConfig {
         }
 
         let sharpe_norm = (sharpe / 2.0).clamp(0.0, 1.0);
-        let safety_norm = 1.0 - strike_percentile.max(0.0);
+        let safety_norm = match self.safety_source {
+            SafetySource::MaxDropBand => max_drop_safety.clamp(0.0, 1.0),
+            SafetySource::StrikePercentile => 1.0 - strike_percentile.max(0.0),
+        };
         let return_norm = match self.scoring_type {
             ScoringType::Symmetric => {
                 (1.0 - (rate_of_return - self.ideal_return).abs() / self.return_bandwidth).clamp(0.0, 1.0)
@@ -1082,6 +1117,8 @@ pub fn run_backtest(
                 let rate_of_return = compute_rate_of_return(premium, strike, dte);
                 let strike_pct =
                     model::calculate_strike_percentile(strike, range_min, range_max);
+                let band_safety =
+                    model::calculate_max_drop_safety(strike, min_strike, max_strike);
                 let sector = crate::sectors::sector_of(sectors, symbol);
 
                 match config.score_candidate(
@@ -1091,6 +1128,7 @@ pub fn run_backtest(
                     trend_short,
                     trend_long,
                     &regime,
+                    band_safety,
                 ) {
                     Some(score) => {
                         candidates.push((
@@ -1564,7 +1602,7 @@ mod tests {
     fn test_score_rejects_below_min_return() {
         let config = BacktestConfig::control();
         let regime = config.build_regime(1.05);
-        let result = config.score_candidate(1.5, 0.1, 0.10, 1.03, 1.04, &regime);
+        let result = config.score_candidate(1.5, 0.1, 0.10, 1.03, 1.04, &regime, 0.5);
         assert!(
             result.is_none(),
             "should reject rate_of_return below 0.25"
@@ -1575,13 +1613,42 @@ mod tests {
     fn test_score_accepts_valid() {
         let config = BacktestConfig::control();
         let regime = config.build_regime(1.05);
-        let result = config.score_candidate(1.5, 0.1, 0.35, 1.03, 1.04, &regime);
+        let result = config.score_candidate(1.5, 0.1, 0.35, 1.03, 1.04, &regime, 0.5);
         assert!(result.is_some(), "should accept valid candidate");
         let score = result.unwrap();
         assert!(
             score > 0.0 && score <= 1.0,
             "score should be in [0,1], got {}",
             score
+        );
+    }
+
+    #[test]
+    fn test_new_strategy_uses_band_safety_and_no_cap() {
+        let config = BacktestConfig::new_strategy();
+        let regime = config.build_regime(1.05);
+        // deep strike (band safety 0.95) outscores shallow (0.10), all else equal
+        let deep = config
+            .score_candidate(1.5, 0.9, 0.35, 1.03, 1.04, &regime, 0.95)
+            .unwrap();
+        let shallow = config
+            .score_candidate(1.5, 0.9, 0.35, 1.03, 1.04, &regime, 0.10)
+            .unwrap();
+        assert!(deep > shallow, "deep strike should score higher");
+        // rate=0.85 > max_rate_of_return (0.80) would be rejected by the old
+        // contract, but new_strategy (MaxDropBand) accepts it.
+        assert!(
+            config
+                .score_candidate(1.5, 0.9, 0.85, 1.03, 1.04, &regime, 0.5)
+                .is_some(),
+            "new strategy should not apply the hard rate cap"
+        );
+        // strike_percentile>max would reject under the old contract; ignored here.
+        assert!(
+            config
+                .score_candidate(1.5, 0.95, 0.35, 1.03, 1.04, &regime, 0.5)
+                .is_some(),
+            "new strategy should not apply the strike_percentile cap"
         );
     }
 
