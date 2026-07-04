@@ -183,7 +183,8 @@ impl BacktestConfig {
     /// Mirrors the live production scoring after the 2026-07 redesign: max_drop
     /// band safety, weights 0.40/0.40/0.20 (no trend), AsymmetricStatic return
     /// (ideal_return=0.80), no hard caps, no trend pre-filters, no strike-range
-    /// tightening (production hardcodes trend_factor=1.0), drop_percentile=0.97.
+    /// tightening (production hardcodes trend_factor=1.0), drop_percentile=0.97,
+    /// risk_free_rate=0 (production DEFAULT_RISK_FREE_RATE).
     pub fn production_mirror() -> Self {
         Self {
             name: "production-mirror".to_string(),
@@ -200,6 +201,7 @@ impl BacktestConfig {
             ideal_return: constants::IDEAL_RETURN,
             drop_percentile: constants::PERCENTILE,
             min_rate_of_return: constants::MIN_RATE_OF_RETURN,
+            risk_free_rate: constants::DEFAULT_RISK_FREE_RATE,
             ..Self::control()
         }
     }
