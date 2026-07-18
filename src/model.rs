@@ -1396,4 +1396,99 @@ mod tests {
         assert_eq!(top_picks[2].underlying, "CCC");
         assert_eq!(top_picks[2].sector, "Unknown");
     }
+
+    // --- Characterization: earnings is scoring-neutral today (display only) ---
+    // These pin the no-earnings / out-of-window passthrough that the upcoming
+    // earnings-aware scoring change must preserve. They must stay GREEN.
+
+    #[test]
+    fn test_csv_score_is_calculate_put_score_on_band_safety() {
+        // No earnings map: the CSV score column must equal
+        // calculate_put_score(calculate_max_drop_safety(strike, from, to), ...).
+        // Pins the exact passthrough so the rewiring (moving safety into a new
+        // helper) cannot silently change the no-earnings score.
+        let chains = vec![make_chain("AAPL", 90.0, 0.35)]; // strike_from=80, strike_to=120
+
+        let mut sharpe = HashMap::new();
+        sharpe.insert("AAPL".to_string(), 1.5);
+
+        let mut ranges = HashMap::new();
+        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+
+        let percentiles = HashMap::new();
+        let earnings = HashMap::new();
+        let trend_data = HashMap::new();
+
+        let (csv_bytes, _) = option_chain_to_csv_vec(
+            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data,
+            &HashMap::new(), &bull_regime(),
+        )
+        .unwrap();
+
+        let expected_safety = calculate_max_drop_safety(90.0, 80.0, 120.0);
+        let expected_score = calculate_put_score(1.5, expected_safety, 0.35, &bull_regime()).unwrap();
+
+        let csv_str = String::from_utf8(csv_bytes).unwrap();
+        let header: Vec<&str> = csv_str.lines().next().unwrap().split(',').collect();
+        let score_idx = header.iter().position(|h| *h == "score").unwrap();
+        let data_line = csv_str.lines().nth(1).unwrap();
+        let data_parts: Vec<&str> = data_line.split(',').collect();
+        assert_eq!(
+            data_parts[score_idx],
+            format!("{:.3}", expected_score),
+            "no-earnings CSV score must equal calculate_put_score on band safety"
+        );
+    }
+
+    #[test]
+    fn test_earnings_out_of_window_is_scoring_neutral() {
+        // An earnings entry that is out of the [today, expiry] window must not
+        // change picks vs. an empty earnings map (today: earnings is display-only).
+        // report_date "2000-01-01" is unambiguously before any real today → out of window.
+        let chains = vec![
+            make_chain("AAPL", 90.0, 0.35),
+            make_chain("MSFT", 350.0, 0.34),
+            make_chain("XOM", 100.0, 0.32),
+        ];
+
+        let mut sharpe = HashMap::new();
+        for sym in &["AAPL", "MSFT", "XOM"] {
+            sharpe.insert(sym.to_string(), 1.5);
+        }
+
+        let mut ranges = HashMap::new();
+        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+        ranges.insert("MSFT".to_string(), PutPriceRange { min: 300.0, max: 430.0 });
+        ranges.insert("XOM".to_string(), PutPriceRange { min: 80.0, max: 135.0 });
+
+        let percentiles = HashMap::new();
+        let trend_data = HashMap::new();
+
+        let empty_earnings: HashMap<String, EarningsInfo> = HashMap::new();
+        let (_csv_a, picks_a) = option_chain_to_csv_vec(
+            &chains, &sharpe, &ranges, &percentiles, &empty_earnings, &trend_data,
+            &HashMap::new(), &bull_regime(),
+        )
+        .unwrap();
+
+        let mut populated_earnings = HashMap::new();
+        populated_earnings.insert(
+            "AAPL".to_string(),
+            EarningsInfo {
+                report_date: "2000-01-01".to_string(),
+                report_time: "AMC".to_string(),
+                expected_eps: None,
+            },
+        );
+        let (_csv_b, picks_b) = option_chain_to_csv_vec(
+            &chains, &sharpe, &ranges, &percentiles, &populated_earnings, &trend_data,
+            &HashMap::new(), &bull_regime(),
+        )
+        .unwrap();
+
+        let as_tuple = |p: &TopPick| (p.underlying.clone(), format!("{:.3}", p.score));
+        let a: Vec<_> = picks_a.iter().map(as_tuple).collect();
+        let b: Vec<_> = picks_b.iter().map(as_tuple).collect();
+        assert_eq!(a, b, "out-of-window earnings must be scoring-neutral");
+    }
 }
