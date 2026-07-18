@@ -20,7 +20,7 @@
 
 • `price_percentile` — Where current price sits within its 20-day range. Drives momentum flag: NORMAL (≤80%), HIGH (80–90%), EXTENDED (>90%). Good: ≤ 0.80
 
-• `earnings_before_expiry` — Earnings date if it falls before option expiry. Empty = no earnings risk. Good: empty
+• `earnings_before_expiry` — Earnings date if it falls before option expiry. Empty = no earnings risk. When present, the score already accounts for it: shallow (upper-half) strikes are excluded and deep strikes have safety halved, so earnings stocks rarely surface. Good: empty (or a deep strike that still scores well)
 
 ━━━━━━━━━━━━━━━━━━
 
@@ -28,7 +28,7 @@
 
 1️⃣ `score > 0.6` — Primary gate. Bundles Sharpe, safety, and return checks.
 
-2️⃣ `earnings_before_expiry` is empty — Earnings cause gap risk and IV crush. Avoid.
+2️⃣ `earnings_before_expiry` empty preferred — Earnings = gap + IV-crush risk. The model already drops shallow strikes and halves safety for deep ones when earnings fall before expiry, so earnings stocks rarely make the cut; treat any that do with extra caution.
 
 3️⃣ `price_percentile ≤ 0.80` — Stock trading at top of range = overextended. Stick to NORMAL momentum.
 
@@ -47,13 +47,15 @@ Soft-cap at 80% annualised. Rewarded up to 80%; above 80% still accepted (no pen
 📊 Sharpe ratio — 20%
 Historical risk-adjusted return quality.
 
+⚠️ Earnings adjustment — if earnings fall before expiry, safety is halved (×0.5) for surviving strikes and shallow (upper-half) strikes are excluded entirely; the score already bakes in this gap risk.
+
 ━━━━━━━━━━━━━━━━━━
 
 🚩 *Red Flags — Avoid These*
 
 ❌ `score` is blank — Failed pre-filter: return below 0.25 or non-positive Sharpe.
 
-❌ `earnings_before_expiry` has a date — Stock can gap well below your strike.
+⚠️ `earnings_before_expiry` has a date — The score already halves safety and drops shallow strikes, but a post-earnings gap can still breach a deep strike; verify the buffer.
 
 ❌ `price_percentile > 0.90` (EXTENDED) — Stock at 20-day high. May overshoot before reverting.
 
