@@ -32,6 +32,8 @@ mod tiger {
 mod store {
     /// Candle data storage.
     pub mod candle;
+    /// Earnings calendar snapshot storage.
+    pub mod earnings;
     /// max drop storage.
     pub mod max_drop;
     /// option range storage.

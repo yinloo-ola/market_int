@@ -14,7 +14,7 @@ use crate::sectors::UNKNOWN_SECTOR;
 use crate::{
     constants,
     model::{self, QuotesError},
-    store::{candle, max_drop, option_chain, price_percentile, sharpe_ratio, trend},
+    store::{candle, earnings, max_drop, option_chain, price_percentile, sharpe_ratio, trend},
     symbols,
     tiger::api_caller::Requester,
 };
@@ -321,6 +321,14 @@ pub async fn retrieve_option_chains_with_expiry(
 
     let earnings_map = fetch_earnings_map(requester, period).await;
 
+    // Persist the earnings snapshot so the offline re-publish path applies the
+    // same earnings-aware scoring as the live run. [T-001]
+    if let Err(e) =
+        earnings::replace_earnings(conn, &earnings_map, chrono::Utc::now().timestamp() as u32)
+    {
+        log::warn!("Failed to persist earnings calendar: {}", e);
+    }
+
     publish_to_telegram(
         &all_chains,
         &sharpe_ratios,
@@ -384,7 +392,7 @@ pub async fn publish_option_chains(
 
     let (sharpe_ratios, price_ranges, price_percentiles, trend_data) =
         collect_metrics_from_db(&conn, &symbols);
-    let earnings_map = HashMap::new();
+    let earnings_map = collect_earnings(&conn, &symbols);
 
     publish_to_telegram(
         &all_chains,
@@ -546,6 +554,28 @@ fn collect_trend_data(conn: &Connection, symbols: &[String]) -> HashMap<String, 
         }
     }
     trends
+}
+
+/// Collects the persisted earnings snapshot for the given symbols (mirrors the
+/// other `collect_*` loaders). On a fresh DB with no prior live run the table
+/// is empty → returns an empty map (earnings rule is a no-op), matching the
+/// previous behavior. [T-001]
+fn collect_earnings(conn: &Connection, symbols: &[String]) -> HashMap<String, model::EarningsInfo> {
+    if let Err(e) = earnings::create_table(conn) {
+        log::error!("Failed to ensure earnings table: {}", e);
+        return HashMap::new();
+    }
+    let mut map = HashMap::new();
+    for symbol in symbols {
+        match earnings::get_earnings(conn, symbol) {
+            Ok(Some(info)) => {
+                map.insert(symbol.clone(), info);
+            }
+            Ok(None) => {} // no upcoming earnings for this symbol — normal
+            Err(err) => log::error!("Failed to get earnings for {}: {}", symbol, err),
+        }
+    }
+    map
 }
 
 fn collect_metrics_from_db(
