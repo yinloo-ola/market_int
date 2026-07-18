@@ -6,6 +6,7 @@ use std::{
     io::{self, BufWriter},
 };
 
+use chrono::NaiveDate;
 use csv::Writer;
 use rusqlite::{
     ToSql,
@@ -188,6 +189,62 @@ pub fn calculate_put_score(
     )
 }
 
+/// Returns true if the symbol's earnings `report_date` falls inside the option's
+/// lifetime `[today, expiry]` (inclusive on both ends, date-level comparison).
+///
+/// Both `report_date` (Tiger `reportDate`) and `expiry` (the chain's
+/// `expiration`) are `YYYY-MM-DD` strings. To be robust against a fuller
+/// timestamp, only the first 10 characters are parsed. If either string fails
+/// to parse, returns `false` — i.e. earnings risk is *not* applied (safe default
+/// that avoids dropping/discounting chains on a malformed date).
+pub fn earnings_in_window(report_date: &str, expiry: &str, today: NaiveDate) -> bool {
+    let parse = |s: &str| -> Option<NaiveDate> {
+        NaiveDate::parse_from_str(s.get(..10)?, "%Y-%m-%d").ok()
+    };
+    match (parse(report_date), parse(expiry)) {
+        (Some(report), Some(exp)) => today <= report && report <= exp,
+        _ => false,
+    }
+}
+
+/// Scores a put chain entry, applying the earnings rule on top of
+/// [`calculate_put_score`].
+///
+/// When `earnings_in_window` is true (the symbol reports earnings between today
+/// and expiry), post-earnings gap risk is not reflected in the historical
+/// `max_drop` band, so:
+///   - strikes in the **upper half** of the band (`strike > midpoint`) — the
+///     shallow, near-money puts with no gap buffer — are excluded (`None`);
+///   - the surviving (lower / deeper) strikes are still scored, but their
+///     `safety` is discounted by `EARNINGS_SAFETY_MULTIPLIER` to reflect that
+///     the band no longer reliably measures breach probability.
+///
+/// When `earnings_in_window` is false this is a pure passthrough to
+/// `calculate_put_score` on the band safety.
+pub fn calculate_put_chain_score(
+    sharpe: f64,
+    strike: f64,
+    strike_from: f64,
+    strike_to: f64,
+    rate_of_return: f64,
+    regime: &crate::regime::MarketRegime,
+    earnings_in_window: bool,
+) -> Option<f64> {
+    if earnings_in_window {
+        let midpoint = (strike_from + strike_to) / 2.0;
+        if strike > midpoint {
+            return None;
+        }
+    }
+    let safety = calculate_max_drop_safety(strike, strike_from, strike_to);
+    let safety = if earnings_in_window {
+        safety * constants::EARNINGS_SAFETY_MULTIPLIER
+    } else {
+        safety
+    };
+    calculate_put_score(sharpe, safety, rate_of_return, regime)
+}
+
 /// Returns a momentum flag based on price percentile.
 pub fn momentum_flag(price_percentile: f64) -> &'static str {
     if price_percentile > constants::MOMENTUM_EXTENDED_THRESHOLD {
@@ -332,20 +389,35 @@ pub fn option_chain_to_csv_vec(
         ])
         .map_err(QuotesError::CsvError)?;
 
+    // Today, for the earnings-in-window check (date-level, inclusive of both ends).
+    let today = chrono::Local::now().date_naive();
+    let in_earnings_window = |chain: &OptionStrikeCandle| -> bool {
+        match earnings_map.get(&chain.underlying) {
+            Some(info) => earnings_in_window(&info.report_date, &chain.expiration, today),
+            None => false,
+        }
+    };
+
     // Write the data rows.
     for chain in all_chains {
         let sharpe_ratio = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
         let price_percentile = price_percentiles.get(&chain.underlying).copied();
 
-        // Safety from the max_drop band (always available — stored per chain).
-        // NOTE (T-002): scoring is no longer gated on a 20-day price_range, so
-        // every chain receives a score and is eligible for top-3 even when its
-        // 20-day range is missing (then `strike_percentile` below is blank).
-        // The band safety doesn't need the 20-day range — this is intentional.
-        let safety =
-            calculate_max_drop_safety(chain.strike, chain.strike_from, chain.strike_to);
-        let score =
-            calculate_put_score(sharpe_ratio, safety, chain.rate_of_return, regime);
+        // Band safety + the earnings rule live inside `calculate_put_chain_score`:
+        // it drops upper-half strikes and discounts `safety` when the symbol
+        // reports earnings inside [today, expiry]. NOTE (T-002): scoring is no
+        // longer gated on a 20-day price_range, so every chain is eligible for
+        // top-3 even when its 20-day range is missing (then `strike_percentile`
+        // below is blank) — band safety does not need the 20-day range.
+        let score = calculate_put_chain_score(
+            sharpe_ratio,
+            chain.strike,
+            chain.strike_from,
+            chain.strike_to,
+            chain.rate_of_return,
+            regime,
+            in_earnings_window(chain),
+        );
         let score_str = score.map(|s| format!("{:.3}", s)).unwrap_or_default();
         let strike_percentile_str = match price_ranges.get(&chain.underlying) {
             Some(range) => format!(
@@ -415,9 +487,15 @@ pub fn option_chain_to_csv_vec(
         .enumerate()
         .filter_map(|(i, chain)| {
             let sharpe = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
-            let safety =
-                calculate_max_drop_safety(chain.strike, chain.strike_from, chain.strike_to);
-            let score = calculate_put_score(sharpe, safety, chain.rate_of_return, regime)?;
+            let score = calculate_put_chain_score(
+                sharpe,
+                chain.strike,
+                chain.strike_from,
+                chain.strike_to,
+                chain.rate_of_return,
+                regime,
+                in_earnings_window(chain),
+            )?;
             Some((i, score))
         })
         .collect();
@@ -1397,9 +1475,12 @@ mod tests {
         assert_eq!(top_picks[2].sector, "Unknown");
     }
 
-    // --- Characterization: earnings is scoring-neutral today (display only) ---
-    // These pin the no-earnings / out-of-window passthrough that the upcoming
-    // earnings-aware scoring change must preserve. They must stay GREEN.
+    // --- Earnings-aware scoring ---
+    // `option_chain_to_csv_vec` scores via `calculate_put_chain_score`, which is
+    // a pure passthrough to `calculate_put_score` when no earnings fall in
+    // [today, expiry]. The two tests just above pin that passthrough (no-earnings
+    // and out-of-window). The in-window rule — exclude the upper half, halve
+    // safety — lives in the pure helpers and is unit-tested below.
 
     #[test]
     fn test_csv_score_is_calculate_put_score_on_band_safety() {
@@ -1490,5 +1571,139 @@ mod tests {
         let a: Vec<_> = picks_a.iter().map(as_tuple).collect();
         let b: Vec<_> = picks_b.iter().map(as_tuple).collect();
         assert_eq!(a, b, "out-of-window earnings must be scoring-neutral");
+    }
+
+    // --- New contract: the earnings-in-window rule (pure helpers) ---
+
+    fn nd(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn test_earnings_in_window_strictly_inside() {
+        // today=06-10, expiry=06-19, report=06-15 → in window
+        assert!(earnings_in_window("2026-06-15", "2026-06-19", nd("2026-06-10")));
+    }
+
+    #[test]
+    fn test_earnings_in_window_before_today() {
+        assert!(!earnings_in_window("2026-06-09", "2026-06-19", nd("2026-06-10")));
+    }
+
+    #[test]
+    fn test_earnings_in_window_after_expiry() {
+        assert!(!earnings_in_window("2026-06-20", "2026-06-19", nd("2026-06-10")));
+    }
+
+    #[test]
+    fn test_earnings_in_window_boundary_today_inclusive() {
+        assert!(earnings_in_window("2026-06-10", "2026-06-19", nd("2026-06-10")));
+    }
+
+    #[test]
+    fn test_earnings_in_window_boundary_expiry_inclusive() {
+        assert!(earnings_in_window("2026-06-19", "2026-06-19", nd("2026-06-10")));
+    }
+
+    #[test]
+    fn test_earnings_in_window_unparseable_report_date() {
+        // Safe default: malformed date → no earnings effect.
+        assert!(!earnings_in_window("not-a-date", "2026-06-19", nd("2026-06-10")));
+    }
+
+    #[test]
+    fn test_earnings_in_window_unparseable_expiry() {
+        assert!(!earnings_in_window("2026-06-15", "garbage", nd("2026-06-10")));
+    }
+
+    #[test]
+    fn test_earnings_in_window_parses_full_timestamp_expiry() {
+        // Real Tiger expiry strings may carry a time/offset; only the first 10
+        // chars (the YYYY-MM-DD prefix) should be used.
+        assert!(earnings_in_window(
+            "2026-06-15",
+            "2026-06-19 16:00:00 -04:00",
+            nd("2026-06-10"),
+        ));
+    }
+
+    // band [80, 120] → midpoint 100; safety(strike) = (120 - strike) / 40
+    fn band_safety(strike: f64) -> f64 {
+        calculate_max_drop_safety(strike, 80.0, 120.0)
+    }
+
+    #[test]
+    fn test_put_chain_score_no_earnings_deep_is_passthrough() {
+        let got = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, &bull_regime(), false);
+        let want = calculate_put_score(1.5, band_safety(90.0), 0.35, &bull_regime());
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_put_chain_score_no_earnings_shallow_is_passthrough() {
+        // strike 110 (upper half), no earnings → still scored (not excluded).
+        let got = calculate_put_chain_score(1.5, 110.0, 80.0, 120.0, 0.35, &bull_regime(), false);
+        let want = calculate_put_score(1.5, band_safety(110.0), 0.35, &bull_regime());
+        assert_eq!(got, want);
+        assert!(got.is_some());
+    }
+
+    #[test]
+    fn test_put_chain_score_earnings_excludes_upper_half() {
+        // strike 110 > midpoint 100, earnings in window → excluded.
+        assert_eq!(
+            calculate_put_chain_score(1.5, 110.0, 80.0, 120.0, 0.35, &bull_regime(), true),
+            None
+        );
+    }
+
+    #[test]
+    fn test_put_chain_score_earnings_keeps_lower_half_with_halved_safety() {
+        // strike 90 ≤ midpoint 100, earnings → scored with safety × multiplier.
+        let got = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, &bull_regime(), true);
+        let want = calculate_put_score(
+            1.5,
+            band_safety(90.0) * crate::constants::EARNINGS_SAFETY_MULTIPLIER,
+            0.35,
+            &bull_regime(),
+        );
+        assert_eq!(got, want);
+        assert!(got.is_some());
+    }
+
+    #[test]
+    fn test_put_chain_score_earnings_midpoint_kept() {
+        // strike == midpoint → kept (strike ≤ mid), safety halved.
+        let got = calculate_put_chain_score(1.5, 100.0, 80.0, 120.0, 0.35, &bull_regime(), true);
+        assert!(got.is_some());
+        let want = calculate_put_score(
+            1.5,
+            band_safety(100.0) * crate::constants::EARNINGS_SAFETY_MULTIPLIER,
+            0.35,
+            &bull_regime(),
+        );
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_put_chain_score_earnings_halving_downranks() {
+        // same deep strike: earnings score < no-earnings score.
+        let with = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, &bull_regime(), true).unwrap();
+        let without = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, &bull_regime(), false).unwrap();
+        assert!(with < without);
+    }
+
+    #[test]
+    fn test_put_chain_score_earnings_does_not_bypass_prefilters() {
+        // Earnings doesn't override the sharpe>0 floor: deep strike, sharpe=0 → None.
+        assert_eq!(
+            calculate_put_chain_score(0.0, 90.0, 80.0, 120.0, 0.35, &bull_regime(), true),
+            None
+        );
+        // And the min-return floor still applies.
+        assert_eq!(
+            calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.10, &bull_regime(), true),
+            None
+        );
     }
 }

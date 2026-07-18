@@ -10,6 +10,10 @@ pub const MIN_RATE_OF_RETURN: f64 = 0.25;
 pub const MAX_RATE_OF_RETURN: f64 = 0.80;
 pub const MAX_STRIKE_PERCENTILE: f64 = 0.40;
 pub const IDEAL_RETURN: f64 = 0.80;
+/// Safety discount applied when a symbol reports earnings inside the option's
+/// lifetime. The max_drop band is built from routine (non-event) volatility, so
+/// it overstates safety during an earnings window; this scales `safety` down.
+pub const EARNINGS_SAFETY_MULTIPLIER: f64 = 0.5;
 
 // Trend filter constants
 pub const EMA_SHORT_PERIOD: u32 = 20;
