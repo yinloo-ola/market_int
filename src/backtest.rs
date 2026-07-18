@@ -1011,15 +1011,25 @@ fn find_close_on_date(
 }
 
 /// Run the full backtest for a single configuration.
-/// Loads an earnings calendar CSV (`symbol,report_date[,...]`, with a header
-/// row as written by `fetch-earnings`) into a per-symbol list of report dates,
-/// used by the earnings-aware production-mirror scoring. Malformed rows / dates
-/// are skipped. Returns an empty map (no error) if the file is missing.
+/// Loads an earnings calendar CSV (`symbol,report_date[,...]`) into a per-symbol
+/// list of report dates, used by the earnings-aware production-mirror scoring.
+/// Malformed rows / dates are skipped. Both headered (as written by
+/// `fetch-earnings`) and headerless files are accepted: the reader treats every
+/// row as data, so a header row is simply skipped (its date column won't parse).
+///
+/// Returns `Err(QuotesError::CouldNotOpenFile)` if the file is missing — the
+/// caller decides whether to fall back to an empty map (the `backtest` command
+/// logs the error and runs earnings-blind).
 pub fn load_earnings(path: &str) -> model::Result<HashMap<String, Vec<NaiveDate>>> {
     let file =
         std::fs::File::open(path).map_err(|e| model::QuotesError::CouldNotOpenFile(e))?;
     let mut map: HashMap<String, Vec<NaiveDate>> = HashMap::new();
-    for record in csv::Reader::from_reader(file).records().flatten() {
+    for record in csv::ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(file)
+        .records()
+        .flatten()
+    {
         let (Some(symbol), Some(date_str)) = (record.get(0), record.get(1)) else {
             continue;
         };
@@ -1761,10 +1771,9 @@ mod tests {
     }
 
     #[test]
-    fn test_load_earnings_headerless_file_current_behavior() {
-        // Characterization: csv::Reader defaults to has_headers=true, so a
-        // headerless file's FIRST data row is consumed as the header and lost.
-        // (fetch-earnings writes a header, so today this only bites ad-hoc files.)
+    fn test_load_earnings_headerless_file_keeps_all_rows() {
+        // A headerless file must keep ALL data rows (the reader is headerless;
+        // a header row, if present, is skipped because its date column won't parse).
         use std::io::Write;
         let path = std::env::temp_dir().join("market_int_test_load_earnings_headerless.csv");
         {
@@ -1776,8 +1785,7 @@ mod tests {
         let map = load_earnings(path.to_str().unwrap()).unwrap();
         let _ = std::fs::remove_file(&path);
 
-        // CURRENT (has_headers=true): the AAPL row is eaten as the header → only MSFT remains.
-        assert!(!map.contains_key("AAPL"), "current behavior: headerless first row is dropped");
+        assert_eq!(map.get("AAPL").unwrap().len(), 1, "headerless first row must be kept");
         assert_eq!(map.get("MSFT").unwrap().len(), 1);
     }
 
