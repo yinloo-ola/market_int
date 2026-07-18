@@ -1,7 +1,8 @@
 use std::env;
 
-use chrono::{DateTime, Datelike, Days, Local, Timelike, Weekday};
+use chrono::{DateTime, Datelike, Days, Local, NaiveDate, TimeZone, Timelike, Weekday};
 use chrono_tz::{America::New_York, Asia::Singapore};
+use csv::Writer;
 use rusqlite::Connection;
 use std::collections::HashMap;
 use telegram_bot_api::{
@@ -284,6 +285,44 @@ async fn fetch_earnings_map(
             HashMap::new()
         }
     }
+}
+
+/// Fetches the earnings calendar for `[from, to]` from Tiger and writes it to
+/// `output` as CSV (`symbol,report_date,report_time,expected_eps`) — the format
+/// the backtest's `--earnings` flag consumes. Best-effort over whatever Tiger
+/// returns for the window (it may be forward-looking only, so historical
+/// backtests may get sparse data — the backtest then runs earnings-blind).
+pub async fn fetch_earnings_to_file(
+    requester: &mut Requester,
+    from: NaiveDate,
+    to: NaiveDate,
+    output: &str,
+) -> model::Result<usize> {
+    let from_ny = ny_at(from, 0, 0, 0);
+    let to_ny = ny_at(to, 23, 59, 59);
+    let entries = requester.query_earnings_calendar("US", &from_ny, &to_ny).await?;
+    let file = std::fs::File::create(output)?;
+    let mut writer = Writer::from_writer(file);
+    writer
+        .write_record(["symbol", "report_date", "report_time", "expected_eps"])
+        .map_err(model::QuotesError::CsvError)?;
+    for e in &entries {
+        let eps = e.expected_eps.map(|v| v.to_string()).unwrap_or_default();
+        writer
+            .write_record([e.symbol.as_str(), e.report_date.as_str(), e.report_time.as_str(), eps.as_str()])
+            .map_err(model::QuotesError::CsvError)?;
+    }
+    writer.flush()?;
+    Ok(entries.len())
+}
+
+/// Builds a New-York `DateTime` at the given (always-valid) time of day. Midnight
+/// and end-of-day never fall in a DST fold, so the conversion is unambiguous.
+fn ny_at(d: NaiveDate, h: u32, m: u32, s: u32) -> NewYorkDateTime {
+    New_York
+        .from_local_datetime(&d.and_hms_opt(h, m, s).unwrap())
+        .single()
+        .unwrap()
 }
 
 /// Pulls option chains with configurable expiry timeframe

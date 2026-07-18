@@ -170,6 +170,16 @@ enum Commands {
         #[arg(long)]
         earnings: Option<String>,
     },
+    // Fetch the earnings calendar from Tiger to a CSV (feeds `backtest --earnings`)
+    FetchEarnings {
+        /// Start date (YYYY-MM-DD)
+        from: String,
+        /// End date (YYYY-MM-DD)
+        to: String,
+        /// CSV output path
+        #[arg(long, default_value = "earnings.csv")]
+        output: String,
+    },
 }
 
 #[tokio::main]
@@ -508,6 +518,33 @@ async fn main() {
             match backtest::write_csv(&output, &all_metrics) {
                 Ok(_) => log::info!("Results written to {}", output),
                 Err(e) => log::error!("Failed to write CSV: {}", e),
+            }
+        }
+        Commands::FetchEarnings { from, to, output } => {
+            let from_date = match NaiveDate::parse_from_str(&from, "%Y-%m-%d") {
+                Ok(d) => d,
+                Err(e) => {
+                    log::error!("Invalid --from date '{}': {}. Use YYYY-MM-DD.", from, e);
+                    return;
+                }
+            };
+            let to_date = match NaiveDate::parse_from_str(&to, "%Y-%m-%d") {
+                Ok(d) => d,
+                Err(e) => {
+                    log::error!("Invalid --to date '{}': {}. Use YYYY-MM-DD.", to, e);
+                    return;
+                }
+            };
+            let mut requester = match tiger::api_caller::Requester::new().await {
+                Some(r) => r,
+                None => {
+                    log::error!("Failed to initialize Tiger API requester");
+                    return;
+                }
+            };
+            match option::fetch_earnings_to_file(&mut requester, from_date, to_date, &output).await {
+                Ok(n) => log::info!("Wrote {} earnings entries to {}", n, output),
+                Err(e) => log::error!("Failed to fetch earnings: {}", e),
             }
         }
     }
