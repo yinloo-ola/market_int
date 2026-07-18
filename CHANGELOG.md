@@ -9,17 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Earnings-aware put scoring** — when a symbol reports earnings inside `[today, expiry]`, upper-half strikes (`strike > band midpoint`) are excluded and surviving lower-half strikes score with halved safety (`EARNINGS_SAFETY_MULTIPLIER = 0.5`); the max_drop band is built from non-event volatility. New pure helpers `calculate_put_chain_score` / `earnings_in_window`; `calculate_put_score` is unchanged.
+- **Earnings calendar persisted** (`store::earnings`) — the live run writes a snapshot so the offline `publish-option-chain` re-publish path applies the same earnings rule as the live run.
+- `fetch-earnings <from> <to>` subcommand — materializes the Tiger earnings calendar for a date range to a CSV that feeds `backtest --earnings`.
+- `backtest --earnings <csv>` flag; `production_mirror` now delegates to `calculate_put_chain_score` (earnings-aware) so the backtest mirrors production exactly when earnings data is supplied. Absent the flag, behavior is unchanged.
 - Added support for multiple options-scoring paradigms in the backtester (`Symmetric`, `AsymmetricStatic`, and `AsymmetricDynamic`) to test different yield targets
 - Added Net P&L per share, total premium collected, and total assignment loss tracking to backtest metrics
 - Deployed highly profitable `premium-static-080` scoring model in production, shifting `IDEAL_RETURN` to 80% with an asymmetric soft-cap and a protective `0.40` maximum strike percentile safety ceiling
 
 ### Fixed
 
+- Top-pick sort no longer panics on a `NaN` score (e.g. corrupt strike-band data): `partial_cmp().unwrap()` → `unwrap_or(Equal)`.
+- Earnings-window `today` is now derived in New York time to match the earnings-calendar fetch (was `Local` = UTC on Cloud Run, drifting ±1 day at the boundary).
+- `load_earnings` accepts both headered and headerless earnings CSVs, and its docstring no longer misstates the missing-file behavior (it returns `Err`; the caller falls back to earnings-blind).
 - Fixed a backtest assignment bug where weekend option expiry dates (Saturday/Sunday) skipped the Friday close and checked next Monday's close, falsely inflating assignments due to weekend gaps.
 - Adjusted all corresponding scoring unit tests in `src/model.rs` to align with the new 80% asymmetric soft-cap math, returning the entire test suite to 100% green.
 
 ### Changed
 
+- `publish_to_telegram`'s `_earnings_map` renamed to `earnings_map` — it now drives scoring (via `calculate_put_chain_score`), not just the display warning.
 - Lowered `MIN_RATE_OF_RETURN` from 0.30 to 0.25 to increase search-space flexibility, and lowered `MAX_STRIKE_PERCENTILE` from 0.60 to 0.40 to guarantee deeply out-of-the-money safety margins.
 - **Put-option safety is now derived from the max_drop band** (`calculate_max_drop_safety` over `[strike_from, strike_to]`) instead of the 20-day `strike_percentile`. Deep strikes (rarely-breached historical drops) now score highest; the score and the strike-range filter agree on what "safe" means.
 - `PERCENTILE` raised 0.9 → 0.97 — wider strike bands (median 5-day band ~2.4% → ~5.3%), fixing narrow-band cases where calm stocks had no candidate strikes.
