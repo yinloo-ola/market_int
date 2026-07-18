@@ -1761,6 +1761,27 @@ mod tests {
     }
 
     #[test]
+    fn test_load_earnings_headerless_file_current_behavior() {
+        // Characterization: csv::Reader defaults to has_headers=true, so a
+        // headerless file's FIRST data row is consumed as the header and lost.
+        // (fetch-earnings writes a header, so today this only bites ad-hoc files.)
+        use std::io::Write;
+        let path = std::env::temp_dir().join("market_int_test_load_earnings_headerless.csv");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            // NO header — two data rows.
+            writeln!(f, "AAPL,2026-06-12,AMC,1.5").unwrap();
+            writeln!(f, "MSFT,2026-06-20,AMC,2.0").unwrap();
+        }
+        let map = load_earnings(path.to_str().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        // CURRENT (has_headers=true): the AAPL row is eaten as the header → only MSFT remains.
+        assert!(!map.contains_key("AAPL"), "current behavior: headerless first row is dropped");
+        assert_eq!(map.get("MSFT").unwrap().len(), 1);
+    }
+
+    #[test]
     fn test_all_presets_have_valid_names() {
         for config in BacktestConfig::all_presets() {
             assert!(!config.name.is_empty(), "preset name should not be empty");
