@@ -164,6 +164,11 @@ enum Commands {
         /// CSV output path
         #[arg(long, default_value = "backtest_results.csv")]
         output: String,
+        /// Optional earnings calendar CSV (symbol,report_date[,...]) to apply
+        /// the earnings-aware scoring rule for `production-mirror`. Generate via
+        /// `fetch-earnings`. Absent → earnings-blind (today's behavior).
+        #[arg(long)]
+        earnings: Option<String>,
     },
 }
 
@@ -406,6 +411,7 @@ async fn main() {
             config,
             period,
             output,
+            earnings,
         } => {
             let from_date = match NaiveDate::parse_from_str(&from, "%Y-%m-%d") {
                 Ok(d) => d,
@@ -430,6 +436,23 @@ async fn main() {
                 }
             };
             let sectors = crate::sectors::load_sectors(&symbols_file_path).unwrap_or_default();
+
+            let earnings_by_symbol = match &earnings {
+                Some(path) => match backtest::load_earnings(path) {
+                    Ok(m) => {
+                        log::info!("Loaded earnings for {} symbols from {}", m.len(), path);
+                        m
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "Failed to load earnings from '{}': {}. Running earnings-blind.",
+                            path, e
+                        );
+                        std::collections::HashMap::new()
+                    }
+                },
+                None => std::collections::HashMap::new(),
+            };
 
             let configs: Vec<backtest::BacktestConfig> = if config == "all" {
                 backtest::BacktestConfig::all_presets()
@@ -476,7 +499,7 @@ async fn main() {
             for cfg in &configs {
                 log::info!("Running config: {}", cfg.name);
                 let metrics = backtest::run_backtest(
-                    cfg, &conn, &symbols, &sectors, from_date, to_date,
+                    cfg, &conn, &symbols, &sectors, &earnings_by_symbol, from_date, to_date,
                 );
                 println!("{}", backtest::format_metrics(&metrics));
                 all_metrics.push(metrics);

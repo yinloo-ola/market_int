@@ -141,6 +141,12 @@ pub struct BacktestConfig {
 
     // Max drop
     pub drop_percentile: f64,
+
+    // Earnings-aware scoring (production mirror only). When true, the candidate
+    // loop delegates to `calculate_put_chain_score` (the shipped production
+    // scorer) instead of `score_candidate`, so the backtest is identical by
+    // construction to live scoring — no formula duplication, no drift.
+    pub apply_earnings_rule: bool,
 }
 
 impl BacktestConfig {
@@ -177,6 +183,7 @@ impl BacktestConfig {
             drop_percentile: constants::PERCENTILE,
             ideal_return: 0.35,
             return_bandwidth: 0.20,
+            apply_earnings_rule: false,
         }
     }
 
@@ -202,6 +209,7 @@ impl BacktestConfig {
             drop_percentile: constants::PERCENTILE,
             min_rate_of_return: constants::MIN_RATE_OF_RETURN,
             risk_free_rate: constants::DEFAULT_RISK_FREE_RATE,
+            apply_earnings_rule: true,
             ..Self::control()
         }
     }
@@ -1003,11 +1011,32 @@ fn find_close_on_date(
 }
 
 /// Run the full backtest for a single configuration.
+/// Loads an earnings calendar CSV (`symbol,report_date[,...]`, with a header
+/// row as written by `fetch-earnings`) into a per-symbol list of report dates,
+/// used by the earnings-aware production-mirror scoring. Malformed rows / dates
+/// are skipped. Returns an empty map (no error) if the file is missing.
+pub fn load_earnings(path: &str) -> model::Result<HashMap<String, Vec<NaiveDate>>> {
+    let file =
+        std::fs::File::open(path).map_err(|e| model::QuotesError::CouldNotOpenFile(e))?;
+    let mut map: HashMap<String, Vec<NaiveDate>> = HashMap::new();
+    for record in csv::Reader::from_reader(file).records().flatten() {
+        let (Some(symbol), Some(date_str)) = (record.get(0), record.get(1)) else {
+            continue;
+        };
+        let Ok(date) = NaiveDate::parse_from_str(date_str.trim(), "%Y-%m-%d") else {
+            continue;
+        };
+        map.entry(symbol.trim().to_string()).or_default().push(date);
+    }
+    Ok(map)
+}
+
 pub fn run_backtest(
     config: &BacktestConfig,
     conn: &rusqlite::Connection,
     symbols: &[String],
     sectors: &HashMap<String, String>,
+    earnings_by_symbol: &HashMap<String, Vec<NaiveDate>>,
     from_date: NaiveDate,
     to_date: NaiveDate,
 ) -> BacktestMetrics {
@@ -1098,6 +1127,16 @@ pub fn run_backtest(
                 continue;
             }
 
+            // Earnings-in-window for this (sim_date, symbol) — drives the
+            // production-mirror earnings rule (exclude upper half, halve safety).
+            // Deterministic: pure date comparison, no wall-clock.
+            let expiry_date = *sim_date + Duration::days(period as i64);
+            let earnings_in_window = earnings_by_symbol
+                .get(symbol)
+                .map_or(false, |dates| {
+                    dates.iter().any(|&d| *sim_date <= d && d <= expiry_date)
+                });
+
             // Price range for strike percentile (last 20 days)
             let pp_start = candles
                 .len()
@@ -1139,29 +1178,42 @@ pub fn run_backtest(
                 };
                 let sector = crate::sectors::sector_of(sectors, symbol);
 
-                match config.score_candidate(
-                    sharpe_ratio,
-                    strike_pct,
-                    rate_of_return,
-                    trend_short,
-                    trend_long,
-                    &regime,
-                    band_safety,
-                ) {
-                    Some(score) => {
-                        candidates.push((
-                            symbol_idx,
-                            score,
-                            strike,
-                            premium,
-                            rate_of_return,
-                            trend_short,
-                            trend_long,
-                            price,
-                            sector,
-                        ));
-                    }
-                    None => {}
+                let score = if config.apply_earnings_rule {
+                    // Production mirror: delegate to the earnings-aware production
+                    // scorer so the backtest is identical-by-construction to the
+                    // shipped scoring (no formula duplication → no drift).
+                    model::calculate_put_chain_score(
+                        sharpe_ratio,
+                        strike,
+                        min_strike,
+                        max_strike,
+                        rate_of_return,
+                        &regime,
+                        earnings_in_window,
+                    )
+                } else {
+                    config.score_candidate(
+                        sharpe_ratio,
+                        strike_pct,
+                        rate_of_return,
+                        trend_short,
+                        trend_long,
+                        &regime,
+                        band_safety,
+                    )
+                };
+                if let Some(score) = score {
+                    candidates.push((
+                        symbol_idx,
+                        score,
+                        strike,
+                        premium,
+                        rate_of_return,
+                        trend_short,
+                        trend_long,
+                        price,
+                        sector,
+                    ));
                 }
                 strike += 0.5;
             }
@@ -1643,10 +1695,12 @@ mod tests {
 
     #[test]
     fn test_production_mirror_matches_calculate_put_score() {
-        // Pin (verification report O-001): production_mirror's score_candidate
-        // must equal calculate_put_score for the same inputs — both encode the
-        // shipped production scoring. Catches divergence if either is edited
-        // without the other.
+        // Pin (verification report O-001): production_mirror's `score_candidate`
+        // must equal `calculate_put_score` for the same inputs. production_mirror's
+        // candidate loop now delegates to the earnings-aware `calculate_put_chain_score`
+        // (see `apply_earnings_rule`), but `score_candidate` is still the base scorer
+        // inherited by the 37 research configs — this pin guards that base against
+        // drift from the shipped `calculate_put_score`.
         let config = BacktestConfig::production_mirror();
         let regime = config.build_regime(1.05);
         for &(sharpe, safety, rate) in &[
@@ -1666,6 +1720,44 @@ mod tests {
                 "divergence at sharpe={sharpe} safety={safety} rate={rate}: backtest={bt} prod={prod}"
             );
         }
+    }
+
+    #[test]
+    fn test_production_mirror_applies_earnings_rule() {
+        // production_mirror must delegate its candidate scoring to the earnings-
+        // aware production scorer (calculate_put_chain_score) — guards the loop
+        // wiring. The research baseline must NOT (earnings is production-only).
+        assert!(
+            BacktestConfig::production_mirror().apply_earnings_rule,
+            "production_mirror must apply the earnings rule"
+        );
+        assert!(
+            !BacktestConfig::control().apply_earnings_rule,
+            "research configs must not apply the earnings rule"
+        );
+    }
+
+    #[test]
+    fn test_load_earnings_parses_and_groups() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join("market_int_test_load_earnings.csv");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "symbol,report_date,report_time,expected_eps").unwrap();
+            writeln!(f, "AAPL,2026-06-12,AMC,1.5").unwrap();
+            writeln!(f, "AAPL,2026-07-10,BMO,").unwrap();
+            writeln!(f, "MSFT,2026-06-20,AMC,2.0").unwrap();
+            writeln!(f, "BAD,not-a-date,AMC,").unwrap(); // skipped: bad date
+        }
+        let map = load_earnings(path.to_str().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let aapl = map.get("AAPL").unwrap();
+        assert_eq!(aapl.len(), 2);
+        assert!(aapl.contains(&NaiveDate::parse_from_str("2026-06-12", "%Y-%m-%d").unwrap()));
+        assert!(aapl.contains(&NaiveDate::parse_from_str("2026-07-10", "%Y-%m-%d").unwrap()));
+        assert_eq!(map.get("MSFT").unwrap().len(), 1);
+        assert!(!map.contains_key("BAD"), "malformed-date row should be skipped");
     }
 
     #[test]
