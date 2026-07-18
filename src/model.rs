@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     env::VarError,
     error::Error,
@@ -7,6 +8,7 @@ use std::{
 };
 
 use chrono::NaiveDate;
+use chrono_tz::America::New_York;
 use csv::Writer;
 use rusqlite::{
     ToSql,
@@ -389,14 +391,23 @@ pub fn option_chain_to_csv_vec(
         ])
         .map_err(QuotesError::CsvError)?;
 
-    // Today, for the earnings-in-window check (date-level, inclusive of both ends).
-    let today = chrono::Local::now().date_naive();
-    let in_earnings_window = |chain: &OptionStrikeCandle| -> bool {
-        match earnings_map.get(&chain.underlying) {
-            Some(info) => earnings_in_window(&info.report_date, &chain.expiration, today),
-            None => false,
-        }
-    };
+    // Today for the earnings-in-window check. Use New York time to match the
+    // earnings-calendar fetch (fetch_earnings_map queries in NY); `Local` is UTC
+    // on the Cloud Run deployment and would drift ±1 day at the boundary. [T-003]
+    let today = chrono::Local::now().with_timezone(&New_York).date_naive();
+    // Earnings-in-window is a per-symbol flag (expiration is uniform across a
+    // single retrieval), so compute it once per symbol and reuse — avoids
+    // re-parsing the same date strings for every chain of a symbol. [O-001]
+    let mut earnings_in_window_cache: HashMap<String, bool> = HashMap::new();
+    for chain in all_chains {
+        earnings_in_window_cache
+            .entry(chain.underlying.clone())
+            .or_insert_with(|| match earnings_map.get(&chain.underlying) {
+                Some(info) => earnings_in_window(&info.report_date, &chain.expiration, today),
+                None => false,
+            });
+    }
+    let in_earnings_window = |sym: &str| earnings_in_window_cache.get(sym).copied().unwrap_or(false);
 
     // Write the data rows.
     for chain in all_chains {
@@ -416,7 +427,7 @@ pub fn option_chain_to_csv_vec(
             chain.strike_to,
             chain.rate_of_return,
             regime,
-            in_earnings_window(chain),
+            in_earnings_window(&chain.underlying),
         );
         let score_str = score.map(|s| format!("{:.3}", s)).unwrap_or_default();
         let strike_percentile_str = match price_ranges.get(&chain.underlying) {
@@ -494,12 +505,12 @@ pub fn option_chain_to_csv_vec(
                 chain.strike_to,
                 chain.rate_of_return,
                 regime,
-                in_earnings_window(chain),
+                in_earnings_window(&chain.underlying),
             )?;
             Some((i, score))
         })
         .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
 
     let mut seen = HashSet::new();
     let mut seen_sectors = HashSet::new();
@@ -1705,5 +1716,36 @@ mod tests {
             calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.10, &bull_regime(), true),
             None
         );
+    }
+
+    // --- Regression: corrupt band data (NaN) must not panic the sort [S-001] ---
+
+    #[test]
+    fn test_option_chain_to_csv_vec_survives_nan_band_safety() {
+        // A NaN band (corrupt strike_from/strike_to) yields a NaN score. With two
+        // scored chains the top-pick sort MUST compare them — a NaN vs. number
+        // comparison must be treated as equal rather than panicking.
+        let mut bad = make_chain("AAPL", 90.0, 0.35);
+        bad.strike_from = f64::NAN;
+        bad.strike_to = f64::NAN;
+        let ok = make_chain("MSFT", 90.0, 0.35); // normal band → finite score
+        let chains = vec![bad, ok];
+
+        let mut sharpe = HashMap::new();
+        sharpe.insert("AAPL".to_string(), 1.5);
+        sharpe.insert("MSFT".to_string(), 1.5);
+        let mut ranges = HashMap::new();
+        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+        ranges.insert("MSFT".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+        let percentiles = HashMap::new();
+        let earnings = HashMap::new();
+        let trend_data = HashMap::new();
+
+        // Must not panic; returns Ok regardless of the NaN score.
+        let result = option_chain_to_csv_vec(
+            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data,
+            &HashMap::new(), &bull_regime(),
+        );
+        assert!(result.is_ok());
     }
 }
