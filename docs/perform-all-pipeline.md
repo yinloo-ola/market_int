@@ -292,7 +292,8 @@ Returns a 4-tuple of HashMaps.
 
 - Calls `requester.query_earnings_calendar("US", today, today + period + 7 days)` to get upcoming earnings dates.
 - Builds a `HashMap<String, EarningsInfo>` keyed by symbol.
-- If a symbol reports earnings before option expiry, that information is surfaced in the Telegram message as a **⚠️ Earnings warning**.
+- If a symbol reports earnings before option expiry, that information is surfaced in the Telegram message as a **⚠️ Earnings warning** **and** drives the earnings-aware scoring rule (see 10f-i).
+- **Persisted to SQLite** (`store::earnings::replace_earnings`) as the current snapshot so the offline `publish-option-chain` re-publish path applies the same earnings rule as the live run. One row per symbol; replaced wholesale each run.
 - On failure: logs a warning and returns an empty HashMap (best-effort).
 
 #### 10f. Score, rank, and publish to Telegram
@@ -302,7 +303,11 @@ Calls `publish_to_telegram()`, which orchestrates:
 `model::option_chain_to_csv_vec()` processes each `OptionStrikeCandle`:
 1. **Strike percentile** (diagnostic only): `calculate_strike_percentile(strike, min_price_20d, max_price_20d)` — where the strike sits within the 20-day price range. **No longer used for scoring** (kept as a CSV column for context); safety now comes from the max_drop band (next).
 2. **Band safety**: `calculate_max_drop_safety(strike, strike_from, strike_to)` — the strike's position within the max_drop band `[strike_from, strike_to]` (the range computed in 10c-v from `ema_drop`/`percentile_drop`, scaled by DTE). Returns 1.0 at the deep end (`strike_from` — rarely breached), 0.0 at the shallow end (`strike_to` — frequently breached).
-3. **Composite score** via `calculate_put_score(sharpe, safety, rate_of_return, &regime)` (regime accepted but ignored):
+3. **Earnings-aware composite score** via `calculate_put_chain_score(...)`, which wraps `calculate_put_score` with the earnings rule + band safety:
+      - **Earnings rule** — per chain, `earnings_in_window(report_date, expiration, today)` (New York time, inclusive `[today, expiry]`) fires when the symbol reports earnings inside the option's lifetime (post-earnings gap risk is invisible to the historical max_drop band):
+        - **Upper-half strikes** (`strike > midpoint` of `[strike_from, strike_to]`) — the shallow, near-money puts with no gap buffer — are **excluded** (`None`).
+        - Surviving **lower-half** strikes still score, but `safety` is **halved** (`× EARNINGS_SAFETY_MULTIPLIER = 0.5`).
+        - No earnings in window → pure passthrough to `calculate_put_score` on band safety.
       - **Pre-filters** (any failure → `None`, excluded from picks):
         - `rate_of_return ≥ MIN_RATE_OF_RETURN (0.25)` — floor on worthwhile premiums. **No upper cap** — a high return is a reward, not a danger signal (danger is expressed via band safety).
         - `sharpe > 0` — only stocks with positive risk-adjusted returns.
@@ -413,6 +418,7 @@ The option module is organized into focused internal functions:
 | `publish_to_telegram()` | `pub async` | `option.rs:565` | Score chains → generate CSV → send CSV + caption to Telegram |
 | `fetch_option_chains_in_batches()` | private `async` | `option.rs:147` | Batch API loop: expirations → strike ranges → query chains → filter → save to DB |
 | `fetch_earnings_map()` | private `async` | `option.rs:250` | Fetch earnings calendar from Tiger API → `HashMap<String, EarningsInfo>` |
+| `fetch_earnings_to_file()` | `pub async` | `option.rs` | Materialize the earnings calendar for `[from, to]` to a CSV (feeds `backtest --earnings`) |
 | `load_chains_from_db()` | private | `option.rs:355` | Load previously saved option chains from SQLite for re-publishing |
 | `collect_metrics_from_db()` | private | `option.rs:551` | Bundle 4 DB metric queries (sharpe, price ranges, percentiles, trends) into one call |
 | `collect_sharpe_ratios()` | private | `option.rs:407` | Collect Sharpe ratios for all symbols |
@@ -477,6 +483,7 @@ All tunable parameters are centralized in `src/constants.rs`:
 | `MAX_RATE_OF_RETURN` | 0.80 | Unused in production scoring since the 2026-07 redesign (no upper cap); still referenced by backtest presets |
 | `MAX_STRIKE_PERCENTILE` | 0.40 | Unused in production scoring since the 2026-07 redesign; still referenced by backtest presets |
 | `IDEAL_RETURN` | 0.80 | Asymmetric soft-cap for return norm (no penalty above it) |
+| `EARNINGS_SAFETY_MULTIPLIER` | 0.5 | Safety discount when earnings fall in `[today, expiry]` (band overstates safety across a gap) |
 | `BEARNESS_MAX` | 0.08 | SPY drop mapping to full bear (8% below EMA50) |
 
 ---

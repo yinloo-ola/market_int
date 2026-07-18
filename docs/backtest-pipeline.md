@@ -16,6 +16,7 @@ The `backtest` subcommand is a **historical simulation engine** that replays the
 | `--config` | `all` | Config preset name (e.g., `"control"`) or `"all"` to run every preset |
 | `--period` | `5` | DTE period for simulated options (5 or 20) |
 | `--output` | `backtest_results.csv` | CSV output file path |
+| `--earnings` | _(none)_ | Optional earnings calendar CSV (`symbol,report_date[,...]`) to apply the earnings-aware scoring rule for `production-mirror`. Generate via `fetch-earnings`. Absent → earnings-blind (the rule never fires). |
 
 ---
 
@@ -161,7 +162,7 @@ For each non-SPY symbol:
    - Calls `black_scholes_put(price, strike, T, risk_free_rate, dividend_yield, iv_vol)`.
 6. **Compute rate of return** using `compute_rate_of_return(premium, strike, dte)` — matches Tiger API's formula: `premium / strike / num_of_weeks × 52`.
 7. **Compute strike percentile** via `calculate_strike_percentile()` using the last 20 days of close prices. Used only by `StrikePercentile` configs (and as a diagnostic); `MaxDropBand` configs ignore it.
-8. **Score each candidate** via `config.score_candidate(sharpe, strike_pct, rate_of_return, trend_short, trend_long, regime, band_safety)` — applies the config's pre-filters and weighted scoring. `band_safety = calculate_max_drop_safety(strike, min_strike, max_strike)` is computed only when `safety_source == MaxDropBand` (skipped otherwise). Under `MaxDropBand`, safety = band position and the `rate>max` / `strike_percentile>max` pre-filters are skipped, matching production.
+8. **Score each candidate** — research configs use `config.score_candidate(sharpe, strike_pct, rate_of_return, trend_short, trend_long, regime, band_safety)` (pre-filters + weighted scoring; `band_safety = calculate_max_drop_safety(strike, min_strike, max_strike)` only when `safety_source == MaxDropBand`). **`production-mirror` instead sets `apply_earnings_rule = true` and delegates to `model::calculate_put_chain_score(sharpe, strike, min_strike, max_strike, ror, regime, earnings_in_window)` — identical-by-construction to the shipped production scorer (no formula duplication → no drift). `earnings_in_window` is computed per `(sim_date, symbol)` as `sim_date ≤ report_date ≤ (sim_date + period)` from the `--earnings` file (empty → always false → passthrough).
 
 **Intent:**
 - **Synthetically replicate the live pipeline** without calling any external API. Black-Scholes replaces the Tiger option chain API. All indicator calculations are identical to the live code, ensuring the backtest faithfully represents what the model would have picked.
@@ -251,7 +252,7 @@ The backtest ships with **38 presets** organized into experimental groups:
 | Config | Description |
 |---|---|
 | `control` | Research baseline — all features enabled (trend, regime, symmetric scoring, `StrikePercentile` safety). **Not** a mirror of live production scoring. |
-| `production-mirror` | Faithful mirror of the **live production** scoring after the 2026-07 redesign: `MaxDropBand` safety, weights 0.40/0.40/0.20 (no trend), `AsymmetricStatic` (`ideal_return=0.80`), no hard caps, no trend pre-filters, `drop_percentile=0.97`, `risk_free_rate=0`. A pinning test asserts its `score_candidate` equals `model::calculate_put_score`. |
+| `production-mirror` | Faithful mirror of the **live production** scoring: `MaxDropBand` safety, weights 0.40/0.40/0.20 (no trend), `AsymmetricStatic` (`ideal_return=0.80`), no hard caps, no trend pre-filters, `drop_percentile=0.97`, `risk_free_rate=0`, and `apply_earnings_rule = true`. Its candidate loop delegates to `calculate_put_chain_score` (earnings-aware), so it mirrors production exactly. A pinning test still asserts its `score_candidate` equals `model::calculate_put_score` on the no-earnings base path; `--earnings` activates the earnings rule. |
 
 > **`SafetySource`** (added 2026-07): each config selects the safety dimension — `StrikePercentile` (old: `1 − strike_percentile`, with `rate>max` and `strike_percentile>max` pre-filters) or `MaxDropBand` (new: position in `[strike_from, strike_to]`, no hard caps — matches production). `control` and the ablation presets use `StrikePercentile`; only `production-mirror` uses `MaxDropBand`.
 
@@ -402,7 +403,7 @@ This ensures that even if some symbols lack data, the backtest still produces re
 
 | Decision | Rationale |
 |---|---|
-| **No API calls** | Backtest runs entirely from cached SQLite data — no Tiger, no Telegram, no network. Makes it reproducible and fast. |
+| **No API calls** | Backtest runs entirely from cached SQLite data — no Tiger, no Telegram, no network. Makes it reproducible and fast. (Earnings data, when used, comes from a materialized `--earnings` CSV produced separately by `fetch-earnings`; the backtest itself stays offline.) |
 | **Black-Scholes pricing** | Synthetic option prices replace live chain data. IV is estimated as 1.3× historical vol to approximate real market conditions. |
 | **Weekly (Monday) cadence** | Matches the typical put-selling cycle: enter Monday, expire Friday. Also keeps simulation count manageable. |
 | **No look-ahead** | Candles are sliced at each sim_date so indicators only use past data. SPY regime is recomputed per sim_date. |

@@ -15,10 +15,10 @@
 - `src/sharpe.rs` — Sharpe ratio calculation and storage
 - `src/price_percentile.rs` — 20-day price percentile
 - `src/option.rs` — Option chain retrieval, scoring, and Telegram publishing
-- `src/model.rs` — Domain types, error enums, scoring functions (`calculate_put_score`, `calculate_strike_percentile`, `option_chain_to_csv_vec`)
+- `src/model.rs` — Domain types, error enums, scoring functions (`calculate_put_score`, `calculate_put_chain_score` [earnings-aware], `calculate_strike_percentile`, `option_chain_to_csv_vec`)
 - `src/marketdata/` — MarketData API client and response types
 - `src/tiger/` — Tiger Brokers API client (RSA-signed auth, option chains, earnings calendar)
-- `src/store/` — SQLite persistence layer (candle, true_range, max_drop, sharpe_ratio, price_percentile, trend, option_chain)
+- `src/store/` — SQLite persistence layer (candle, true_range, max_drop, sharpe_ratio, price_percentile, trend, option_chain, earnings)
 - `src/constants.rs` — All tunable constants (candle count, thresholds, scoring weights)
 - `src/symbols.rs` — Reads newline-separated symbols from CSV file
 - `src/http/` — Shared HTTP client
@@ -55,9 +55,10 @@
 | `perform-all <path>` | Run full pipeline (quotes → ATR → max drop → Sharpe → trend → price percentile → option chains) |
 | `pull-option-chain5-day <path>` | Pull option chains with ~5-day expiry |
 | `pull-option-chain20-day <path>` | Pull option chains with ~20-day expiry |
-| `publish-option-chain <path>` | Publish top picks to Telegram |
+| `publish-option-chain <path>` | Publish top picks to Telegram (re-publish from DB) |
 | `test-tiger <symbols>` | Test Tiger API with comma-separated symbols |
-| `backtest <path>` | Run backtest simulation |
+| `backtest <path>` | Run backtest simulation (`--earnings <csv>` applies the earnings rule; see `fetch-earnings`) |
+| `fetch-earnings <from> <to>` | Fetch the earnings calendar from Tiger to a CSV (feeds `backtest --earnings`) |
 
 ### Makefile Targets
 
