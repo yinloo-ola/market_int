@@ -53,6 +53,7 @@ mod constants;
 mod metrics;
 
 // Backtest simulation
+mod greeks;
 mod backtest;
 
 use chrono::{Datelike, Local};
