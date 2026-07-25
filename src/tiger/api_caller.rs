@@ -415,7 +415,7 @@ impl Requester {
         expiration_date: &DateTime<chrono_tz::Tz>,   // Expiration date.
         min_open_interest: u32,                      // Minimum open interest.
         side: &model::OptionChainSide,
-    ) -> Result<Vec<model::OptionStrikeCandle>, RequestError> {
+        ) -> Result<Vec<model::OptionStrikeCandle>, RequestError> {
         // Extract symbols from the combined structure
         let symbols: Vec<&str> = symbol_strike_ranges
             .iter()
@@ -498,16 +498,6 @@ impl Requester {
                         // Process put option if side is Put or side is not specified
                         if matches!(side, model::OptionChainSide::Put) {
                             let put_option = item["put"].as_object();
-                            // Temporary probe (2026-07-25): dump the raw Tiger put option
-                            // response fields for AAPL to check if IV/delta/greeks are
-                            // available. Remove after settling the A3 investigation.
-                            if put_option.is_some() && symbol == "AAPL" && cfg!(debug_assertions) {
-                                log::info!(
-                                    "TIGER_A3_PROBE {} put keys: {:?}",
-                                    symbol,
-                                    put_option.unwrap().keys().collect::<Vec<_>>()
-                                );
-                            }
                             self.process_option_data(
                                 put_option,
                                 &symbol,
@@ -571,6 +561,16 @@ impl Requester {
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
 
+        // A3: capture greeks from Tiger response. These are `Option<f64>` because
+        // historical re-publishes from the DB may have NULL columns. The probe
+        // confirmed both `impliedVol` and `delta` are present on live responses.
+        let implied_vol = option_data
+            .get("impliedVol")
+            .and_then(|v| v.as_f64());
+        let delta = option_data
+            .get("delta")
+            .and_then(|v| v.as_f64());
+
         // Calculate mid price
         let mid = calculate_mid_price(bid, ask, last);
 
@@ -610,6 +610,8 @@ impl Requester {
             rate_of_return,
             strike_from,
             strike_to,
+            implied_vol,
+            delta,
         })
     }
 

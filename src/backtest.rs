@@ -59,10 +59,15 @@ pub enum SafetySource {
     /// Old contract: safety = 1 − strike_percentile (vs 20-day price range),
     /// with rate>max and strike_percentile>max pre-filters.
     StrikePercentile,
-    /// New contract (2026-07 redesign): safety = position within the max_drop
-    /// band [strike_from, strike_to]; the rate>max and strike_percentile>max
+    /// 2026-07 redesign: safety = position within the max_drop band
+    /// [strike_from, strike_to]; the rate>max and strike_percentile>max
     /// pre-filters are skipped (danger comes from the band).
     MaxDropBand,
+    /// 2026-07 A3: safety = 1 − put_delta (N(−d1) from Black-Scholes), using
+    /// the same synthetic IV (HV × iv_multiplier) as the premium synthesis.
+    /// The `max_drop_safety` parameter in `score_candidate` carries `1 - delta`
+    /// under this source (the param name is a historical artifact).
+    Delta,
 }
 
 /// Captures every tunable parameter for the backtest.
@@ -209,6 +214,42 @@ impl BacktestConfig {
             risk_free_rate: constants::DEFAULT_RISK_FREE_RATE,
             min_realized_vol: 0.0, // no filter — production annotates, doesn't filter
             apply_earnings_rule: true,
+            ..Self::control()
+        }
+    }
+
+    // ── A3: Delta-based safety (2026-07 experiment) ─────────────────────────
+    //
+    // Tests whether Black-Scholes put delta (N(−d1)) outperforms the max_drop
+    // band position as a safety signal. The backtest's synthetic premium is
+    // priced from the same BS model, so delta and premium are internally
+    // consistent — this validates the *selection logic* of delta-based safety
+    // even though the backtest cannot replicate real-market IV. The Tiger probe
+    // confirmed delta IS available from the live API (field `delta` on the put
+    // response), so a backtest win here justifies a live A/B experiment.
+
+    /// Production-mirror scoring with SafetySource::Delta instead of MaxDropBand.
+    /// `apply_earnings_rule` is disabled — delta is an independent safety signal
+    /// that doesn't interact with band position or the earnings midpoint rule.
+    pub fn delta_safety() -> Self {
+        Self {
+            name: "delta-safety".to_string(),
+            safety_source: SafetySource::Delta,
+            scoring_type: ScoringType::AsymmetricStatic,
+            weight_sharpe: constants::PUT_SCORE_WEIGHT_SHARPE,
+            weight_safety: constants::PUT_SCORE_WEIGHT_SAFETY,
+            weight_return: constants::PUT_SCORE_WEIGHT_RETURN,
+            weight_trend: constants::PUT_SCORE_WEIGHT_TREND,
+            use_trend_in_score: false,
+            use_trend_short_filter: false,
+            use_trend_long_filter: false,
+            use_trend_factor: false,
+            ideal_return: constants::IDEAL_RETURN,
+            drop_percentile: constants::PERCENTILE,
+            min_rate_of_return: constants::MIN_RATE_OF_RETURN,
+            risk_free_rate: constants::DEFAULT_RISK_FREE_RATE,
+            min_realized_vol: 0.0,
+            apply_earnings_rule: false,
             ..Self::control()
         }
     }
@@ -863,6 +904,8 @@ impl BacktestConfig {
             Self::vol_mid_plus(),
             Self::vol_median_plus(),
             Self::vol_high_only(),
+            // Delta safety (A3)
+            Self::delta_safety(),
             // Pick-count caps
             Self::picks_4(),
             Self::picks_5(),
@@ -950,6 +993,9 @@ impl BacktestConfig {
         let safety_norm = match self.safety_source {
             SafetySource::MaxDropBand => max_drop_safety.clamp(0.0, 1.0),
             SafetySource::StrikePercentile => 1.0 - strike_percentile.max(0.0),
+            // Delta: max_drop_safety carries put_delta (N(-d1) ∈ [0,1]).
+            // Safety is maximized when delta ≈ 0 (deep OTM).
+            SafetySource::Delta => (1.0 - max_drop_safety).clamp(0.0, 1.0),
         };
         let return_norm = match self.scoring_type {
             ScoringType::Symmetric => {
@@ -1705,8 +1751,18 @@ pub fn run_backtest(
                 let rate_of_return = compute_rate_of_return(premium, strike, dte);
                 let strike_pct =
                     model::calculate_strike_percentile(strike, range_min, range_max);
-                let band_safety = if config.safety_source == SafetySource::MaxDropBand {
+                // Safety metric passed to score_candidate as `max_drop_safety`.
+                // The field name is a historical artifact; its meaning depends on
+                // config.safety_source:
+                //   MaxDropBand    → band position (0=shallow/risky, 1=deep/safe)
+                //   StrikePercentile → unused (0.0)
+                //   Delta          → put_delta (N(-d1) ∈ [0,1]; safety = 1 - delta in score)
+                let safety_for_scoring = if config.safety_source == SafetySource::MaxDropBand {
                     model::calculate_max_drop_safety(strike, min_strike, max_strike)
+                } else if config.safety_source == SafetySource::Delta {
+                    // Synthetic delta from the same BS model used for pricing.
+                    let t = dte as f64 / 252.0;
+                    greeks::put_delta(price, strike, t, config.risk_free_rate, config.dividend_yield, iv_vol)
                 } else {
                     0.0 // unused by score_candidate under StrikePercentile
                 };
@@ -1734,7 +1790,7 @@ pub fn run_backtest(
                         trend_short,
                         trend_long,
                         &regime,
-                        band_safety,
+                        safety_for_scoring,
                     )
                 };
                 if let Some(score) = score {

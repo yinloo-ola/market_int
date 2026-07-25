@@ -22,7 +22,9 @@ pub fn create_table(conn: &Connection) -> Result<()> {
             rate_of_return REAL NOT NULL,
             strike_from REAL NOT NULL,
             strike_to REAL NOT NULL,
-            earnings_before_expiry TEXT
+            earnings_before_expiry TEXT,
+            implied_vol REAL,
+            delta REAL
     );",
         [],
     )?;
@@ -36,6 +38,17 @@ pub fn create_table(conn: &Connection) -> Result<()> {
         [],
     )
     .ok(); // Ignore error if column already exists
+    // Migration: add A3 greeks columns (2026-07)
+    conn.execute(
+        "ALTER TABLE option_strike ADD COLUMN implied_vol REAL",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE option_strike ADD COLUMN delta REAL",
+        [],
+    )
+    .ok();
     Ok(())
 }
 
@@ -53,7 +66,7 @@ pub fn retrieve_option_chain(
 ) -> Result<Vec<model::OptionStrikeCandle>> {
     let last_update_time = get_latest_updated_time(conn, symbol)?;
     let mut stmt =
-        conn.prepare("SELECT underlying, strike, underlying_price, side, bid, mid, ask, bid_size, ask_size, last, expiration, updated, dte, volume, open_interest, rate_of_return, strike_from, strike_to FROM option_strike WHERE underlying = ?1 AND updated = ?2")?;
+        conn.prepare("SELECT underlying, strike, underlying_price, side, bid, mid, ask, bid_size, ask_size, last, expiration, updated, dte, volume, open_interest, rate_of_return, strike_from, strike_to, implied_vol, delta FROM option_strike WHERE underlying = ?1 AND updated = ?2")?;
     let rows: Vec<_> = stmt
         .query_map(params![symbol, last_update_time], |row| {
             Ok(model::OptionStrikeCandle {
@@ -75,6 +88,14 @@ pub fn retrieve_option_chain(
                 rate_of_return: row.get(15)?,
                 strike_from: row.get(16)?,
                 strike_to: row.get(17)?,
+                implied_vol: {
+                    let v: Option<f64> = row.get(18).ok().flatten();
+                    v
+                },
+                delta: {
+                    let v: Option<f64> = row.get(19).ok().flatten();
+                    v
+                },
             })
         })?
         .collect();
@@ -112,9 +133,11 @@ pub fn save_option_strike(
     rate_of_return,
     strike_from,
     strike_to,
-    earnings_before_expiry
+    earnings_before_expiry,
+    implied_vol,
+    delta
 ) VALUES (
-    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
+    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
 );",
         )?;
         for strike in strikes {
@@ -138,6 +161,8 @@ pub fn save_option_strike(
                 strike.strike_from,
                 strike.strike_to,
                 None::<String>, // earnings_before_expiry: populated later
+                strike.implied_vol,
+                strike.delta,
             ])
             .err(); // Ignore errors during individual inserts; transaction will handle overall success/failure.
         }

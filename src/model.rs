@@ -342,6 +342,15 @@ pub struct OptionStrikeCandle {
     pub rate_of_return: f64,   // Rate of return.
     pub strike_from: f64,      // Strike price from.
     pub strike_to: f64,        // Strike price to.
+    /// Implied volatility from Tiger API (`impliedVol` field), or `None` when
+    /// the parser couldn't extract it. Present on live-pulled chains; absent
+    /// on historical re-publishes from the DB (schema migration adds the column
+    /// but existing rows are NULL).
+    pub implied_vol: Option<f64>,
+    /// Put delta from Tiger API (`delta` field), range [-1, 0]. `None` when
+    /// unavailable (same caveat as `implied_vol`). Convert to positive for
+    /// scoring (safety = 1 + delta).
+    pub delta: Option<f64>,
 }
 
 /// Top pick from scored option chains, used for Telegram caption.
@@ -406,6 +415,8 @@ pub fn option_chain_to_csv_vec(
             "trend_short",
             "trend_long",
             "realized_vol",
+            "implied_vol",
+            "delta",
         ])
         .map_err(QuotesError::CsvError)?;
 
@@ -515,6 +526,8 @@ pub fn option_chain_to_csv_vec(
                 &trend_short_str,
                 &trend_long_str,
                 &realized_vol_str,
+                &chain.implied_vol.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+                &chain.delta.map(|v| format!("{:.3}", v)).unwrap_or_default(),
             ])
             .map_err(QuotesError::CsvError)?;
     }
@@ -906,6 +919,8 @@ mod tests {
             rate_of_return,
             strike_from: 80.0,
             strike_to: 120.0,
+            implied_vol: None,
+            delta: None,
         }
     }
 
