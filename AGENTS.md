@@ -57,7 +57,7 @@
 | `pull-option-chain20-day <path>` | Pull option chains with ~20-day expiry |
 | `publish-option-chain <path>` | Publish top picks to Telegram (re-publish from DB) |
 | `test-tiger <symbols>` | Test Tiger API with comma-separated symbols |
-| `backtest <path>` | Run backtest simulation (`--earnings <csv>` applies the earnings rule; see `fetch-earnings`) |
+| `backtest <path>` | Run backtest simulation (`--earnings <csv>` applies the earnings rule; `--calibrate-safety` runs the read-only safety-calibration tool; see `fetch-earnings`) |
 | `fetch-earnings <from> <to>` | Fetch the earnings calendar from Tiger to a CSV (feeds `backtest --earnings`) |
 
 ### Makefile Targets
@@ -118,8 +118,9 @@ make gcloud-job
 
 ## Additional Notes
 
-- The option scoring model uses a weighted composite: 30% trend (EMA ratio), 30% safety (1 − strike percentile), 20% Sharpe, 20% return proximity to ideal (0.35)
-- Pre-filters reject options with: rate of return outside [0.25, 0.65], Sharpe ≤ 0, strike percentile > 0.60, or trend ratio < 0.98 (below EMA)
-- Strike ranges are tightened by up to 25% when trend is strong (price well above EMA)
-- Top picks are deduplicated by underlying symbol (max 3 picks)
+- The option scoring model uses a weighted composite: 20% Sharpe, 40% safety (max_drop band position), 40% return proximity to ideal (0.80). A trend term is wired into `calculate_put_score` but disabled by default (`PUT_SCORE_WEIGHT_TREND = 0.0`) — the 2026-07 sweep found any non-zero trend weight lifted assignment rate above the 2.4% baseline.
+- Pre-filters reject options with: rate of return < `MIN_RATE_OF_RETURN` (0.25), or Sharpe ≤ 0
+- **Vol-tier annotation (D2, 2026-07):** each published pick is annotated with a volatility tier in the Telegram caption (🟢 vol ≥ 0.38, 🟡 0.28–0.38, 🔴 < 0.28) and a numeric `realized_vol` value, plus a `realized_vol` column in the published CSV. This surfaces capital-efficiency context — the calibration showed high-vol names deliver materially higher `rate_of_return` at matched assignment rate — **without filtering**, because the bot's output is a research candidate pool (the user applies their own fundamental/sentiment analysis), not a trade list. A hard vol filter (`MIN_REALIZED_VOL` = 0.50) was backtest-validated (lifted avg ror 62.3% → 67.0% at flat-or-lower assignment) but is **NOT applied in production** — it lives only in the `vol-high-only` backtest preset for research.
+- Top picks are deduplicated by underlying symbol (max 3 picks — `TOP_PICKS_COUNT`). NB: raising this to 4 added absolute premium but *lowered* avg ror (the 4th pick deployed more capital for less return), so 3 is retained.
+- Strike ranges are tightened by up to 10% when trend is strong (production hardcodes `trend_factor = 1.0` so this is currently inactive)
 - Momentum flags (`NORMAL` / `HIGH` / `EXTENDED`) are based on price percentile thresholds (0.80 / 0.90)

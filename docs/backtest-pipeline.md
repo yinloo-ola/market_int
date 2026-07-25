@@ -1,6 +1,6 @@
 # `Backtest` Pipeline — Deep-Dive Analysis
 
-> **Entry point:** `src/main.rs:495` — `Commands::Backtest { symbols_file_path, from, to, config, period, output }`
+> **Entry point:** `src/main.rs` — `Commands::Backtest { symbols_file_path, from, to, config, period, output, earnings, calibrate_safety }`
 
 The `backtest` subcommand is a **historical simulation engine** that replays the put-selection model over past market data stored in SQLite. Instead of fetching live quotes or option chains from APIs, it reads cached candle data, synthetically prices puts using Black-Scholes, applies the scoring model, tracks assignment outcomes, and outputs aggregate performance metrics across multiple strategy configurations.
 
@@ -17,6 +17,7 @@ The `backtest` subcommand is a **historical simulation engine** that replays the
 | `--period` | `5` | DTE period for simulated options (5 or 20) |
 | `--output` | `backtest_results.csv` | CSV output file path |
 | `--earnings` | _(none)_ | Optional earnings calendar CSV (`symbol,report_date[,...]`) to apply the earnings-aware scoring rule for `production-mirror`. Generate via `fetch-earnings`. Absent → earnings-blind (the rule never fires). |
+| `--calibrate-safety` | _(off)_ | Read-only safety-calibration mode: walk every strike across the production-mirror band (+ an extension toward spot) and print the empirical `safety → breach-rate` curve, bucketed by regime / earnings-window / trend-strength with Wilson 95% CIs. Ignores `--config` / `--period` (always production-mirror, period 5). Emits a `safety_calibration.csv`. |
 
 ---
 
@@ -28,7 +29,7 @@ The `backtest` subcommand is a **historical simulation engine** that replays the
 ├─────────────────────────────────────┤
 │  2. Read symbols & sectors          │  Load from symbols file + sector mappings
 ├─────────────────────────────────────┤
-│  3. Resolve config(s)               │  "all" → 38 presets, or single named config
+│  3. Resolve config(s)               │  "all" → 44 presets, or single named config
 ├─────────────────────────────────────┤
 │  4. For each config:                │
 │  ┌─────────────────────────────────┐│
@@ -87,7 +88,7 @@ The `backtest` subcommand is a **historical simulation engine** that replays the
 **Source:** `src/main.rs:527–558`
 
 **What it does:**
-1. If `--config all`, loads all **38 preset configurations** from `BacktestConfig::all_presets()`.
+1. If `--config all`, loads all **44 preset configurations** from `BacktestConfig::all_presets()`.
 2. If a named config (e.g., `"control"`), loads that single preset.
 3. The optional `--period` flag overrides the default `period` (5) for all resolved configs.
 
@@ -162,7 +163,7 @@ For each non-SPY symbol:
    - Calls `black_scholes_put(price, strike, T, risk_free_rate, dividend_yield, iv_vol)`.
 6. **Compute rate of return** using `compute_rate_of_return(premium, strike, dte)` — matches Tiger API's formula: `premium / strike / num_of_weeks × 52`.
 7. **Compute strike percentile** via `calculate_strike_percentile()` using the last 20 days of close prices. Used only by `StrikePercentile` configs (and as a diagnostic); `MaxDropBand` configs ignore it.
-8. **Score each candidate** — research configs use `config.score_candidate(sharpe, strike_pct, rate_of_return, trend_short, trend_long, regime, band_safety)` (pre-filters + weighted scoring; `band_safety = calculate_max_drop_safety(strike, min_strike, max_strike)` only when `safety_source == MaxDropBand`). **`production-mirror` instead sets `apply_earnings_rule = true` and delegates to `model::calculate_put_chain_score(sharpe, strike, min_strike, max_strike, ror, regime, earnings_in_window)` — identical-by-construction to the shipped production scorer (no formula duplication → no drift). `earnings_in_window` is computed per `(sim_date, symbol)` as `sim_date ≤ report_date ≤ (sim_date + period)` from the `--earnings` file (empty → always false → passthrough).
+8. **Score each candidate** — research configs use `config.score_candidate(sharpe, strike_pct, rate_of_return, trend_short, trend_long, regime, band_safety)` (pre-filters + weighted scoring; `band_safety = calculate_max_drop_safety(strike, min_strike, max_strike)` only when `safety_source == MaxDropBand`). **`production-mirror` instead sets `apply_earnings_rule = true` and delegates to `model::calculate_put_chain_score(sharpe, strike, min_strike, max_strike, ror, trend_short, regime, earnings_in_window)` — identical-by-construction to the shipped production scorer (no formula duplication → no drift). The `trend_short` parameter is passed through to `calculate_put_score`, where a trend term is wired but disabled by default (`PUT_SCORE_WEIGHT_TREND = 0.0`). `earnings_in_window` is computed per `(sim_date, symbol)` as `sim_date ≤ report_date ≤ (sim_date + period)` from the `--earnings` file (empty → always false → passthrough).
 
 **Intent:**
 - **Synthetically replicate the live pipeline** without calling any external API. Black-Scholes replaces the Tiger option chain API. All indicator calculations are identical to the live code, ensuring the backtest faithfully represents what the model would have picked.
@@ -245,7 +246,7 @@ Also breaks down picks by regime (Bull / Correction / Bear) with per-regime assi
 
 ## Configuration Presets (Ablation Matrix)
 
-The backtest ships with **38 presets** organized into experimental groups:
+The backtest ships with **44 presets** organized into experimental groups:
 
 ### Baseline & Production Mirror
 
@@ -332,6 +333,22 @@ The backtest ships with **38 presets** organized into experimental groups:
 | `premium-static-090` | AsymmetricStatic | 0.90 |
 | `premium-static-100` | AsymmetricStatic | 1.00 |
 
+### Vol-Tier Symbol-Universe Filters (D2)
+
+| Config | `min_realized_vol` | Description |
+|---|---|---|
+| `vol-mid-plus` | 0.28 | Production-mirror scoring + vol ≥ 0.28 (~p33) |
+| `vol-median-plus` | 0.32 | Production-mirror scoring + vol ≥ 0.32 (median) |
+| `vol-high-only` | 0.50 | Production-mirror scoring + vol ≥ 0.50 (research-only hard filter; production does NOT filter — it annotates vol in the caption instead) |
+
+### Pick-Count Caps
+
+| Config | `max_picks_per_sim` | Description |
+|---|---|---|
+| `picks-4` | 4 | Production-mirror scoring + 4 picks/sim |
+| `picks-5` | 5 | Production-mirror scoring + 5 picks/sim |
+| `picks-6` | 6 | Production-mirror scoring + 6 picks/sim |
+
 ---
 
 ## Black-Scholes Pricing Model
@@ -358,7 +375,7 @@ The backtest uses a **Black-Scholes put pricer** instead of live option chain da
               ▼            ▼                    ▼
      ┌────────────────┐  ┌──────────────┐  ┌──────────────┐
      │ SQLite (read)  │  │ BacktestConfig│  │ Sector map   │
-     │ candles (850d) │  │ (38 presets)  │  │ (from CSV)   │
+     │ candles (850d) │  │ (44 presets)  │  │ (from CSV)   │
      └───────┬────────┘  └──────┬───────┘  └──────┬───────┘
              │                  │                  │
              ▼                  ▼                  ▼
@@ -408,7 +425,7 @@ This ensures that even if some symbols lack data, the backtest still produces re
 | **Weekly (Monday) cadence** | Matches the typical put-selling cycle: enter Monday, expire Friday. Also keeps simulation count manageable. |
 | **No look-ahead** | Candles are sliced at each sim_date so indicators only use past data. SPY regime is recomputed per sim_date. |
 | **$0.50 strike intervals** | Standard US equity option strike increment for most underlyings. |
-| **38 config presets** | Enables systematic ablation testing to identify which features (trend, regime, safety weight, etc.) contribute most to performance. |
+| **44 config presets** | Enables systematic ablation testing to identify which features (trend, regime, safety weight, etc.) contribute most to performance. |
 | **Top-3 dedup** | Same symbol + sector diversity as live pipeline — tests the real selection logic. |
 | **Net P&L tracking** | Goes beyond just scoring — measures actual profit/loss including assignment scenarios. |
 | **Regime breakdown** | Metrics are segmented by Bull/Correction/Bear to show whether configs perform differently across market conditions. |

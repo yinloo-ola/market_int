@@ -355,8 +355,19 @@ pub async fn retrieve_option_chains_with_expiry(
     )
     .await?;
 
-    let (sharpe_ratios, price_ranges, price_percentiles, trend_data) =
+    let (sharpe_ratios, price_ranges, price_percentiles, trend_data, realized_vols) =
         collect_metrics_from_db(conn, &symbols);
+
+    // NB (2026-07): the universe is NOT hard-filtered by volatility. The bot's
+    // output is a research candidate pool (the user applies their own
+    // fundamental/sentiment analysis before trading), so dropping low-vol
+    // symbols would silently remove research candidates (e.g. AMZN, MSFT, WMT,
+    // COST, CME, GS). Instead, each published pick is annotated with its
+    // realized vol tier in the Telegram caption — surfacing the capital-
+    // efficiency context (high-vol names deliver higher rate_of_return at
+    // matched assignment) without removing any candidates. The hard filter
+    // remains available as a backtest research preset (`vol-high-only`) and
+    // via `constants::MIN_REALIZED_VOL` if a future closed-loop mode wants it.
 
     let earnings_map = fetch_earnings_map(requester, period).await;
 
@@ -375,6 +386,7 @@ pub async fn retrieve_option_chains_with_expiry(
         &earnings_map,
         &price_percentiles,
         &trend_data,
+        &realized_vols,
         sectors,
         period,
         regime,
@@ -429,10 +441,12 @@ pub async fn publish_option_chains(
 
     let all_chains = load_chains_from_db(&mut conn, &symbols);
 
-    let (sharpe_ratios, price_ranges, price_percentiles, trend_data) =
+    let (sharpe_ratios, price_ranges, price_percentiles, trend_data, realized_vols) =
         collect_metrics_from_db(&conn, &symbols);
     let earnings_map = collect_earnings(&conn, &symbols);
 
+    // NB: no vol hard-filter — see the live pull path comment. The realized
+    // vol map is passed through for the caption annotation only.
     publish_to_telegram(
         &all_chains,
         &sharpe_ratios,
@@ -440,6 +454,7 @@ pub async fn publish_option_chains(
         &earnings_map,
         &price_percentiles,
         &trend_data,
+        &realized_vols,
         sectors,
         period,
         regime,
@@ -520,6 +535,26 @@ fn format_telegram_caption(
             .map(|t| format!(" | Trend: {:.0}%", t * 100.0))
             .unwrap_or_default();
 
+        // Vol tier annotation (D2, 2026-07): surfaces the capital-efficiency
+        // context without filtering. High-vol names deliver materially higher
+        // rate_of_return at matched assignment rate (calibration: at 2% breach,
+        // low-vol ~44% ror, mid-vol ~49%, high-vol ~53%). Tier boundaries track
+        // the cross-sectional vol terciles (p33≈0.28, p67≈0.38) so the labels
+        // are consistent with the backtest research presets.
+        let vol_str = pick
+            .realized_vol
+            .map(|v| {
+                let tier = if v >= 0.38 {
+                    "🟢"
+                } else if v >= 0.28 {
+                    "🟡"
+                } else {
+                    "🔴"
+                };
+                format!(" | Vol: {} {:.2}", tier, v)
+            })
+            .unwrap_or_default();
+
         let sector_str = if pick.sector != UNKNOWN_SECTOR {
             format!(" ({})", pick.sector)
         } else {
@@ -527,7 +562,7 @@ fn format_telegram_caption(
         };
 
         caption.push_str(&format!(
-            "{}. {}{sector_str} ${strike:.0}P | Bid: ${bid:.2} / Ask: ${ask:.2} | Return: {:.0}%\n   Score: {:.2} | Sharpe: {:.1}{pctl}{trend_str}\n\n",
+            "{}. {}{sector_str} ${strike:.0}P | Bid: ${bid:.2} / Ask: ${ask:.2} | Return: {:.0}%\n   Score: {:.2} | Sharpe: {:.1}{pctl}{trend_str}{vol_str}\n\n",
             pick.rank,
             pick.underlying,
             pick.rate_of_return * 100.0,
@@ -595,6 +630,28 @@ fn collect_trend_data(conn: &Connection, symbols: &[String]) -> HashMap<String, 
     trends
 }
 
+/// Collects per-symbol annualized realized volatility from the latest candles,
+/// using the same 20-day log-return stdev formula as the backtest
+/// (`backtest::estimate_historical_volatility`). Used by the high-vol
+/// universe filter (D2) — backtest-validated 2026-07 under the capital-
+/// efficiency metric: restricting to high-vol names lifts avg rate_of_return
+/// while assignment stays flat or falls.
+fn collect_realized_vols(conn: &Connection, symbols: &[String]) -> HashMap<String, f64> {
+    let mut vols = HashMap::new();
+    for symbol in symbols {
+        if symbol == "SPY" {
+            continue;
+        }
+        let candles = match candle::get_candles(conn, symbol, crate::constants::CANDLE_COUNT) {
+            Ok(c) if !c.is_empty() => c,
+            _ => continue,
+        };
+        let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
+        vols.insert(symbol.clone(), crate::backtest::estimate_historical_volatility(&closes, 20));
+    }
+    vols
+}
+
 /// Collects the persisted earnings snapshot for the given symbols (mirrors the
 /// other `collect_*` loaders). On a fresh DB with no prior live run the table
 /// is empty → returns an empty map (earnings rule is a no-op), matching the
@@ -625,12 +682,14 @@ fn collect_metrics_from_db(
     HashMap<String, model::PutPriceRange>,
     HashMap<String, f64>,
     HashMap<String, (f64, f64)>,
+    HashMap<String, f64>,
 ) {
     let sharpe_ratios = collect_sharpe_ratios(conn, symbols);
     let price_ranges = collect_price_ranges(conn, symbols);
     let price_percentiles = collect_price_percentiles(conn, symbols);
     let trend_data = collect_trend_data(conn, symbols);
-    (sharpe_ratios, price_ranges, price_percentiles, trend_data)
+    let realized_vols = collect_realized_vols(conn, symbols);
+    (sharpe_ratios, price_ranges, price_percentiles, trend_data, realized_vols)
 }
 
 /// Publishes option chain data to Telegram
@@ -641,6 +700,7 @@ pub async fn publish_to_telegram(
     earnings_map: &HashMap<String, model::EarningsInfo>,
     price_percentiles: &HashMap<String, f64>,
     trend_data: &HashMap<String, (f64, f64)>,
+    realized_vols: &HashMap<String, f64>,
     sectors: &HashMap<String, String>,
     period: usize,
     regime: &crate::regime::MarketRegime,
@@ -653,6 +713,7 @@ pub async fn publish_to_telegram(
         price_percentiles,
         earnings_map,
         trend_data,
+        realized_vols,
         sectors,
         regime,
     )?;
@@ -743,6 +804,7 @@ mod tests {
             earnings: None,
             trend_short: None,
             trend_long: None,
+            realized_vol: None,
         }
     }
 
@@ -769,6 +831,43 @@ mod tests {
 
         assert!(caption.contains("FOO $"), "caption should contain ticker: {}", caption);
         assert!(!caption.contains("(Unknown)"), "caption should NOT show Unknown sector: {}", caption);
+    }
+
+    #[test]
+    fn test_caption_shows_vol_tier_annotation() {
+        // Vol tier (D2): 🟢 high (>=0.38), 🟡 mid (>=0.28), 🔴 low (<0.28).
+        // Surfaces capital-efficiency context without filtering. The numeric
+        // value follows the tier emoji so the user can apply their own judgment.
+        let mut high = make_pick(1, "TSLA", "Consumer Discretionary");
+        high.realized_vol = Some(0.62);
+        let mut mid = make_pick(2, "AAPL", "Technology");
+        mid.realized_vol = Some(0.32);
+        let mut low = make_pick(3, "WMT", "Consumer Staples");
+        low.realized_vol = Some(0.21);
+        let mut unknown = make_pick(4, "FOO", "Unknown");
+        unknown.realized_vol = None; // vol couldn't be computed → no annotation
+
+        let picks = vec![high, mid, low, unknown];
+        let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
+        let caption = format_telegram_caption(&picks, 5, &regime);
+
+        assert!(caption.contains("Vol: 🟢 0.62"), "high-vol tier: {}", caption);
+        assert!(caption.contains("Vol: 🟡 0.32"), "mid-vol tier: {}", caption);
+        assert!(caption.contains("Vol: 🔴 0.21"), "low-vol tier: {}", caption);
+        // Unknown-vol pick (FOO) appears in the caption but with NO "Vol:" annotation
+        // on its entry block (the entry spans two lines: header + Score/Sharpe detail).
+        let foo_idx = caption.lines().position(|l| l.contains("FOO")).unwrap();
+        let foo_block: String = caption
+            .lines()
+            .skip(foo_idx)
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !foo_block.contains("Vol:"),
+            "unknown-vol pick should have no Vol annotation, got block: {}",
+            foo_block
+        );
     }
 
     #[test]

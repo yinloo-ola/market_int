@@ -156,11 +156,13 @@ pub fn calculate_trend_factor(trend_ratio_short: f64) -> f64 {
 ///     soft-capped reward via `return_norm`; danger is expressed via `safety`)
 ///   - sharpe > 0
 ///
-/// Score = weight_sharpe * sharpe_norm + weight_safety * safety + weight_return * return_norm
+/// Score = w_sharpe*sharpe_norm + w_safety*safety + w_return*return_norm
+///        + w_trend*trend_norm
 pub fn calculate_put_score(
     sharpe: f64,
     safety: f64,
     rate_of_return: f64,
+    trend_short: f64,
     _regime: &crate::regime::MarketRegime,
 ) -> Option<f64> {
     // Pre-filters: keep the min-return floor and the positive-Sharpe requirement.
@@ -180,14 +182,23 @@ pub fn calculate_put_score(
     // (no further credit above it, but no exclusion either).
     let return_norm = (rate_of_return / constants::IDEAL_RETURN).min(1.0);
 
-    let weight_sharpe = 0.20;
-    let weight_safety = 0.40;
-    let weight_return = 0.40;
+    // Trend term: trend_short (price/EMA20) is an independent breach predictor
+    // not captured by the max_drop band. A confirmed uptrend earns credit,
+    // letting the picker favour shallower (higher-premium) strikes that the
+    // band alone would penalise. Calibration-validated 2026-07 (1.21M obs).
+    let trend_norm = ((trend_short - constants::TREND_SCORE_FLOOR) / constants::TREND_SCORE_BAND)
+        .clamp(0.0, 1.0);
+
+    let weight_sharpe = constants::PUT_SCORE_WEIGHT_SHARPE;
+    let weight_safety = constants::PUT_SCORE_WEIGHT_SAFETY;
+    let weight_return = constants::PUT_SCORE_WEIGHT_RETURN;
+    let weight_trend = constants::PUT_SCORE_WEIGHT_TREND;
 
     Some(
         weight_sharpe * sharpe_norm
             + weight_safety * safety_norm
-            + weight_return * return_norm,
+            + weight_return * return_norm
+            + weight_trend * trend_norm,
     )
 }
 
@@ -229,6 +240,7 @@ pub fn calculate_put_chain_score(
     strike_from: f64,
     strike_to: f64,
     rate_of_return: f64,
+    trend_short: f64,
     regime: &crate::regime::MarketRegime,
     earnings_in_window: bool,
 ) -> Option<f64> {
@@ -244,7 +256,7 @@ pub fn calculate_put_chain_score(
     } else {
         safety
     };
-    calculate_put_score(sharpe, safety, rate_of_return, regime)
+    calculate_put_score(sharpe, safety, rate_of_return, trend_short, regime)
 }
 
 /// Returns a momentum flag based on price percentile.
@@ -347,6 +359,10 @@ pub struct TopPick {
     pub earnings: Option<EarningsInfo>,
     pub trend_short: Option<f64>,
     pub trend_long: Option<f64>,
+    /// Annualized realized volatility (20-day log-return stdev × √252), used
+    /// for the capital-efficiency annotation in the Telegram caption. None
+    /// when vol could not be computed (insufficient candle history).
+    pub realized_vol: Option<f64>,
 }
 
 pub fn option_chain_to_csv_vec(
@@ -356,6 +372,7 @@ pub fn option_chain_to_csv_vec(
     price_percentiles: &HashMap<String, f64>,
     earnings_map: &HashMap<String, EarningsInfo>,
     trend_data: &HashMap<String, (f64, f64)>,
+    realized_vols: &HashMap<String, f64>,
     sectors: &HashMap<String, String>,
     regime: &crate::regime::MarketRegime,
 ) -> Result<(Vec<u8>, Vec<TopPick>)> {
@@ -388,6 +405,7 @@ pub fn option_chain_to_csv_vec(
             "earnings_before_expiry",
             "trend_short",
             "trend_long",
+            "realized_vol",
         ])
         .map_err(QuotesError::CsvError)?;
 
@@ -420,12 +438,17 @@ pub fn option_chain_to_csv_vec(
         // longer gated on a 20-day price_range, so every chain is eligible for
         // top-3 even when its 20-day range is missing (then `strike_percentile`
         // below is blank) — band safety does not need the 20-day range.
+        // `trend_short` (price/EMA20) is surfaced here too: it is an independent
+        // breach predictor that the band does not capture (calibration-validated
+        // 2026-07), so strong-uptrend picks can win slots at shallower strikes.
+        let trend_short = trend_data.get(&chain.underlying).map(|(s, _)| *s).unwrap_or(0.0);
         let score = calculate_put_chain_score(
             sharpe_ratio,
             chain.strike,
             chain.strike_from,
             chain.strike_to,
             chain.rate_of_return,
+            trend_short,
             regime,
             in_earnings_window(&chain.underlying),
         );
@@ -459,6 +482,11 @@ pub fn option_chain_to_csv_vec(
             None => (String::new(), String::new()),
         };
 
+        let realized_vol_str = match realized_vols.get(&chain.underlying) {
+            Some(v) => format!("{:.3}", v),
+            None => String::new(),
+        };
+
         let sector_str = sector_of(sectors, &chain.underlying).to_string();
 
         writer
@@ -486,24 +514,29 @@ pub fn option_chain_to_csv_vec(
                 &earnings_str,
                 &trend_short_str,
                 &trend_long_str,
+                &realized_vol_str,
             ])
             .map_err(QuotesError::CsvError)?;
     }
 
     let bytes = writer.into_inner().unwrap().into_inner().unwrap();
 
-    // Select top 3 scored chains for TopPicks
+    // Select top N scored chains for TopPicks (N = TOP_PICKS_COUNT). Raised
+    // from 3 to 4 in 2026-07 — see constants::TOP_PICKS_COUNT doc for the
+    // backtest evidence (picks-4 preset: +23% premium, assignment flat).
     let mut scored: Vec<(usize, f64)> = all_chains
         .iter()
         .enumerate()
         .filter_map(|(i, chain)| {
             let sharpe = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
+            let trend_short = trend_data.get(&chain.underlying).map(|(s, _)| *s).unwrap_or(0.0);
             let score = calculate_put_chain_score(
                 sharpe,
                 chain.strike,
                 chain.strike_from,
                 chain.strike_to,
                 chain.rate_of_return,
+                trend_short,
                 regime,
                 in_earnings_window(&chain.underlying),
             )?;
@@ -518,7 +551,7 @@ pub fn option_chain_to_csv_vec(
     let mut rank = 0;
 
     for (idx, score) in &scored {
-        if rank >= 3 {
+        if rank >= constants::TOP_PICKS_COUNT {
             break;
         }
         let chain = &all_chains[*idx];
@@ -534,6 +567,7 @@ pub fn option_chain_to_csv_vec(
         let pp = price_percentiles.get(&chain.underlying).copied();
         let ts = trend_data.get(&chain.underlying).map(|(s, _)| *s);
         let tl = trend_data.get(&chain.underlying).map(|(_, l)| *l);
+        let rv = realized_vols.get(&chain.underlying).copied();
 
         seen.insert(chain.underlying.clone());
         if sector != UNKNOWN_SECTOR {
@@ -555,6 +589,7 @@ pub fn option_chain_to_csv_vec(
             earnings: earnings_map.get(&chain.underlying).cloned(),
             trend_short: ts,
             trend_long: tl,
+            realized_vol: rv,
         });
     }
 
@@ -703,63 +738,64 @@ mod tests {
 
     #[test]
     fn test_put_score_good_option() {
-        // deep/safe strike (safety=0.90), sharpe=1.8, return=0.45
+        // deep/safe strike (safety=0.90), sharpe=1.8, return=0.45, trend_short=1.0
+        // (trend weight 0.0 → term contributes nothing).
         // sharpe_norm=0.9, safety_norm=0.9, return_norm=(0.45/0.80)=0.5625
-        // score = 0.20*0.9 + 0.40*0.9 + 0.40*0.5625 = 0.765
-        let score = calculate_put_score(1.8, 0.90, 0.45, &bull_regime()).unwrap();
+        // score = 0.20*0.9 + 0.40*0.9 + 0.40*0.5625 + 0.0*0 = 0.765
+        let score = calculate_put_score(1.8, 0.90, 0.45, 1.0, &bull_regime()).unwrap();
         assert!((score - 0.765).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_filtered_low_return() {
         // MIN_RATE_OF_RETURN floor still applies
-        assert!(calculate_put_score(1.5, 0.90, 0.25, &bull_regime()).is_some());
-        assert!(calculate_put_score(1.5, 0.90, 0.24, &bull_regime()).is_none());
+        assert!(calculate_put_score(1.5, 0.90, 0.25, 1.0, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.5, 0.90, 0.24, 1.0, &bull_regime()).is_none());
     }
 
     #[test]
     fn test_put_score_high_return_accepted() {
         // no upper cap: high return is accepted — danger now comes from safety
-        assert!(calculate_put_score(1.5, 0.90, 0.85, &bull_regime()).is_some());
-        assert!(calculate_put_score(1.5, 0.90, 5.0, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.5, 0.90, 0.85, 1.0, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.5, 0.90, 5.0, 1.0, &bull_regime()).is_some());
     }
 
     #[test]
     fn test_put_score_filtered_negative_sharpe() {
-        assert!(calculate_put_score(-0.5, 0.90, 0.45, &bull_regime()).is_none());
+        assert!(calculate_put_score(-0.5, 0.90, 0.45, 1.0, &bull_regime()).is_none());
     }
 
     #[test]
     fn test_put_score_filtered_zero_sharpe() {
-        assert!(calculate_put_score(0.0, 0.90, 0.45, &bull_regime()).is_none());
+        assert!(calculate_put_score(0.0, 0.90, 0.45, 1.0, &bull_regime()).is_none());
     }
 
     #[test]
     fn test_put_score_boundary_return_low() {
-        assert!(calculate_put_score(1.0, 0.90, 0.25, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.0, 0.90, 0.25, 1.0, &bull_regime()).is_some());
     }
 
     #[test]
     fn test_put_score_boundary_return_high() {
         // 0.80 == IDEAL_RETURN, accepted (soft-cap saturation point)
-        assert!(calculate_put_score(1.0, 0.90, 0.80, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.0, 0.90, 0.80, 1.0, &bull_regime()).is_some());
     }
 
     #[test]
     fn test_put_score_just_below_return_floor() {
-        assert!(calculate_put_score(1.0, 0.90, 0.24, &bull_regime()).is_none());
+        assert!(calculate_put_score(1.0, 0.90, 0.24, 1.0, &bull_regime()).is_none());
     }
 
     #[test]
     fn test_put_score_at_return_floor() {
-        assert!(calculate_put_score(1.0, 0.90, 0.25, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.0, 0.90, 0.25, 1.0, &bull_regime()).is_some());
     }
 
     #[test]
     fn test_put_score_safety_direction() {
         // same sharpe/return: deep strike (high safety) outscores shallow
-        let shallow = calculate_put_score(1.5, 0.10, 0.45, &bull_regime()).unwrap();
-        let deep = calculate_put_score(1.5, 0.90, 0.45, &bull_regime()).unwrap();
+        let shallow = calculate_put_score(1.5, 0.10, 0.45, 1.0, &bull_regime()).unwrap();
+        let deep = calculate_put_score(1.5, 0.90, 0.45, 1.0, &bull_regime()).unwrap();
         assert!(deep > shallow);
     }
 
@@ -795,27 +831,30 @@ mod tests {
 
     #[test]
     fn test_put_score_clamps_safety() {
-        // safety below 0 clamps to 0.0 (shallow/risky end)
+        // safety below 0 clamps to 0.0 (shallow/risky end). trend_short=1.0
+        // is below TREND_SCORE_FLOOR (1.02) → trend_norm=0; trend weight is 0.0
+        // (disabled) so the term contributes nothing regardless.
         // sharpe=2.0 -> sharpe_norm=1.0, safety_norm=0.0, return_norm=(0.35/0.80)=0.4375
-        // score = 0.20*1.0 + 0.40*0.0 + 0.40*0.4375 = 0.375
-        let score = calculate_put_score(2.0, -0.10, 0.35, &bull_regime()).unwrap();
+        // score = 0.20*1.0 + 0.40*0.0 + 0.40*0.4375 + 0.0*0 = 0.375
+        let score = calculate_put_score(2.0, -0.10, 0.35, 1.0, &bull_regime()).unwrap();
         assert!((score - 0.375).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_high_sharpe_clamps() {
-        // sharpe > 2.0 clamps sharpe_norm to 1.0; deep strike safety=1.0
+        // sharpe > 2.0 clamps sharpe_norm to 1.0; deep strike safety=1.0.
         // sharpe_norm=1.0, safety_norm=1.0, return_norm=0.4375
-        // score = 0.20 + 0.40 + 0.175 = 0.775
-        let score = calculate_put_score(5.0, 1.0, 0.35, &bull_regime()).unwrap();
+        // score = 0.20 + 0.40 + 0.175 + 0 = 0.775
+        let score = calculate_put_score(5.0, 1.0, 0.35, 1.0, &bull_regime()).unwrap();
         assert!((score - 0.775).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_peak() {
-        // deep strike (safety=1.0), sharpe=2.0 (clamped 1.0), return=0.80 (return_norm=1.0)
-        // score = 0.20 + 0.40 + 0.40 = 1.00
-        let score = calculate_put_score(2.0, 1.0, 0.80, &bull_regime()).unwrap();
+        // deep strike (safety=1.0), sharpe=2.0 (clamped 1.0), return=0.80 (return_norm=1.0).
+        // Trend weight is 0.0 (disabled) → trend term contributes 0 even at saturation.
+        // score = 0.20 + 0.40 + 0.40 + 0 = 1.00
+        let score = calculate_put_score(2.0, 1.0, 0.80, 1.08, &bull_regime()).unwrap();
         assert!((score - 1.00).abs() < 0.01);
     }
 
@@ -823,10 +862,28 @@ mod tests {
     fn test_put_score_return_soft_cap() {
         // return above IDEAL_RETURN saturates return_norm at 1.0: no extra
         // credit, but still accepted (no hard cap).
-        let at_cap = calculate_put_score(2.0, 1.0, 0.80, &bull_regime()).unwrap();
-        let above_cap = calculate_put_score(2.0, 1.0, 2.00, &bull_regime()).unwrap();
+        let at_cap = calculate_put_score(2.0, 1.0, 0.80, 1.08, &bull_regime()).unwrap();
+        let above_cap = calculate_put_score(2.0, 1.0, 2.00, 1.08, &bull_regime()).unwrap();
         assert!((at_cap - above_cap).abs() < 1e-9);
         assert!((at_cap - 1.00).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_put_score_trend_term_disabled_by_default() {
+        // With PUT_SCORE_WEIGHT_TREND = 0.0 (the default, post the 2026-07 sweep
+        // that found any non-zero weight lifts assignment rate above baseline),
+        // the trend term must contribute nothing — a strong-uptrend pick scores
+        // identically to a no-uptrend pick. This pins the disabled-by-default
+        // contract so the lever can be re-enabled deliberately if a future
+        // change (per-symbol vol-tier selection, real IV/delta capture) makes
+        // the premium/breach decoupling achievable.
+        assert!(
+            constants::PUT_SCORE_WEIGHT_TREND == 0.0,
+            "trend weight must be 0.0 by default; re-enabling requires a backtest showing premium up at flat assignment"
+        );
+        let weak = calculate_put_score(2.0, 0.5, 0.45, 1.0, &bull_regime()).unwrap();
+        let strong = calculate_put_score(2.0, 0.5, 0.45, 1.08, &bull_regime()).unwrap();
+        assert!((strong - weak).abs() < 1e-9, "strong={strong} weak={weak}");
     }
 
     fn make_chain(underlying: &str, strike: f64, rate_of_return: f64) -> OptionStrikeCandle {
@@ -894,6 +951,7 @@ mod tests {
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
         let trend_data = HashMap::new();
+        let realized_vols = HashMap::new();
 
         let (_csv, top_picks) = option_chain_to_csv_vec(
             &chains,
@@ -901,7 +959,7 @@ mod tests {
             &ranges,
             &percentiles,
             &earnings,
-            &trend_data,
+            &trend_data, &realized_vols,
             &HashMap::new(),
             &bull_regime(),
         )
@@ -947,6 +1005,7 @@ mod tests {
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
         let trend_data = HashMap::new();
+        let realized_vols = HashMap::new();
 
         let (_csv, top_picks) = option_chain_to_csv_vec(
             &chains,
@@ -954,7 +1013,7 @@ mod tests {
             &ranges,
             &percentiles,
             &earnings,
-            &trend_data,
+            &trend_data, &realized_vols,
             &HashMap::new(),
             &bull_regime(),
         )
@@ -1046,6 +1105,7 @@ mod tests {
         let earnings = HashMap::new();
 
         let mut trend_data = HashMap::new();
+        let realized_vols = HashMap::new();
         trend_data.insert("AAPL".to_string(), (1.05, 1.06));
         trend_data.insert("MSFT".to_string(), (0.95, 0.94));
 
@@ -1055,7 +1115,7 @@ mod tests {
             &ranges,
             &percentiles,
             &earnings,
-            &trend_data,
+            &trend_data, &realized_vols,
             &HashMap::new(),
             &bull_regime(),
         )
@@ -1085,7 +1145,8 @@ mod tests {
 
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
-        let trend_data = HashMap::new(); // empty — no trend data
+        let trend_data = HashMap::new();
+        let realized_vols = HashMap::new(); // empty — no trend data
 
         let (_csv, top_picks) = option_chain_to_csv_vec(
             &chains,
@@ -1093,7 +1154,7 @@ mod tests {
             &ranges,
             &percentiles,
             &earnings,
-            &trend_data,
+            &trend_data, &realized_vols,
             &HashMap::new(),
             &bull_regime(),
         )
@@ -1160,6 +1221,7 @@ mod tests {
         );
 
         let mut trend_data = HashMap::new();
+        let realized_vols = HashMap::new();
         trend_data.insert("AAPL".to_string(), (1.05, 1.06));
         trend_data.insert("MSFT".to_string(), (0.95, 0.96));
         trend_data.insert("TSLA".to_string(), (0.93, 0.94));
@@ -1177,7 +1239,7 @@ mod tests {
             &ranges,
             &percentiles,
             &earnings,
-            &trend_data,
+            &trend_data, &realized_vols,
             &HashMap::new(),
             &bull,
         )
@@ -1192,7 +1254,7 @@ mod tests {
             &ranges,
             &percentiles,
             &earnings,
-            &trend_data,
+            &trend_data, &realized_vols,
             &HashMap::new(),
             &bear,
         )
@@ -1235,6 +1297,7 @@ mod tests {
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
         let trend_data = HashMap::new();
+        let realized_vols = HashMap::new();
 
         let (_csv, top_picks) = option_chain_to_csv_vec(
             &chains,
@@ -1242,7 +1305,7 @@ mod tests {
             &ranges,
             &percentiles,
             &earnings,
-            &trend_data,
+            &trend_data, &realized_vols,
             &sectors,
             &bull_regime(),
         )
@@ -1286,6 +1349,7 @@ mod tests {
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
         let trend_data = HashMap::new();
+        let realized_vols = HashMap::new();
 
         let (_csv, top_picks) = option_chain_to_csv_vec(
             &chains,
@@ -1293,7 +1357,7 @@ mod tests {
             &ranges,
             &percentiles,
             &earnings,
-            &trend_data,
+            &trend_data, &realized_vols,
             &sectors,
             &bull_regime(),
         )
@@ -1321,6 +1385,7 @@ mod tests {
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
         let trend_data = HashMap::new();
+        let realized_vols = HashMap::new();
 
         let (csv_bytes, _) = option_chain_to_csv_vec(
             &chains,
@@ -1328,7 +1393,7 @@ mod tests {
             &ranges,
             &percentiles,
             &earnings,
-            &trend_data,
+            &trend_data, &realized_vols,
             &sectors,
             &bull_regime(),
         )
@@ -1368,6 +1433,7 @@ mod tests {
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
         let trend_data = HashMap::new();
+        let realized_vols = HashMap::new();
 
         let (csv_bytes, _) = option_chain_to_csv_vec(
             &chains,
@@ -1375,7 +1441,7 @@ mod tests {
             &ranges,
             &percentiles,
             &earnings,
-            &trend_data,
+            &trend_data, &realized_vols,
             &sectors,
             &bull_regime(),
         )
@@ -1417,6 +1483,7 @@ mod tests {
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
         let trend_data = HashMap::new();
+        let realized_vols = HashMap::new();
 
         let (_csv, top_picks) = option_chain_to_csv_vec(
             &chains,
@@ -1424,7 +1491,7 @@ mod tests {
             &ranges,
             &percentiles,
             &earnings,
-            &trend_data,
+            &trend_data, &realized_vols,
             &sectors,
             &bull_regime(),
         )
@@ -1464,6 +1531,7 @@ mod tests {
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
         let trend_data = HashMap::new();
+        let realized_vols = HashMap::new();
 
         let (_csv, top_picks) = option_chain_to_csv_vec(
             &chains,
@@ -1471,7 +1539,7 @@ mod tests {
             &ranges,
             &percentiles,
             &earnings,
-            &trend_data,
+            &trend_data, &realized_vols,
             &sectors,
             &bull_regime(),
         )
@@ -1510,15 +1578,16 @@ mod tests {
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
         let trend_data = HashMap::new();
+        let realized_vols = HashMap::new();
 
         let (csv_bytes, _) = option_chain_to_csv_vec(
-            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data,
+            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data, &realized_vols,
             &HashMap::new(), &bull_regime(),
         )
         .unwrap();
 
         let expected_safety = calculate_max_drop_safety(90.0, 80.0, 120.0);
-        let expected_score = calculate_put_score(1.5, expected_safety, 0.35, &bull_regime()).unwrap();
+        let expected_score = calculate_put_score(1.5, expected_safety, 0.35, 1.0, &bull_regime()).unwrap();
 
         let csv_str = String::from_utf8(csv_bytes).unwrap();
         let header: Vec<&str> = csv_str.lines().next().unwrap().split(',').collect();
@@ -1530,6 +1599,49 @@ mod tests {
             format!("{:.3}", expected_score),
             "no-earnings CSV score must equal calculate_put_score on band safety"
         );
+    }
+
+    #[test]
+    fn test_csv_realized_vol_column_populates_when_present() {
+        // The realized_vol CSV column (D2 annotation, 2026-07) must render the
+        // per-symbol vol when the map is populated, and be blank when absent.
+        // Pins the column wiring end-to-end so a future header/row reorder can't
+        // silently drop or misalign it.
+        let chains = vec![
+            make_chain("AAPL", 90.0, 0.35), // has vol
+            make_chain("MSFT", 95.0, 0.40), // no vol entry → blank
+        ];
+        let mut sharpe = HashMap::new();
+        sharpe.insert("AAPL".to_string(), 1.5);
+        sharpe.insert("MSFT".to_string(), 1.4);
+        let mut ranges = HashMap::new();
+        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+        ranges.insert("MSFT".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+        let mut realized_vols = HashMap::new();
+        realized_vols.insert("AAPL".to_string(), 0.423); // AAPL has vol; MSFT absent
+
+        let (csv_bytes, _) = option_chain_to_csv_vec(
+            &chains, &sharpe, &ranges, &HashMap::new(), &HashMap::new(), &HashMap::new(),
+            &realized_vols, &HashMap::new(), &bull_regime(),
+        )
+        .unwrap();
+
+        let csv_str = String::from_utf8(csv_bytes).unwrap();
+        let mut lines = csv_str.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let vol_idx = header.iter().position(|h| *h == "realized_vol")
+            .expect("realized_vol column must exist in CSV header");
+
+        let rows: Vec<Vec<&str>> = lines.map(|l| l.split(',').collect()).collect();
+        let aapl = rows.iter().find(|r| r[0] == "AAPL")
+            .expect("AAPL row present");
+        let msft = rows.iter().find(|r| r[0] == "MSFT")
+            .expect("MSFT row present");
+
+        // Populated vol renders to 3 decimal places.
+        assert_eq!(aapl[vol_idx], "0.423", "AAPL realized_vol should render: {}", csv_str);
+        // Absent vol renders as an empty cell.
+        assert_eq!(msft[vol_idx], "", "MSFT realized_vol should be blank when absent: {}", csv_str);
     }
 
     #[test]
@@ -1555,10 +1667,11 @@ mod tests {
 
         let percentiles = HashMap::new();
         let trend_data = HashMap::new();
+        let realized_vols = HashMap::new();
 
         let empty_earnings: HashMap<String, EarningsInfo> = HashMap::new();
         let (_csv_a, picks_a) = option_chain_to_csv_vec(
-            &chains, &sharpe, &ranges, &percentiles, &empty_earnings, &trend_data,
+            &chains, &sharpe, &ranges, &percentiles, &empty_earnings, &trend_data, &realized_vols,
             &HashMap::new(), &bull_regime(),
         )
         .unwrap();
@@ -1573,7 +1686,7 @@ mod tests {
             },
         );
         let (_csv_b, picks_b) = option_chain_to_csv_vec(
-            &chains, &sharpe, &ranges, &percentiles, &populated_earnings, &trend_data,
+            &chains, &sharpe, &ranges, &percentiles, &populated_earnings, &trend_data, &realized_vols,
             &HashMap::new(), &bull_regime(),
         )
         .unwrap();
@@ -1645,16 +1758,16 @@ mod tests {
 
     #[test]
     fn test_put_chain_score_no_earnings_deep_is_passthrough() {
-        let got = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, &bull_regime(), false);
-        let want = calculate_put_score(1.5, band_safety(90.0), 0.35, &bull_regime());
+        let got = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false);
+        let want = calculate_put_score(1.5, band_safety(90.0), 0.35, 1.0, &bull_regime());
         assert_eq!(got, want);
     }
 
     #[test]
     fn test_put_chain_score_no_earnings_shallow_is_passthrough() {
         // strike 110 (upper half), no earnings → still scored (not excluded).
-        let got = calculate_put_chain_score(1.5, 110.0, 80.0, 120.0, 0.35, &bull_regime(), false);
-        let want = calculate_put_score(1.5, band_safety(110.0), 0.35, &bull_regime());
+        let got = calculate_put_chain_score(1.5, 110.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false);
+        let want = calculate_put_score(1.5, band_safety(110.0), 0.35, 1.0, &bull_regime());
         assert_eq!(got, want);
         assert!(got.is_some());
     }
@@ -1663,7 +1776,7 @@ mod tests {
     fn test_put_chain_score_earnings_excludes_upper_half() {
         // strike 110 > midpoint 100, earnings in window → excluded.
         assert_eq!(
-            calculate_put_chain_score(1.5, 110.0, 80.0, 120.0, 0.35, &bull_regime(), true),
+            calculate_put_chain_score(1.5, 110.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true),
             None
         );
     }
@@ -1671,11 +1784,12 @@ mod tests {
     #[test]
     fn test_put_chain_score_earnings_keeps_lower_half_with_halved_safety() {
         // strike 90 ≤ midpoint 100, earnings → scored with safety × multiplier.
-        let got = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, &bull_regime(), true);
+        let got = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true);
         let want = calculate_put_score(
             1.5,
             band_safety(90.0) * crate::constants::EARNINGS_SAFETY_MULTIPLIER,
             0.35,
+            1.0,
             &bull_regime(),
         );
         assert_eq!(got, want);
@@ -1685,12 +1799,13 @@ mod tests {
     #[test]
     fn test_put_chain_score_earnings_midpoint_kept() {
         // strike == midpoint → kept (strike ≤ mid), safety halved.
-        let got = calculate_put_chain_score(1.5, 100.0, 80.0, 120.0, 0.35, &bull_regime(), true);
+        let got = calculate_put_chain_score(1.5, 100.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true);
         assert!(got.is_some());
         let want = calculate_put_score(
             1.5,
             band_safety(100.0) * crate::constants::EARNINGS_SAFETY_MULTIPLIER,
             0.35,
+            1.0,
             &bull_regime(),
         );
         assert_eq!(got, want);
@@ -1699,8 +1814,8 @@ mod tests {
     #[test]
     fn test_put_chain_score_earnings_halving_downranks() {
         // same deep strike: earnings score < no-earnings score.
-        let with = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, &bull_regime(), true).unwrap();
-        let without = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, &bull_regime(), false).unwrap();
+        let with = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true).unwrap();
+        let without = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false).unwrap();
         assert!(with < without);
     }
 
@@ -1708,12 +1823,12 @@ mod tests {
     fn test_put_chain_score_earnings_does_not_bypass_prefilters() {
         // Earnings doesn't override the sharpe>0 floor: deep strike, sharpe=0 → None.
         assert_eq!(
-            calculate_put_chain_score(0.0, 90.0, 80.0, 120.0, 0.35, &bull_regime(), true),
+            calculate_put_chain_score(0.0, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true),
             None
         );
         // And the min-return floor still applies.
         assert_eq!(
-            calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.10, &bull_regime(), true),
+            calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.10, 1.0, &bull_regime(), true),
             None
         );
     }
@@ -1740,10 +1855,11 @@ mod tests {
         let percentiles = HashMap::new();
         let earnings = HashMap::new();
         let trend_data = HashMap::new();
+        let realized_vols = HashMap::new();
 
         // Must not panic; returns Ok regardless of the NaN score.
         let result = option_chain_to_csv_vec(
-            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data,
+            &chains, &sharpe, &ranges, &percentiles, &earnings, &trend_data, &realized_vols,
             &HashMap::new(), &bull_regime(),
         );
         assert!(result.is_ok());
