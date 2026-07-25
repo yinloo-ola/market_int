@@ -417,6 +417,7 @@ pub fn option_chain_to_csv_vec(
             "realized_vol",
             "implied_vol",
             "delta",
+            "iv_rv_ratio",
         ])
         .map_err(QuotesError::CsvError)?;
 
@@ -528,6 +529,15 @@ pub fn option_chain_to_csv_vec(
                 &realized_vol_str,
                 &chain.implied_vol.map(|v| format!("{:.3}", v)).unwrap_or_default(),
                 &chain.delta.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+                &chain
+                    .implied_vol
+                    .and_then(|iv| {
+                        realized_vols
+                            .get(&chain.underlying)
+                            .filter(|&&rv| rv > 0.0)
+                            .map(|&rv| format!("{:.2}", iv / rv))
+                    })
+                    .unwrap_or_default(),
             ])
             .map_err(QuotesError::CsvError)?;
     }

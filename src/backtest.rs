@@ -144,6 +144,17 @@ pub struct BacktestConfig {
     // typical rate), so total premium rises faster than total assignment
     // loss, and aggregate assignment rate can stay flat or fall.
     pub max_picks_per_sim: usize,
+
+    // IV/RV boost (A3, 2026-07). When implied vol > realized vol, the
+    // premium collected is inflated relative to actual stock risk. This
+    // factor scales up the safety of Delta-safety picks when their IV/RV
+    // ratio exceeds the baseline (iv_multiplier = 1.3 in the backtest).
+    // Formula: safety_boost = 1 + max(0, ivrv / baseline - 1) × factor
+    // where ivrv = synthetic_iv / realized_vol = iv_multiplier / 1.0 = 1.3
+    // in the backtest (a constant), so the boost is constant for all picks.
+    // In production, real Tiger IV varies per symbol, so the boost fires
+    // selectively on IV-rich names. 0.0 = disabled.
+    pub ivrv_boost: f64,
 }
 
 impl BacktestConfig {
@@ -183,6 +194,7 @@ impl BacktestConfig {
             apply_earnings_rule: false,
             min_realized_vol: 0.0, // no symbol-universe filter by default
             max_picks_per_sim: constants::TOP_PICKS_COUNT, // matches production
+            ivrv_boost: 0.0,
         }
     }
 
@@ -251,6 +263,22 @@ impl BacktestConfig {
             min_realized_vol: 0.0,
             apply_earnings_rule: false,
             ..Self::control()
+        }
+    }
+
+    /// Delta safety + IV/RV boost. When implied vol exceeds realized vol, the
+    /// premium collected is inflated relative to actual stock risk. This preset
+    /// enables a safety boost that reduces delta (makes the strike appear safer)
+    /// proportionally to the IV/RV excess. In the backtest, synthetic IV/RV =
+    /// iv_multiplier = 1.3 = baseline, so the boost is 0. The mechanism fires
+    /// in production with real Tiger IV (probe: AMZN today has IV/RV = 1.90 →
+    /// ~29% delta reduction).
+    pub fn delta_safety_ivrv() -> Self {
+        Self {
+            name: "delta-safety-ivrv".to_string(),
+            safety_source: SafetySource::Delta,
+            ivrv_boost: 1.0, // full boost: delta ÷ (1 + max(0, IV/RV/1.3 - 1))
+            ..Self::delta_safety()
         }
     }
 
@@ -906,6 +934,7 @@ impl BacktestConfig {
             Self::vol_high_only(),
             // Delta safety (A3)
             Self::delta_safety(),
+            Self::delta_safety_ivrv(),
             // Pick-count caps
             Self::picks_4(),
             Self::picks_5(),
@@ -1762,7 +1791,24 @@ pub fn run_backtest(
                 } else if config.safety_source == SafetySource::Delta {
                     // Synthetic delta from the same BS model used for pricing.
                     let t = dte as f64 / 252.0;
-                    greeks::put_delta(price, strike, t, config.risk_free_rate, config.dividend_yield, iv_vol)
+                    let raw_delta = greeks::put_delta(price, strike, t, config.risk_free_rate, config.dividend_yield, iv_vol);
+                    // IV/RV boost: when implied vol exceeds realized vol, the
+                    // premium collected is inflated relative to actual stock risk,
+                    // creating a cushion that justifies a higher strike at the same
+                    // net expected loss. Boost reduces delta (makes the strike appear
+                    // safer) proportionally to the IV/RV excess over baseline.
+                    // In the backtest, synthetic IV/RV = iv_multiplier = 1.3 = baseline,
+                    // so the boost is always 0. The mechanism fires in production
+                    // where real Tiger IV varies per symbol (e.g. AMZN today: IV/RV=1.9
+                    // → ~29% delta reduction → safety goes from ~0.87 to ~0.91).
+                    let ivrv_boost = if config.ivrv_boost > 0.0 && vol > 0.0 {
+                        let ivrv = iv_vol / vol; // synthetic IV / RV = iv_multiplier
+                        let excess = (ivrv / config.iv_multiplier - 1.0).max(0.0);
+                        excess * config.ivrv_boost
+                    } else {
+                        0.0
+                    };
+                    raw_delta / (1.0 + ivrv_boost)
                 } else {
                     0.0 // unused by score_candidate under StrikePercentile
                 };
