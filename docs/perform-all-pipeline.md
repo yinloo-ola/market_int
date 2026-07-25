@@ -303,7 +303,7 @@ Calls `publish_to_telegram()`, which orchestrates:
 `model::option_chain_to_csv_vec()` processes each `OptionStrikeCandle`:
 1. **Strike percentile** (diagnostic only): `calculate_strike_percentile(strike, min_price_20d, max_price_20d)` — where the strike sits within the 20-day price range. **No longer used for scoring** (kept as a CSV column for context); safety now comes from the max_drop band (next).
 2. **Band safety**: `calculate_max_drop_safety(strike, strike_from, strike_to)` — the strike's position within the max_drop band `[strike_from, strike_to]` (the range computed in 10c-v from `ema_drop`/`percentile_drop`, scaled by DTE). Returns 1.0 at the deep end (`strike_from` — rarely breached), 0.0 at the shallow end (`strike_to` — frequently breached).
-3. **Earnings-aware composite score** via `calculate_put_chain_score(sharpe, strike, strike_from, strike_to, rate_of_return, trend_short, regime, earnings_in_window)`, which wraps `calculate_put_score` with the earnings rule + band safety + trend term (disabled at weight 0.0):
+3. **Earnings-aware composite score** via `calculate_put_chain_score(sharpe, strike, strike_from, strike_to, rate_of_return, trend_short, regime, earnings_in_window, delta)`, which wraps `calculate_put_score` with the earnings rule + band safety + trend term (disabled at weight 0.0). When `delta` is `Some` (real Tiger delta), safety is `(1 + delta).clamp(0, 1)` instead of band position; `None` falls back to `calculate_max_drop_safety`:
       - **Earnings rule** — per chain, `earnings_in_window(report_date, expiration, today)` (New York time, inclusive `[today, expiry]`) fires when the symbol reports earnings inside the option's lifetime (post-earnings gap risk is invisible to the historical max_drop band):
         - **Upper-half strikes** (`strike > midpoint` of `[strike_from, strike_to]`) — the shallow, near-money puts with no gap buffer — are **excluded** (`None`).
         - Surviving **lower-half** strikes still score, but `safety` is **halved** (`× EARNINGS_SAFETY_MULTIPLIER = 0.5`).
@@ -331,7 +331,7 @@ Calls `publish_to_telegram()`, which orchestrates:
   - **Unique sector** — no two picks from the same known sector ("Unknown" sector is exempt from this rule).
 
 ##### 10f-iii. Generate CSV
-- A full CSV is generated with all chains (not just top 3), including columns: underlying, sector, strike, underlying_price, side, bid, mid, ask, bid_size, ask_size, expiration, volume, open_interest, rate_of_return, strike_from, strike_to, sharpe_ratio, strike_percentile, score, price_percentile, earnings_before_expiry, trend_short, trend_long, realized_vol.
+- A full CSV is generated with all chains (not just top 3), including columns: underlying, sector, strike, underlying_price, side, bid, mid, ask, bid_size, ask_size, expiration, volume, open_interest, rate_of_return, strike_from, strike_to, sharpe_ratio, strike_percentile, score, price_percentile, earnings_before_expiry, trend_short, trend_long, realized_vol, implied_vol, delta, iv_rv_ratio.
 
 ##### 10f-iv. Send to Telegram
 - The CSV file is uploaded as a document to the configured Telegram chat via the **Telegram Bot API** (`send_document`).

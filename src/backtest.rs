@@ -1827,6 +1827,7 @@ pub fn run_backtest(
                         trend_short,
                         &regime,
                         earnings_in_window,
+                        None, // no real Tiger delta in backtest → falls back to band safety
                     )
                 } else {
                     config.score_candidate(

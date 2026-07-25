@@ -15,7 +15,8 @@
 - `src/sharpe.rs` — Sharpe ratio calculation and storage
 - `src/price_percentile.rs` — 20-day price percentile
 - `src/option.rs` — Option chain retrieval, scoring, and Telegram publishing
-- `src/model.rs` — Domain types, error enums, scoring functions (`calculate_put_score`, `calculate_put_chain_score` [earnings-aware], `calculate_strike_percentile`, `option_chain_to_csv_vec`)
+- `src/model.rs` — Domain types, error enums, scoring functions (`calculate_put_score`, `calculate_put_chain_score` [earnings-aware + delta-aware], `calculate_strike_percentile`, `option_chain_to_csv_vec`)
+- `src/greeks.rs` — Black-Scholes Greeks (cumulative_normal, black_scholes_put, put_delta, assignment_probability, implied_volatility). Extracted from backtest.rs in 2026-07 for shared use across backtest and production.
 - `src/marketdata/` — MarketData API client and response types
 - `src/tiger/` — Tiger Brokers API client (RSA-signed auth, option chains, earnings calendar)
 - `src/store/` — SQLite persistence layer (candle, true_range, max_drop, sharpe_ratio, price_percentile, trend, option_chain, earnings)
@@ -118,7 +119,7 @@ make gcloud-job
 
 ## Additional Notes
 
-- The option scoring model uses a weighted composite: 20% Sharpe, 40% safety (max_drop band position), 40% return proximity to ideal (0.80). A trend term is wired into `calculate_put_score` but disabled by default (`PUT_SCORE_WEIGHT_TREND = 0.0`) — the 2026-07 sweep found any non-zero trend weight lifted assignment rate above the 2.4% baseline.
+- The option scoring model uses a weighted composite: 20% Sharpe, 40% safety (max_drop band position, falling back to `1 + delta` when real Tiger delta is available from the `delta` CSV column), 40% return proximity to ideal (0.80). A trend term is wired into `calculate_put_score` but disabled by default (`PUT_SCORE_WEIGHT_TREND = 0.0`) — the 2026-07 sweep found any non-zero trend weight lifted assignment rate above the 2.4% baseline.
 - Pre-filters reject options with: rate of return < `MIN_RATE_OF_RETURN` (0.25), or Sharpe ≤ 0
 - **Vol-tier annotation (D2, 2026-07):** each published pick is annotated with a volatility tier in the Telegram caption (🟢 vol ≥ 0.38, 🟡 0.28–0.38, 🔴 < 0.28) and a numeric `realized_vol` value, plus a `realized_vol` column in the published CSV. This surfaces capital-efficiency context — the calibration showed high-vol names deliver materially higher `rate_of_return` at matched assignment rate — **without filtering**, because the bot's output is a research candidate pool (the user applies their own fundamental/sentiment analysis), not a trade list. A hard vol filter (`MIN_REALIZED_VOL` = 0.50) was backtest-validated (lifted avg ror 62.3% → 67.0% at flat-or-lower assignment) but is **NOT applied in production** — it lives only in the `vol-high-only` backtest preset for research.
 - Top picks are deduplicated by underlying symbol (max 3 picks — `TOP_PICKS_COUNT`). NB: raising this to 4 added absolute premium but *lowered* avg ror (the 4th pick deployed more capital for less return), so 3 is retained.

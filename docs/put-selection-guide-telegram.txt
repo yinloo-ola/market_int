@@ -18,6 +18,12 @@
 
 • `realized_vol` — Annualised 20-day realised volatility of the underlying. Higher vol names deliver more `rate_of_return` per dollar of capital locked (capital-efficiency insight from the 2026-07 calibration). 🟢 High (≥ 0.38), 🟡 Mid (0.28–0.38), 🔴 Low (< 0.28). Also shown per pick in the caption as `Vol: 🟢 0.45`.
 
+• `implied_vol` — The option's implied volatility from Tiger API. Higher IV = more expensive premium.
+
+• `delta` — Put delta from Tiger (range -1 to 0, negative for puts). Used for safety scoring when available: safety = 1 + delta. When missing (historical data), safety falls back to max_drop band position.
+
+• `iv_rv_ratio` — Implied volatility ÷ realised volatility. > 1.0 means options are pricing more volatility than the stock has shown historically (potential overpricing opportunity). Blank when realised_vol is unavailable. Today's distribution across 159 symbols: median 1.28, 27 names above 1.5 (rich premium e.g. AMZN 1.90), 3 above 2.0.
+
 • `score` — Composite quality score (0–1). Combines max_drop-band safety (40%), return quality (40%), Sharpe (20%), plus a trend term wired but disabled at 0% (no effect). Options failing pre-filters are blank. Good: > 0.6
 
 • `price_percentile` — Where current price sits within its 20-day range. Drives momentum flag: NORMAL (≤80%), HIGH (80–90%), EXTENDED (>90%). Good: ≤ 0.80

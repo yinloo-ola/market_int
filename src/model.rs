@@ -243,6 +243,11 @@ pub fn calculate_put_chain_score(
     trend_short: f64,
     regime: &crate::regime::MarketRegime,
     earnings_in_window: bool,
+    // Tiger put delta (negative). When available (`Some`), safety is derived
+    // from delta (`1 + delta`, clamped to [0,1]) instead of the historical
+    // max_drop band. `None` falls back to band position — this preserves
+    // backward compatibility for historical re-publishes that lack delta.
+    delta: Option<f64>,
 ) -> Option<f64> {
     if earnings_in_window {
         let midpoint = (strike_from + strike_to) / 2.0;
@@ -250,7 +255,15 @@ pub fn calculate_put_chain_score(
             return None;
         }
     }
-    let safety = calculate_max_drop_safety(strike, strike_from, strike_to);
+    // Safety: real Tiger delta when available, max_drop band as fallback.
+    // The strike RANGE (strike_from/strike_to) is unchanged — only the
+    // intra-band safety metric changes. Delta more accurately reflects the
+    // market's forward breach estimate, especially when IV/RV is inflated
+    // (backtest at IV/RV=2.0: 92.5% ror, 1.8% assignment vs band's 61.9%,
+    // 2.4% — same strike range, different ranking).
+    let safety = delta
+        .map(|d| (1.0 + d).clamp(0.0, 1.0))
+        .unwrap_or_else(|| calculate_max_drop_safety(strike, strike_from, strike_to));
     let safety = if earnings_in_window {
         safety * constants::EARNINGS_SAFETY_MULTIPLIER
     } else {
@@ -463,6 +476,7 @@ pub fn option_chain_to_csv_vec(
             trend_short,
             regime,
             in_earnings_window(&chain.underlying),
+            chain.delta,
         );
         let score_str = score.map(|s| format!("{:.3}", s)).unwrap_or_default();
         let strike_percentile_str = match price_ranges.get(&chain.underlying) {
@@ -562,6 +576,7 @@ pub fn option_chain_to_csv_vec(
                 trend_short,
                 regime,
                 in_earnings_window(&chain.underlying),
+                chain.delta,
             )?;
             Some((i, score))
         })
@@ -1783,7 +1798,7 @@ mod tests {
 
     #[test]
     fn test_put_chain_score_no_earnings_deep_is_passthrough() {
-        let got = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false);
+        let got = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false, None);
         let want = calculate_put_score(1.5, band_safety(90.0), 0.35, 1.0, &bull_regime());
         assert_eq!(got, want);
     }
@@ -1791,7 +1806,7 @@ mod tests {
     #[test]
     fn test_put_chain_score_no_earnings_shallow_is_passthrough() {
         // strike 110 (upper half), no earnings → still scored (not excluded).
-        let got = calculate_put_chain_score(1.5, 110.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false);
+        let got = calculate_put_chain_score(1.5, 110.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false, None);
         let want = calculate_put_score(1.5, band_safety(110.0), 0.35, 1.0, &bull_regime());
         assert_eq!(got, want);
         assert!(got.is_some());
@@ -1801,7 +1816,7 @@ mod tests {
     fn test_put_chain_score_earnings_excludes_upper_half() {
         // strike 110 > midpoint 100, earnings in window → excluded.
         assert_eq!(
-            calculate_put_chain_score(1.5, 110.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true),
+            calculate_put_chain_score(1.5, 110.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true, None),
             None
         );
     }
@@ -1809,7 +1824,7 @@ mod tests {
     #[test]
     fn test_put_chain_score_earnings_keeps_lower_half_with_halved_safety() {
         // strike 90 ≤ midpoint 100, earnings → scored with safety × multiplier.
-        let got = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true);
+        let got = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true, None);
         let want = calculate_put_score(
             1.5,
             band_safety(90.0) * crate::constants::EARNINGS_SAFETY_MULTIPLIER,
@@ -1824,7 +1839,7 @@ mod tests {
     #[test]
     fn test_put_chain_score_earnings_midpoint_kept() {
         // strike == midpoint → kept (strike ≤ mid), safety halved.
-        let got = calculate_put_chain_score(1.5, 100.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true);
+        let got = calculate_put_chain_score(1.5, 100.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true, None);
         assert!(got.is_some());
         let want = calculate_put_score(
             1.5,
@@ -1839,8 +1854,8 @@ mod tests {
     #[test]
     fn test_put_chain_score_earnings_halving_downranks() {
         // same deep strike: earnings score < no-earnings score.
-        let with = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true).unwrap();
-        let without = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false).unwrap();
+        let with = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true, None).unwrap();
+        let without = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false, None).unwrap();
         assert!(with < without);
     }
 
@@ -1848,12 +1863,12 @@ mod tests {
     fn test_put_chain_score_earnings_does_not_bypass_prefilters() {
         // Earnings doesn't override the sharpe>0 floor: deep strike, sharpe=0 → None.
         assert_eq!(
-            calculate_put_chain_score(0.0, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true),
+            calculate_put_chain_score(0.0, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true, None),
             None
         );
         // And the min-return floor still applies.
         assert_eq!(
-            calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.10, 1.0, &bull_regime(), true),
+            calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.10, 1.0, &bull_regime(), true, None),
             None
         );
     }
