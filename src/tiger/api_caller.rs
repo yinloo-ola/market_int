@@ -498,6 +498,16 @@ impl Requester {
                         // Process put option if side is Put or side is not specified
                         if matches!(side, model::OptionChainSide::Put) {
                             let put_option = item["put"].as_object();
+                            // Temporary probe (2026-07-25): dump the raw Tiger put option
+                            // response fields for AAPL to check if IV/delta/greeks are
+                            // available. Remove after settling the A3 investigation.
+                            if put_option.is_some() && symbol == "AAPL" && cfg!(debug_assertions) {
+                                log::info!(
+                                    "TIGER_A3_PROBE {} put keys: {:?}",
+                                    symbol,
+                                    put_option.unwrap().keys().collect::<Vec<_>>()
+                                );
+                            }
                             self.process_option_data(
                                 put_option,
                                 &symbol,
