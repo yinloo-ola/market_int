@@ -303,7 +303,7 @@ Calls `publish_to_telegram()`, which orchestrates:
 `model::option_chain_to_csv_vec()` processes each `OptionStrikeCandle`:
 1. **Strike percentile** (diagnostic only): `calculate_strike_percentile(strike, min_price_20d, max_price_20d)` — where the strike sits within the 20-day price range. **No longer used for scoring** (kept as a CSV column for context); safety now comes from the max_drop band (next).
 2. **Band safety**: `calculate_max_drop_safety(strike, strike_from, strike_to)` — the strike's position within the max_drop band `[strike_from, strike_to]` (the range computed in 10c-v from `ema_drop`/`percentile_drop`, scaled by DTE). Returns 1.0 at the deep end (`strike_from` — rarely breached), 0.0 at the shallow end (`strike_to` — frequently breached).
-3. **Earnings-aware composite score** via `calculate_put_chain_score(...)`, which wraps `calculate_put_score` with the earnings rule + band safety:
+3. **Earnings-aware composite score** via `calculate_put_chain_score(sharpe, strike, strike_from, strike_to, rate_of_return, trend_short, regime, earnings_in_window)`, which wraps `calculate_put_score` with the earnings rule + band safety + trend term (disabled at weight 0.0):
       - **Earnings rule** — per chain, `earnings_in_window(report_date, expiration, today)` (New York time, inclusive `[today, expiry]`) fires when the symbol reports earnings inside the option's lifetime (post-earnings gap risk is invisible to the historical max_drop band):
         - **Upper-half strikes** (`strike > midpoint` of `[strike_from, strike_to]`) — the shallow, near-money puts with no gap buffer — are **excluded** (`None`).
         - Surviving **lower-half** strikes still score, but `safety` is **halved** (`× EARNINGS_SAFETY_MULTIPLIER = 0.5`).
@@ -311,16 +311,17 @@ Calls `publish_to_telegram()`, which orchestrates:
       - **Pre-filters** (any failure → `None`, excluded from picks):
         - `rate_of_return ≥ MIN_RATE_OF_RETURN (0.25)` — floor on worthwhile premiums. **No upper cap** — a high return is a reward, not a danger signal (danger is expressed via band safety).
         - `sharpe > 0` — only stocks with positive risk-adjusted returns.
-        - Note: the old `rate_of_return > 0.80` and `strike_percentile > 0.40` pre-filters were **removed** in the 2026-07 redesign. Trend is collected/displayed but not scored.
-      - **Score formula** (static weights, regime-independent):
-        ```
-        score = 0.20 × sharpe_norm + 0.40 × safety + 0.40 × return_norm
-        
-        where:
-          sharpe_norm = clamp(sharpe / 2.0, 0..1)
-          safety      = band position in [strike_from, strike_to]  (deep end = 1.0)
-          return_norm = (rate_of_return / IDEAL_RETURN).min(1.0)  (IDEAL_RETURN = 0.80; soft-cap — no further credit above, but no exclusion)
-        ```
+        - Note: the old `rate_of_return > 0.80` and `strike_percentile > 0.40` pre-filters were **removed** in the 2026-07 redesign. A trend term is wired into the score but **disabled by default** (`PUT_SCORE_WEIGHT_TREND = 0.0`); the 2026-07 sweep found any non-zero trend weight lifted assignment rate above baseline.
+        - **Score formula** (static weights, regime-independent):
+          ```
+          score = 0.20 × sharpe_norm + 0.40 × safety + 0.40 × return_norm + 0.0 × trend_norm
+
+          where:
+            sharpe_norm = clamp(sharpe / 2.0, 0..1)
+            safety      = band position in [strike_from, strike_to]  (deep end = 1.0)
+            return_norm = (rate_of_return / IDEAL_RETURN).min(1.0)  (IDEAL_RETURN = 0.80; soft-cap)
+            trend_norm  = clamp((trend_short - TREND_SCORE_FLOOR) / TREND_SCORE_BAND, 0..1)  (TREND_SCORE_FLOOR = 1.02, TREND_SCORE_BAND = 0.06; term disabled at weight 0.0)
+          ```
       - The ideal put has: high Sharpe, a strike deep within the max_drop band (rarely breached), and a high annualized return (rewarded up to 80%, accepted beyond).
 
 ##### 10f-ii. Select Top 3 picks with diversity
@@ -330,7 +331,7 @@ Calls `publish_to_telegram()`, which orchestrates:
   - **Unique sector** — no two picks from the same known sector ("Unknown" sector is exempt from this rule).
 
 ##### 10f-iii. Generate CSV
-- A full CSV is generated with all chains (not just top 3), including columns: underlying, sector, strike, bid, ask, volume, OI, rate_of_return, sharpe_ratio, strike_percentile, score, price_percentile, earnings, trend_short, trend_long.
+- A full CSV is generated with all chains (not just top 3), including columns: underlying, sector, strike, underlying_price, side, bid, mid, ask, bid_size, ask_size, expiration, volume, open_interest, rate_of_return, strike_from, strike_to, sharpe_ratio, strike_percentile, score, price_percentile, earnings_before_expiry, trend_short, trend_long, realized_vol.
 
 ##### 10f-iv. Send to Telegram
 - The CSV file is uploaded as a document to the configured Telegram chat via the **Telegram Bot API** (`send_document`).
@@ -339,10 +340,11 @@ Calls `publish_to_telegram()`, which orchestrates:
   🏆 Top 3 Puts — 06Jun 5-day
 
   1. AAPL (Technology) $185P | Bid: $1.50 / Ask: $1.80 | Return: 35%
-     Score: 0.88 | Sharpe: 1.5 | Pctl: 72% | Trend: 103%
+     Score: 0.88 | Sharpe: 1.5 | Pctl: 72% | Trend: 103% | Vol: 🟡 0.32
 
   ⚠️ Earnings: NVDA 2026-06-12 (AMC)
   ```
+  Each pick includes a volatility tier annotation (`Vol: 🟢/🟡/🔴 <value>`, D2 2026-07): 🟢 high (vol ≥ 0.38), 🟡 mid (0.28–0.38), 🔴 low (< 0.28). High-vol names deliver materially higher `rate_of_return` at matched assignment rate; the annotation surfaces capital-efficiency context **without filtering** (the bot's output is a research pool, not a trade list).
 
 **Intent:**
 - Deliver an **actionable daily digest** to the user's Telegram. The CSV provides full data for further analysis, while the top-3 caption gives an at-a-glance summary of the best put-selling opportunities with ~5-day expiry.
@@ -485,6 +487,14 @@ All tunable parameters are centralized in `src/constants.rs`:
 | `IDEAL_RETURN` | 0.80 | Asymmetric soft-cap for return norm (no penalty above it) |
 | `EARNINGS_SAFETY_MULTIPLIER` | 0.5 | Safety discount when earnings fall in `[today, expiry]` (band overstates safety across a gap) |
 | `BEARNESS_MAX` | 0.08 | SPY drop mapping to full bear (8% below EMA50) |
+| `PUT_SCORE_WEIGHT_SHARPE` | 0.20 | Sharpe term weight in put score |
+| `PUT_SCORE_WEIGHT_SAFETY` | 0.40 | Safety (max_drop band) term weight |
+| `PUT_SCORE_WEIGHT_RETURN` | 0.40 | Return term weight |
+| `PUT_SCORE_WEIGHT_TREND` | 0.0 | Trend term weight (disabled — see score formula note) |
+| `TREND_SCORE_FLOOR` | 1.02 | `trend_short` floor below which trend_norm is 0 |
+| `TREND_SCORE_BAND` | 0.06 | `trend_norm` saturation width above floor |
+| `TOP_PICKS_COUNT` | 3 | Max top picks published per run |
+| `MIN_REALIZED_VOL` | 0.50 | Backtest-only: min vol for the `vol-high-only` research preset. Production does NOT filter (annotates vol in caption instead). |
 
 ---
 

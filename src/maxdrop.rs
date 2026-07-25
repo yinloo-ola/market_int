@@ -15,7 +15,7 @@ pub fn compute_max_drop_stats_with_percentile(
 ) -> Option<(f64, f64)> {
     let max_drops: Vec<f64> = candles
         .windows(period)
-        .map(|window| calculate_max_drop(window))
+        .map(calculate_max_drop)
         .filter(|&drop| drop > 0.0)
         .collect();
 

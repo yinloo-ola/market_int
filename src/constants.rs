@@ -1,27 +1,57 @@
+// ── Candle / Option-chain data ────────────────────────────────
 pub const CANDLE_COUNT: u32 = 850;
 pub const MIN_OPEN_INTEREST: u32 = 50;
-pub const PERCENTILE: f64 = 0.97;
 pub const SHARPE_MIN_CANDLES: usize = 14;
-pub const DEFAULT_RISK_FREE_RATE: f64 = 0.0; // use 0
 pub const PRICE_PERCENTILE_DAYS: u32 = 20;
-pub const MOMENTUM_HIGH_THRESHOLD: f64 = 0.80;
-pub const MOMENTUM_EXTENDED_THRESHOLD: f64 = 0.90;
-pub const MIN_RATE_OF_RETURN: f64 = 0.25;
-pub const MAX_RATE_OF_RETURN: f64 = 0.80;
-pub const MAX_STRIKE_PERCENTILE: f64 = 0.40;
-pub const IDEAL_RETURN: f64 = 0.80;
-/// Safety discount applied when a symbol reports earnings inside the option's
-/// lifetime. The max_drop band is built from routine (non-event) volatility, so
-/// it overstates safety during an earnings window; this scales `safety` down.
-pub const EARNINGS_SAFETY_MULTIPLIER: f64 = 0.5;
+pub const DEFAULT_RISK_FREE_RATE: f64 = 0.0;
 
-// Trend filter constants
+// ── Trend (EMAs, regime) ──────────────────────────────────────
 pub const EMA_SHORT_PERIOD: u32 = 20;
 pub const EMA_LONG_PERIOD: u32 = 50;
-pub const TREND_THRESHOLD_BULL: f64 = 0.98; // Threshold in bull market (current behavior)
+pub const TREND_THRESHOLD_BULL: f64 = 0.98;
 pub const TREND_THRESHOLD_RANGE: f64 = 0.06; // How far threshold can drop (0.98 → 0.92)
-pub const BEARNESS_MAX: f64 = 0.08; // SPY drop that maps to bearness = 1.0
+pub const BEARNESS_MAX: f64 = 0.08; // SPY drop mapping to bearness = 1.0
+pub const MOMENTUM_HIGH_THRESHOLD: f64 = 0.80;
+pub const MOMENTUM_EXTENDED_THRESHOLD: f64 = 0.90;
+
+// ── Max-drop band ─────────────────────────────────────────────
+pub const PERCENTILE: f64 = 0.97; // 97th-percentile drawdown → deep band end
 pub const TREND_TIGHTEN_MULTIPLIER: f64 = 2.0;
 pub const TREND_TIGHTEN_CAP: f64 = 0.10;
 pub const TREND_TIGHTEN_PEAK: f64 = 1.05;
 pub const TREND_EASE_BACK: f64 = 0.5;
+
+// ── Pre-filters ───────────────────────────────────────────────
+pub const MIN_RATE_OF_RETURN: f64 = 0.25;
+/// Unused in production (no upper cap since 2026-07). Retained for backtest presets.
+pub const MAX_RATE_OF_RETURN: f64 = 0.80;
+/// Unused in production (danger expressed via band). Retained for backtest presets.
+pub const MAX_STRIKE_PERCENTILE: f64 = 0.40;
+
+// ── Scoring weights ───────────────────────────────────────────
+/// Weights sum to 1.0. A trend term is wired (see `TREND_SCORE_*` below)
+/// but `PUT_SCORE_WEIGHT_TREND = 0.0` — the 2026-07 sweep found every
+/// non-zero weight lifted assignment above the 2.4% baseline. The lever is
+/// retained for future changes (e.g. real IV/delta capture from Tiger).
+pub const PUT_SCORE_WEIGHT_SHARPE: f64 = 0.20;
+pub const PUT_SCORE_WEIGHT_SAFETY: f64 = 0.40;
+pub const PUT_SCORE_WEIGHT_RETURN: f64 = 0.40;
+pub const PUT_SCORE_WEIGHT_TREND: f64 = 0.0;
+/// Soft-cap: `return_norm = (rate_of_return / IDEAL_RETURN).min(1.0)`.
+/// Above 80% return, no extra credit but no exclusion either.
+pub const IDEAL_RETURN: f64 = 0.80;
+
+// ── Trend-score term (wired, disabled) ─────────────────────────
+pub const TREND_SCORE_FLOOR: f64 = 1.02;
+pub const TREND_SCORE_BAND: f64 = 0.06;
+
+// ── Earnings-aware scoring ────────────────────────────────────
+pub const EARNINGS_SAFETY_MULTIPLIER: f64 = 0.5;
+
+// ── Telegram publication ──────────────────────────────────────
+pub const TOP_PICKS_COUNT: usize = 3;
+
+// ── Vol-tier annotation (D2) ──────────────────────────────────
+/// Backtest-only threshold for the `vol-high-only` preset.
+/// Production does NOT filter — it annotates each pick with a vol tier instead.
+pub const MIN_REALIZED_VOL: f64 = 0.50;

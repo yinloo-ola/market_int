@@ -16,7 +16,9 @@
 
 • `trend_long` — Where current price sits relative to its 50-day EMA. Captures intermediate trend direction. Good: > 0.98
 
-• `score` — Composite quality score (0–1). Combines max_drop-band safety (40%), return quality (40%), Sharpe (20%). Options failing pre-filters are blank. Good: > 0.6
+• `realized_vol` — Annualised 20-day realised volatility of the underlying. Higher vol names deliver more `rate_of_return` per dollar of capital locked (capital-efficiency insight from the 2026-07 calibration). 🟢 High (≥ 0.38), 🟡 Mid (0.28–0.38), 🔴 Low (< 0.28). Also shown per pick in the caption as `Vol: 🟢 0.45`.
+
+• `score` — Composite quality score (0–1). Combines max_drop-band safety (40%), return quality (40%), Sharpe (20%), plus a trend term wired but disabled at 0% (no effect). Options failing pre-filters are blank. Good: > 0.6
 
 • `price_percentile` — Where current price sits within its 20-day range. Drives momentum flag: NORMAL (≤80%), HIGH (80–90%), EXTENDED (>90%). Good: ≤ 0.80
 

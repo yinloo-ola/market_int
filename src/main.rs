@@ -169,6 +169,14 @@ enum Commands {
         /// `fetch-earnings`. Absent → earnings-blind (today's behavior).
         #[arg(long)]
         earnings: Option<String>,
+        /// Run in safety-calibration mode. Instead of simulating top-N picks,
+        /// evaluate breach/assignment for EVERY strike across the band (plus an
+        /// extension above `max_strike` toward spot) using the production-mirror
+        /// band math, and print the empirical `safety → breach-rate` curve.
+        /// Read-only analysis; no production scoring change. The `config` and
+        /// `period` args are ignored — calibration always uses production-mirror.
+        #[arg(long, default_value_t = false)]
+        calibrate_safety: bool,
     },
     // Fetch the earnings calendar from Tiger to a CSV (feeds `backtest --earnings`)
     FetchEarnings {
@@ -422,6 +430,7 @@ async fn main() {
             period,
             output,
             earnings,
+            calibrate_safety,
         } => {
             let from_date = match NaiveDate::parse_from_str(&from, "%Y-%m-%d") {
                 Ok(d) => d,
@@ -463,6 +472,24 @@ async fn main() {
                 },
                 None => std::collections::HashMap::new(),
             };
+
+            if calibrate_safety {
+                log::info!(
+                    "Running safety calibration: {} symbols, {} to {} (production-mirror, period 5)",
+                    symbols.len(),
+                    from_date,
+                    to_date
+                );
+                let rows = backtest::run_safety_calibration(
+                    &conn, &symbols, &sectors, &earnings_by_symbol, from_date, to_date,
+                );
+                println!("{}", backtest::print_safety_calibration(&rows));
+                match backtest::write_calibration_csv(&output, &rows) {
+                    Ok(_) => log::info!("Calibration CSV written to {}", output),
+                    Err(e) => log::error!("Failed to write CSV: {}", e),
+                }
+                return;
+            }
 
             let configs: Vec<backtest::BacktestConfig> = if config == "all" {
                 backtest::BacktestConfig::all_presets()

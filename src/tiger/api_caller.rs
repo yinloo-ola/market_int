@@ -281,15 +281,14 @@ impl Requester {
         let cache_key = self.generate_cache_key(symbols);
 
         // Check if we have a valid cached entry
-        if let Some(cached_entry) = self.option_expiration_cache.get(&cache_key) {
-            if self.is_cache_valid(cached_entry) {
+        if let Some(cached_entry) = self.option_expiration_cache.get(&cache_key)
+            && self.is_cache_valid(cached_entry) {
                 log::debug!(
                     "Using cached option expiration data for symbols: {}",
                     cache_key
                 );
                 return Ok(cached_entry.data.clone());
             }
-        }
 
         // Cache miss or expired, make API call
         log::debug!(
