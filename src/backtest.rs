@@ -361,6 +361,128 @@ impl BacktestConfig {
         }
     }
 
+    // ── Production-mirror optimization sweep ────────────────────────
+    //
+    // These presets explore the production-equivalent levers (MaxDropBand
+    // safety, AsymmetricStatic return, no trend filters) to find the optimal
+    // rate-of-return vs assignment-rate tradeoff. Each preset changes exactly
+    // one parameter from production_mirror() so ablation is clean.
+
+    /// Production-mirror with IDEAL_RETURN=0.85 — picks slightly higher-premium
+    /// strikes before return_norm saturates.
+    pub fn pm_ideal_085() -> Self {
+        Self {
+            name: "pm-ideal-085".to_string(),
+            ideal_return: 0.85,
+            ..Self::production_mirror()
+        }
+    }
+
+    /// Production-mirror with IDEAL_RETURN=0.90.
+    pub fn pm_ideal_090() -> Self {
+        Self {
+            name: "pm-ideal-090".to_string(),
+            ideal_return: 0.90,
+            ..Self::production_mirror()
+        }
+    }
+
+    /// Production-mirror with IDEAL_RETURN=0.95.
+    pub fn pm_ideal_095() -> Self {
+        Self {
+            name: "pm-ideal-095".to_string(),
+            ideal_return: 0.95,
+            ..Self::production_mirror()
+        }
+    }
+
+    /// Production-mirror with IDEAL_RETURN=1.00 — return_norm saturates at 100%
+    /// annualized return, favouring the highest-premium strikes.
+    pub fn pm_ideal_100() -> Self {
+        Self {
+            name: "pm-ideal-100".to_string(),
+            ideal_return: 1.00,
+            ..Self::production_mirror()
+        }
+    }
+
+    /// Production-mirror, safety=0.50 return=0.30 — more safety weight, less
+    /// return weight. Favors deeper (safer) strikes; should lower assignment
+    /// at the cost of ROR.
+    pub fn pm_safety_50() -> Self {
+        Self {
+            name: "pm-safety-50".to_string(),
+            weight_safety: 0.50,
+            weight_return: 0.30,
+            ..Self::production_mirror()
+        }
+    }
+
+    /// Production-mirror, safety=0.30 return=0.50 — less safety weight, more
+    /// return weight. Favors shallower (higher-premium) strikes; should raise
+    /// ROR at the cost of assignment.
+    pub fn pm_return_50() -> Self {
+        Self {
+            name: "pm-return-50".to_string(),
+            weight_safety: 0.30,
+            weight_return: 0.50,
+            ..Self::production_mirror()
+        }
+    }
+
+    /// Production-mirror with MIN_RATE_OF_RETURN=0.30 — filters out low-return
+    /// picks, raising avg ROR but reducing the candidate pool.
+    pub fn pm_min_ror_30() -> Self {
+        Self {
+            name: "pm-min-ror-30".to_string(),
+            min_rate_of_return: 0.30,
+            ..Self::production_mirror()
+        }
+    }
+
+    /// Production-mirror with MIN_RATE_OF_RETURN=0.35.
+    pub fn pm_min_ror_35() -> Self {
+        Self {
+            name: "pm-min-ror-35".to_string(),
+            min_rate_of_return: 0.35,
+            ..Self::production_mirror()
+        }
+    }
+
+    /// Production-mirror with MIN_RATE_OF_RETURN=0.40 — aggressive return floor.
+    pub fn pm_min_ror_40() -> Self {
+        Self {
+            name: "pm-min-ror-40".to_string(),
+            min_rate_of_return: 0.40,
+            ..Self::production_mirror()
+        }
+    }
+
+    /// Vol-high-only + IDEAL_RETURN=0.90 — combines the high-vol universe
+    /// filter with a higher return soft-cap. Tests whether the vol filter's
+    /// ROR boost compounds with a return-weight shift.
+    pub fn pm_vol_high_ideal_090() -> Self {
+        Self {
+            name: "pm-vol-high-ideal-090".to_string(),
+            ideal_return: 0.90,
+            min_realized_vol: 0.50,
+            ..Self::production_mirror()
+        }
+    }
+
+    /// Vol-high-only + safety=0.50 — combines the high-vol universe filter
+    /// with more safety weight. Tests whether extra safety can hold assignment
+    /// flat while the vol filter lifts ROR.
+    pub fn pm_vol_high_safety_50() -> Self {
+        Self {
+            name: "pm-vol-high-safety-50".to_string(),
+            weight_safety: 0.50,
+            weight_return: 0.30,
+            min_realized_vol: 0.50,
+            ..Self::production_mirror()
+        }
+    }
+
     /// No trend factor — strike range never tightened.
     pub fn no_trend_factor() -> Self {
         Self {
@@ -939,6 +1061,18 @@ impl BacktestConfig {
             Self::picks_4(),
             Self::picks_5(),
             Self::picks_6(),
+            // Production-mirror optimization sweep
+            Self::pm_ideal_085(),
+            Self::pm_ideal_090(),
+            Self::pm_ideal_095(),
+            Self::pm_ideal_100(),
+            Self::pm_safety_50(),
+            Self::pm_return_50(),
+            Self::pm_min_ror_30(),
+            Self::pm_min_ror_35(),
+            Self::pm_min_ror_40(),
+            Self::pm_vol_high_ideal_090(),
+            Self::pm_vol_high_safety_50(),
         ]
     }
 
@@ -1818,6 +1952,18 @@ pub fn run_backtest(
                     // Production mirror: delegate to the earnings-aware production
                     // scorer so the backtest is identical-by-construction to the
                     // shipped scoring (no formula duplication → no drift).
+                    // Build ScoreParams from BacktestConfig so ablation sweeps
+                    // that override ideal_return, weights, and min_rate_of_return
+                    // take effect (the pm_* presets).
+                    let score_params = model::ScoreParams {
+                        min_rate_of_return: config.min_rate_of_return,
+                        ideal_return: config.ideal_return,
+                        weight_sharpe: config.weight_sharpe,
+                        weight_safety: config.weight_safety,
+                        weight_return: config.weight_return,
+                        weight_trend: config.weight_trend,
+                        ..model::ScoreParams::default()
+                    };
                     model::calculate_put_chain_score(
                         sharpe_ratio,
                         strike,
@@ -1828,6 +1974,9 @@ pub fn run_backtest(
                         &regime,
                         earnings_in_window,
                         None, // no real Tiger delta in backtest → falls back to band safety
+                        None, // no realized vol in backtest → no vol boost
+                        0.0,  // vol_safety_boost disabled in backtest (use presets)
+                        score_params,
                     )
                 } else {
                     config.score_candidate(
@@ -2396,7 +2545,7 @@ mod tests {
                 .score_candidate(sharpe, 0.5, rate, 0.98, 0.98, &regime, safety)
                 .unwrap();
             let prod =
-                model::calculate_put_score(sharpe, safety, rate, 0.98, &regime).unwrap();
+                model::calculate_put_score(sharpe, safety, rate, 0.98, &regime, model::ScoreParams::default()).unwrap();
             assert!(
                 (bt - prod).abs() < 1e-9,
                 "divergence at sharpe={sharpe} safety={safety} rate={rate}: backtest={bt} prod={prod}"

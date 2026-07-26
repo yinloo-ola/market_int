@@ -22,7 +22,7 @@ pub const TREND_TIGHTEN_PEAK: f64 = 1.05;
 pub const TREND_EASE_BACK: f64 = 0.5;
 
 // ── Pre-filters ───────────────────────────────────────────────
-pub const MIN_RATE_OF_RETURN: f64 = 0.25;
+pub const MIN_RATE_OF_RETURN: f64 = 0.30;
 /// Unused in production (no upper cap since 2026-07). Retained for backtest presets.
 pub const MAX_RATE_OF_RETURN: f64 = 0.80;
 /// Unused in production (danger expressed via band). Retained for backtest presets.
@@ -55,3 +55,15 @@ pub const TOP_PICKS_COUNT: usize = 3;
 /// Backtest-only threshold for the `vol-high-only` preset.
 /// Production does NOT filter — it annotates each pick with a vol tier instead.
 pub const MIN_REALIZED_VOL: f64 = 0.50;
+
+// ── Vol-tier safety boost (D2) ────────────────────────────────
+/// Safety multiplier for high-vol names. High-vol names deliver materially
+/// higher rate_of_return at matched assignment rate (calibration: at 2% breach,
+/// low-vol ~44% ror, mid-vol ~49%, high-vol ~53%). This boost lifts safety
+/// for higher-vol names so the picker's ranking slots go to richer picks —
+/// without removing any candidates from the pool (unlike a hard vol filter).
+///
+/// Tier multipliers: high-vol (>=0.38) → 1.0, mid-vol (>=0.28) → 0.5,
+/// low-vol (<0.28) → 0.0. The boost is `safety *= (1 + VOL_SAFETY_BOOST * tier)`.
+/// 0.0 = disabled (production default — the bot annotates vol tiers instead).
+pub const VOL_SAFETY_BOOST: f64 = 0.0;

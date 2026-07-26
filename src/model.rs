@@ -21,6 +21,42 @@ use crate::constants;
 use crate::http::client;
 use crate::sectors::{UNKNOWN_SECTOR, sector_of};
 
+/// Tunable parameters for put scoring. `Default::default()` initializes from
+/// the production constants in `src/constants.rs`. The backtest constructs
+/// `ScoreParams` from `BacktestConfig` to run ablation sweeps across weights,
+/// return soft-caps, rate-of-return floors, and earnings safety discounts.
+///
+/// All fields are public so the backtest can construct the struct directly
+/// without a builder.
+#[derive(Debug, Clone, Copy)]
+pub struct ScoreParams {
+    pub min_rate_of_return: f64,
+    pub ideal_return: f64,
+    pub weight_sharpe: f64,
+    pub weight_safety: f64,
+    pub weight_return: f64,
+    pub weight_trend: f64,
+    pub trend_score_floor: f64,
+    pub trend_score_band: f64,
+    pub earnings_safety_multiplier: f64,
+}
+
+impl Default for ScoreParams {
+    fn default() -> Self {
+        Self {
+            min_rate_of_return: constants::MIN_RATE_OF_RETURN,
+            ideal_return: constants::IDEAL_RETURN,
+            weight_sharpe: constants::PUT_SCORE_WEIGHT_SHARPE,
+            weight_safety: constants::PUT_SCORE_WEIGHT_SAFETY,
+            weight_return: constants::PUT_SCORE_WEIGHT_RETURN,
+            weight_trend: constants::PUT_SCORE_WEIGHT_TREND,
+            trend_score_floor: constants::TREND_SCORE_FLOOR,
+            trend_score_band: constants::TREND_SCORE_BAND,
+            earnings_safety_multiplier: constants::EARNINGS_SAFETY_MULTIPLIER,
+        }
+    }
+}
+
 /// Represents the market status.
 #[derive(Debug)]
 pub enum MarketStatus {
@@ -152,7 +188,7 @@ pub fn calculate_trend_factor(trend_ratio_short: f64) -> f64 {
 /// deep / rarely-breached end, 0.0 at the shallow / frequently-breached end.
 ///
 /// Pre-filters:
-///   - rate_of_return >= MIN_RATE_OF_RETURN  (no upper cap — return is a
+///   - rate_of_return >= params.min_rate_of_return  (no upper cap — return is a
 ///     soft-capped reward via `return_norm`; danger is expressed via `safety`)
 ///   - sharpe > 0
 ///
@@ -164,11 +200,12 @@ pub fn calculate_put_score(
     rate_of_return: f64,
     trend_short: f64,
     _regime: &crate::regime::MarketRegime,
+    params: ScoreParams,
 ) -> Option<f64> {
     // Pre-filters: keep the min-return floor and the positive-Sharpe requirement.
     // The hard rate-of-return cap and the strike_percentile cap were removed —
     // danger is now expressed via the max_drop band position (`safety`).
-    if rate_of_return < constants::MIN_RATE_OF_RETURN {
+    if rate_of_return < params.min_rate_of_return {
         return None;
     }
     if sharpe <= 0.0 {
@@ -178,27 +215,22 @@ pub fn calculate_put_score(
     let sharpe_norm = (sharpe / 2.0).clamp(0.0, 1.0);
     let safety_norm = safety.clamp(0.0, 1.0);
 
-    // Soft-cap: return reward ramps linearly to IDEAL_RETURN, then flattens
+    // Soft-cap: return reward ramps linearly to ideal_return, then flattens
     // (no further credit above it, but no exclusion either).
-    let return_norm = (rate_of_return / constants::IDEAL_RETURN).min(1.0);
+    let return_norm = (rate_of_return / params.ideal_return).min(1.0);
 
     // Trend term: trend_short (price/EMA20) is an independent breach predictor
     // not captured by the max_drop band. A confirmed uptrend earns credit,
     // letting the picker favour shallower (higher-premium) strikes that the
     // band alone would penalise. Calibration-validated 2026-07 (1.21M obs).
-    let trend_norm = ((trend_short - constants::TREND_SCORE_FLOOR) / constants::TREND_SCORE_BAND)
+    let trend_norm = ((trend_short - params.trend_score_floor) / params.trend_score_band)
         .clamp(0.0, 1.0);
 
-    let weight_sharpe = constants::PUT_SCORE_WEIGHT_SHARPE;
-    let weight_safety = constants::PUT_SCORE_WEIGHT_SAFETY;
-    let weight_return = constants::PUT_SCORE_WEIGHT_RETURN;
-    let weight_trend = constants::PUT_SCORE_WEIGHT_TREND;
-
     Some(
-        weight_sharpe * sharpe_norm
-            + weight_safety * safety_norm
-            + weight_return * return_norm
-            + weight_trend * trend_norm,
+        params.weight_sharpe * sharpe_norm
+            + params.weight_safety * safety_norm
+            + params.weight_return * return_norm
+            + params.weight_trend * trend_norm,
     )
 }
 
@@ -234,6 +266,12 @@ pub fn earnings_in_window(report_date: &str, expiry: &str, today: NaiveDate) -> 
 ///
 /// When `earnings_in_window` is false this is a pure passthrough to
 /// `calculate_put_score` on the band safety.
+///
+/// `realized_vol` and `vol_safety_boost` implement the vol-tier safety boost:
+/// high-vol names deliver higher rate_of_return at matched assignment rate, so
+/// a safety boost for higher-vol names shifts ranking slots toward richer picks
+/// without removing any candidates from the pool. `vol_safety_boost = 0.0`
+/// disables the boost entirely (production default).
 pub fn calculate_put_chain_score(
     sharpe: f64,
     strike: f64,
@@ -248,6 +286,13 @@ pub fn calculate_put_chain_score(
     // max_drop band. `None` falls back to band position — this preserves
     // backward compatibility for historical re-publishes that lack delta.
     delta: Option<f64>,
+    // Realized vol for the underlying (annualized). When provided and
+    // `vol_safety_boost > 0.0`, high-vol names get a safety boost so the
+    // picker favors richer picks from the capital-efficient tier without
+    // removing low-vol candidates from the pool.
+    realized_vol: Option<f64>,
+    vol_safety_boost: f64,
+    params: ScoreParams,
 ) -> Option<f64> {
     if earnings_in_window {
         let midpoint = (strike_from + strike_to) / 2.0;
@@ -265,11 +310,31 @@ pub fn calculate_put_chain_score(
         .map(|d| (1.0 + d).clamp(0.0, 1.0))
         .unwrap_or_else(|| calculate_max_drop_safety(strike, strike_from, strike_to));
     let safety = if earnings_in_window {
-        safety * constants::EARNINGS_SAFETY_MULTIPLIER
+        safety * params.earnings_safety_multiplier
     } else {
         safety
     };
-    calculate_put_score(sharpe, safety, rate_of_return, trend_short, regime)
+    // Vol-tier safety boost: high-vol names deliver higher rate_of_return at
+    // matched assignment rate. Boost safety for higher-vol names so the
+    // picker's ranking slots go to richer picks — without removing any
+    // candidates from the pool (unlike a hard vol filter).
+    let safety = if vol_safety_boost > 0.0 {
+        if let Some(vol) = realized_vol {
+            let tier = if vol >= 0.38 {
+                1.0
+            } else if vol >= 0.28 {
+                0.5
+            } else {
+                0.0
+            };
+            (safety * (1.0 + vol_safety_boost * tier)).clamp(0.0, 1.0)
+        } else {
+            safety
+        }
+    } else {
+        safety
+    };
+    calculate_put_score(sharpe, safety, rate_of_return, trend_short, regime, params)
 }
 
 /// Returns a momentum flag based on price percentile.
@@ -477,6 +542,9 @@ pub fn option_chain_to_csv_vec(
             regime,
             in_earnings_window(&chain.underlying),
             chain.delta,
+            realized_vols.get(&chain.underlying).copied(),
+            constants::VOL_SAFETY_BOOST,
+            ScoreParams::default(),
         );
         let score_str = score.map(|s| format!("{:.3}", s)).unwrap_or_default();
         let strike_percentile_str = match price_ranges.get(&chain.underlying) {
@@ -577,6 +645,9 @@ pub fn option_chain_to_csv_vec(
                 regime,
                 in_earnings_window(&chain.underlying),
                 chain.delta,
+                realized_vols.get(&chain.underlying).copied(),
+                constants::VOL_SAFETY_BOOST,
+                ScoreParams::default(),
             )?;
             Some((i, score))
         })
@@ -707,6 +778,11 @@ mod tests {
         MarketRegime::from_spy_trend(1.05)
     }
 
+    /// Production-default score params for backward-compatible test assertions
+    fn params() -> ScoreParams {
+        ScoreParams::default()
+    }
+
     #[test]
     fn test_strike_percentile_at_min() {
         assert!((calculate_strike_percentile(100.0, 100.0, 200.0) - 0.0).abs() < 1e-9);
@@ -780,60 +856,61 @@ mod tests {
         // (trend weight 0.0 → term contributes nothing).
         // sharpe_norm=0.9, safety_norm=0.9, return_norm=(0.45/0.80)=0.5625
         // score = 0.20*0.9 + 0.40*0.9 + 0.40*0.5625 + 0.0*0 = 0.765
-        let score = calculate_put_score(1.8, 0.90, 0.45, 1.0, &bull_regime()).unwrap();
+        let score = calculate_put_score(1.8, 0.90, 0.45, 1.0, &bull_regime(), params()).unwrap();
         assert!((score - 0.765).abs() < 0.01);
     }
 
     #[test]
     fn test_put_score_filtered_low_return() {
         // MIN_RATE_OF_RETURN floor still applies
-        assert!(calculate_put_score(1.5, 0.90, 0.25, 1.0, &bull_regime()).is_some());
-        assert!(calculate_put_score(1.5, 0.90, 0.24, 1.0, &bull_regime()).is_none());
+        assert!(calculate_put_score(1.5, 0.90, 0.30, 1.0, &bull_regime(), params()).is_some());
+        assert!(calculate_put_score(1.5, 0.90, 0.29, 1.0, &bull_regime(), params()).is_none());
     }
 
     #[test]
     fn test_put_score_high_return_accepted() {
         // no upper cap: high return is accepted — danger now comes from safety
-        assert!(calculate_put_score(1.5, 0.90, 0.85, 1.0, &bull_regime()).is_some());
-        assert!(calculate_put_score(1.5, 0.90, 5.0, 1.0, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.5, 0.90, 0.85, 1.0, &bull_regime(), params()).is_some());
+        assert!(calculate_put_score(1.5, 0.90, 5.0, 1.0, &bull_regime(), params()).is_some());
     }
 
     #[test]
     fn test_put_score_filtered_negative_sharpe() {
-        assert!(calculate_put_score(-0.5, 0.90, 0.45, 1.0, &bull_regime()).is_none());
+        assert!(calculate_put_score(-0.5, 0.90, 0.45, 1.0, &bull_regime(), params()).is_none());
     }
 
     #[test]
     fn test_put_score_filtered_zero_sharpe() {
-        assert!(calculate_put_score(0.0, 0.90, 0.45, 1.0, &bull_regime()).is_none());
+        assert!(calculate_put_score(0.0, 0.90, 0.45, 1.0, &bull_regime(), params()).is_none());
     }
 
     #[test]
     fn test_put_score_boundary_return_low() {
-        assert!(calculate_put_score(1.0, 0.90, 0.25, 1.0, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.0, 0.90, 0.30, 1.0, &bull_regime(), params()).is_some());
+        assert!(calculate_put_score(1.0, 0.90, 0.29, 1.0, &bull_regime(), params()).is_none());
     }
 
     #[test]
     fn test_put_score_boundary_return_high() {
         // 0.80 == IDEAL_RETURN, accepted (soft-cap saturation point)
-        assert!(calculate_put_score(1.0, 0.90, 0.80, 1.0, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.0, 0.90, 0.80, 1.0, &bull_regime(), params()).is_some());
     }
 
     #[test]
     fn test_put_score_just_below_return_floor() {
-        assert!(calculate_put_score(1.0, 0.90, 0.24, 1.0, &bull_regime()).is_none());
+        assert!(calculate_put_score(1.0, 0.90, 0.29, 1.0, &bull_regime(), params()).is_none());
     }
 
     #[test]
     fn test_put_score_at_return_floor() {
-        assert!(calculate_put_score(1.0, 0.90, 0.25, 1.0, &bull_regime()).is_some());
+        assert!(calculate_put_score(1.0, 0.90, 0.30, 1.0, &bull_regime(), params()).is_some());
     }
 
     #[test]
     fn test_put_score_safety_direction() {
         // same sharpe/return: deep strike (high safety) outscores shallow
-        let shallow = calculate_put_score(1.5, 0.10, 0.45, 1.0, &bull_regime()).unwrap();
-        let deep = calculate_put_score(1.5, 0.90, 0.45, 1.0, &bull_regime()).unwrap();
+        let shallow = calculate_put_score(1.5, 0.10, 0.45, 1.0, &bull_regime(), params()).unwrap();
+        let deep = calculate_put_score(1.5, 0.90, 0.45, 1.0, &bull_regime(), params()).unwrap();
         assert!(deep > shallow);
     }
 
@@ -874,7 +951,7 @@ mod tests {
         // (disabled) so the term contributes nothing regardless.
         // sharpe=2.0 -> sharpe_norm=1.0, safety_norm=0.0, return_norm=(0.35/0.80)=0.4375
         // score = 0.20*1.0 + 0.40*0.0 + 0.40*0.4375 + 0.0*0 = 0.375
-        let score = calculate_put_score(2.0, -0.10, 0.35, 1.0, &bull_regime()).unwrap();
+        let score = calculate_put_score(2.0, -0.10, 0.35, 1.0, &bull_regime(), params()).unwrap();
         assert!((score - 0.375).abs() < 0.01);
     }
 
@@ -883,7 +960,7 @@ mod tests {
         // sharpe > 2.0 clamps sharpe_norm to 1.0; deep strike safety=1.0.
         // sharpe_norm=1.0, safety_norm=1.0, return_norm=0.4375
         // score = 0.20 + 0.40 + 0.175 + 0 = 0.775
-        let score = calculate_put_score(5.0, 1.0, 0.35, 1.0, &bull_regime()).unwrap();
+        let score = calculate_put_score(5.0, 1.0, 0.35, 1.0, &bull_regime(), params()).unwrap();
         assert!((score - 0.775).abs() < 0.01);
     }
 
@@ -892,7 +969,7 @@ mod tests {
         // deep strike (safety=1.0), sharpe=2.0 (clamped 1.0), return=0.80 (return_norm=1.0).
         // Trend weight is 0.0 (disabled) → trend term contributes 0 even at saturation.
         // score = 0.20 + 0.40 + 0.40 + 0 = 1.00
-        let score = calculate_put_score(2.0, 1.0, 0.80, 1.08, &bull_regime()).unwrap();
+        let score = calculate_put_score(2.0, 1.0, 0.80, 1.08, &bull_regime(), params()).unwrap();
         assert!((score - 1.00).abs() < 0.01);
     }
 
@@ -900,8 +977,8 @@ mod tests {
     fn test_put_score_return_soft_cap() {
         // return above IDEAL_RETURN saturates return_norm at 1.0: no extra
         // credit, but still accepted (no hard cap).
-        let at_cap = calculate_put_score(2.0, 1.0, 0.80, 1.08, &bull_regime()).unwrap();
-        let above_cap = calculate_put_score(2.0, 1.0, 2.00, 1.08, &bull_regime()).unwrap();
+        let at_cap = calculate_put_score(2.0, 1.0, 0.80, 1.08, &bull_regime(), params()).unwrap();
+        let above_cap = calculate_put_score(2.0, 1.0, 2.00, 1.08, &bull_regime(), params()).unwrap();
         assert!((at_cap - above_cap).abs() < 1e-9);
         assert!((at_cap - 1.00).abs() < 0.01);
     }
@@ -919,8 +996,8 @@ mod tests {
             constants::PUT_SCORE_WEIGHT_TREND == 0.0,
             "trend weight must be 0.0 by default; re-enabling requires a backtest showing premium up at flat assignment"
         );
-        let weak = calculate_put_score(2.0, 0.5, 0.45, 1.0, &bull_regime()).unwrap();
-        let strong = calculate_put_score(2.0, 0.5, 0.45, 1.08, &bull_regime()).unwrap();
+        let weak = calculate_put_score(2.0, 0.5, 0.45, 1.0, &bull_regime(), params()).unwrap();
+        let strong = calculate_put_score(2.0, 0.5, 0.45, 1.08, &bull_regime(), params()).unwrap();
         assert!((strong - weak).abs() < 1e-9, "strong={strong} weak={weak}");
     }
 
@@ -1627,7 +1704,7 @@ mod tests {
         .unwrap();
 
         let expected_safety = calculate_max_drop_safety(90.0, 80.0, 120.0);
-        let expected_score = calculate_put_score(1.5, expected_safety, 0.35, 1.0, &bull_regime()).unwrap();
+        let expected_score = calculate_put_score(1.5, expected_safety, 0.35, 1.0, &bull_regime(), params()).unwrap();
 
         let csv_str = String::from_utf8(csv_bytes).unwrap();
         let header: Vec<&str> = csv_str.lines().next().unwrap().split(',').collect();
@@ -1798,16 +1875,16 @@ mod tests {
 
     #[test]
     fn test_put_chain_score_no_earnings_deep_is_passthrough() {
-        let got = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false, None);
-        let want = calculate_put_score(1.5, band_safety(90.0), 0.35, 1.0, &bull_regime());
+        let got = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false, None, None, 0.0, params());
+        let want = calculate_put_score(1.5, band_safety(90.0), 0.35, 1.0, &bull_regime(), params());
         assert_eq!(got, want);
     }
 
     #[test]
     fn test_put_chain_score_no_earnings_shallow_is_passthrough() {
         // strike 110 (upper half), no earnings → still scored (not excluded).
-        let got = calculate_put_chain_score(1.5, 110.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false, None);
-        let want = calculate_put_score(1.5, band_safety(110.0), 0.35, 1.0, &bull_regime());
+        let got = calculate_put_chain_score(1.5, 110.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false, None, None, 0.0, params());
+        let want = calculate_put_score(1.5, band_safety(110.0), 0.35, 1.0, &bull_regime(), params());
         assert_eq!(got, want);
         assert!(got.is_some());
     }
@@ -1816,7 +1893,7 @@ mod tests {
     fn test_put_chain_score_earnings_excludes_upper_half() {
         // strike 110 > midpoint 100, earnings in window → excluded.
         assert_eq!(
-            calculate_put_chain_score(1.5, 110.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true, None),
+            calculate_put_chain_score(1.5, 110.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true, None, None, 0.0, params()),
             None
         );
     }
@@ -1824,13 +1901,14 @@ mod tests {
     #[test]
     fn test_put_chain_score_earnings_keeps_lower_half_with_halved_safety() {
         // strike 90 ≤ midpoint 100, earnings → scored with safety × multiplier.
-        let got = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true, None);
+        let got = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true, None, None, 0.0, params());
         let want = calculate_put_score(
             1.5,
             band_safety(90.0) * crate::constants::EARNINGS_SAFETY_MULTIPLIER,
             0.35,
             1.0,
             &bull_regime(),
+            params(),
         );
         assert_eq!(got, want);
         assert!(got.is_some());
@@ -1839,7 +1917,7 @@ mod tests {
     #[test]
     fn test_put_chain_score_earnings_midpoint_kept() {
         // strike == midpoint → kept (strike ≤ mid), safety halved.
-        let got = calculate_put_chain_score(1.5, 100.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true, None);
+        let got = calculate_put_chain_score(1.5, 100.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true, None, None, 0.0, params());
         assert!(got.is_some());
         let want = calculate_put_score(
             1.5,
@@ -1847,6 +1925,7 @@ mod tests {
             0.35,
             1.0,
             &bull_regime(),
+            params(),
         );
         assert_eq!(got, want);
     }
@@ -1854,8 +1933,8 @@ mod tests {
     #[test]
     fn test_put_chain_score_earnings_halving_downranks() {
         // same deep strike: earnings score < no-earnings score.
-        let with = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true, None).unwrap();
-        let without = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false, None).unwrap();
+        let with = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true, None, None, 0.0, params()).unwrap();
+        let without = calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false, None, None, 0.0, params()).unwrap();
         assert!(with < without);
     }
 
@@ -1863,12 +1942,12 @@ mod tests {
     fn test_put_chain_score_earnings_does_not_bypass_prefilters() {
         // Earnings doesn't override the sharpe>0 floor: deep strike, sharpe=0 → None.
         assert_eq!(
-            calculate_put_chain_score(0.0, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true, None),
+            calculate_put_chain_score(0.0, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), true, None, None, 0.0, params()),
             None
         );
         // And the min-return floor still applies.
         assert_eq!(
-            calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.10, 1.0, &bull_regime(), true, None),
+            calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.10, 1.0, &bull_regime(), true, None, None, 0.0, params()),
             None
         );
     }
