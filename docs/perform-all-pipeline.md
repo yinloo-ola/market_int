@@ -309,7 +309,7 @@ Calls `publish_to_telegram()`, which orchestrates:
         - Surviving **lower-half** strikes still score, but `safety` is **halved** (`× EARNINGS_SAFETY_MULTIPLIER = 0.5`).
         - No earnings in window → pure passthrough to `calculate_put_score` on band safety.
       - **Pre-filters** (any failure → `None`, excluded from picks):
-        - `rate_of_return ≥ MIN_RATE_OF_RETURN (0.25)` — floor on worthwhile premiums. **No upper cap** — a high return is a reward, not a danger signal (danger is expressed via band safety).
+        - `rate_of_return ≥ MIN_RATE_OF_RETURN (0.30)` — floor on worthwhile premiums. **No upper cap** — a high return is a reward, not a danger signal (danger is expressed via band safety).
         - `sharpe > 0` — only stocks with positive risk-adjusted returns.
         - Note: the old `rate_of_return > 0.80` and `strike_percentile > 0.40` pre-filters were **removed** in the 2026-07 redesign. A trend term is wired into the score but **disabled by default** (`PUT_SCORE_WEIGHT_TREND = 0.0`); the 2026-07 sweep found any non-zero trend weight lifted assignment rate above baseline.
         - **Score formula** (static weights, regime-independent):
@@ -481,7 +481,7 @@ All tunable parameters are centralized in `src/constants.rs`:
 | `PRICE_PERCENTILE_DAYS` | 20 | Window for price percentile |
 | `EMA_SHORT_PERIOD` | 20 | Short EMA for trend |
 | `EMA_LONG_PERIOD` | 50 | Long EMA for trend |
-| `MIN_RATE_OF_RETURN` | 0.25 | Pre-filter: minimum put return |
+| `MIN_RATE_OF_RETURN` | 0.30 | Pre-filter: minimum put return (raised from 0.25 in 2026-07 after backtest sweep showed strict improvement) |
 | `MAX_RATE_OF_RETURN` | 0.80 | Unused in production scoring since the 2026-07 redesign (no upper cap); still referenced by backtest presets |
 | `MAX_STRIKE_PERCENTILE` | 0.40 | Unused in production scoring since the 2026-07 redesign; still referenced by backtest presets |
 | `IDEAL_RETURN` | 0.80 | Asymmetric soft-cap for return norm (no penalty above it) |

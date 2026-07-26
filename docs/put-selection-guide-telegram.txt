@@ -4,7 +4,7 @@
 
 📋 *Field Reference*
 
-• `rate_of_return` — Annualised premium yield. `(mid price / strike) ÷ weeks to expiry × 52`. Good: ≥ 0.25 (no upper cap — higher return = more reward, soft-capped in the score at 80%)
+• `rate_of_return` — Annualised premium yield. `(mid price / strike) ÷ weeks to expiry × 52`. Good: ≥ 0.30 (no upper cap — higher return = more reward, soft-capped in the score at 80%)
 
 • `sharpe_ratio` — Risk-adjusted return of the underlying stock. Higher = better reward per unit of risk. Good: > 1.0
 
@@ -40,7 +40,7 @@
 
 3️⃣ `price_percentile ≤ 0.80` — Stock trading at top of range = overextended. Stick to NORMAL momentum.
 
-4️⃣ `rate_of_return` ≥ 0.25 — Below 0.25 not worth the capital. No upper limit: a high return is a reward, not a danger signal (danger comes from the max_drop band, reflected in the score).
+4️⃣ `rate_of_return` ≥ 0.30 — Below 0.30 not worth the capital. No upper limit: a high return is a reward, not a danger signal (danger comes from the max_drop band, reflected in the score).
 
 ━━━━━━━━━━━━━━━━━━
 

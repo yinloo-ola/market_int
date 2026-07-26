@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`ScoreParams` struct** in `model.rs` — encapsulates all tunable scoring parameters (`min_rate_of_return`, `ideal_return`, weights, trend-score thresholds, earnings safety multiplier) so the backtest's production-mirror delegate path respects config overrides. Threaded through `calculate_put_score` and `calculate_put_chain_score`. Default-initialized from constants.
+- **11 new backtest presets**: `pm-ideal-085/090/095/100`, `pm-min-ror-30/35/40`, `pm-safety-50`, `pm-return-50`, `pm-vol-high-ideal-090`, `pm-vol-high-safety-50` — production-mirror ablation sweeps that now produce distinct results (fixed by ScoreParams).
+
+### Changed
+
+- **`MIN_RATE_OF_RETURN` raised from 0.25 to 0.30** — backtest-validated as a strict improvement: assignment rate 1.94% vs 2.18%, avg ROR 64.8% vs 61.7% (3-year sweep, 157 sim weeks, 413 picks per preset).
 - **Vol-tier annotation (D2, 2026-07)** — each published put pick is annotated with a volatility tier in the Telegram caption (`🟢` vol ≥ 0.38, `🟡` 0.28–0.38, `🔴` < 0.28) and a numeric value, plus a new `realized_vol` column in the published option-chain CSV. Surfaces capital-efficiency context (high-vol names deliver materially higher `rate_of_return` at matched assignment rate, per the 1.21M-observation calibration run) **without filtering** — the bot's output is a research candidate pool, not a trade list.
 - **`backtest --calibrate-safety`** — read-only mode that walks every strike across the production-mirror band (plus an extension toward spot) and prints the empirical `safety → breach-rate` curve, bucketed by regime / earnings-window / trend-strength, with Wilson 95% CIs. Emits a `safety_calibration.csv` for offline analysis. Produced the dataset that validated (and falsified) the safety-recalibration and trend-term hypotheses.
 - **`trend_short` parameter** on `calculate_put_score` / `calculate_put_chain_score`, with a trend term wired into the composite score. Disabled by default (`PUT_SCORE_WEIGHT_TREND = 0.0`): the 2026-07 sweep found every non-zero weight (0.03–0.15) lifted assignment rate above the 2.4% baseline. The lever is parked, documented with the evidence, and pinned by `test_put_score_trend_term_disabled_by_default`.
