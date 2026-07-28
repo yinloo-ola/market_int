@@ -559,16 +559,23 @@ pub fn option_chain_to_csv_vec(
             .map(|p| format!("{:.0}%", p * 100.0))
             .unwrap_or_default();
 
+        // The earnings calendar map may carry a forward-looking entry whose
+        // report_date falls AFTER this option's expiry (the fetch window is
+        // [today, today+period+7], wider than any single chain's lifetime).
+        // Only in-window earnings are material, so gate the annotation on
+        // `in_earnings_window` — otherwise the column mislabels post-expiry
+        // reports as "before expiry" (and the TopPick would feed a spurious
+        // Telegram ⚠️ caption). [T-004]
         let earnings_str = match earnings_map.get(&chain.underlying) {
-            Some(info) => {
+            Some(info) if in_earnings_window(&chain.underlying) => {
                 let time_label = match info.report_time.as_str() {
                     "盘前" | "BMO" | "before_open" => "before_open",
                     "盘后" | "AMC" | "after_close" => "after_close",
-                    _ => &info.report_time,
+                    _ => info.report_time.as_str(),
                 };
                 format!("{} ({})", info.report_date, time_label)
             }
-            None => String::new(),
+            _ => String::new(),
         };
 
         let (trend_short_str, trend_long_str) = match trend_data.get(&chain.underlying) {
@@ -695,7 +702,11 @@ pub fn option_chain_to_csv_vec(
             score: *score,
             sharpe,
             price_percentile: pp,
-            earnings: earnings_map.get(&chain.underlying).cloned(),
+            earnings: if in_earnings_window(&chain.underlying) {
+                earnings_map.get(&chain.underlying).cloned()
+            } else {
+                None
+            },
             trend_short: ts,
             trend_long: tl,
             realized_vol: rv,
@@ -1812,6 +1823,63 @@ mod tests {
         let a: Vec<_> = picks_a.iter().map(as_tuple).collect();
         let b: Vec<_> = picks_b.iter().map(as_tuple).collect();
         assert_eq!(a, b, "out-of-window earnings must be scoring-neutral");
+    }
+
+    #[test]
+    fn test_earnings_after_expiry_not_annotated() {
+        // Regression: when the earnings report_date is AFTER expiry, the
+        // `earnings_before_expiry` CSV column must be BLANK and the TopPick
+        // must carry no earnings (so the Telegram caption does not warn).
+        // The earnings_map may contain a forward-looking calendar entry whose
+        // report_date falls beyond the option's lifetime — only in-window
+        // earnings are material. Repro scenario mirrors SNDK 2026-07-31 expiry
+        // with a 2026-08-05 (after_close) report.
+        //
+        // make_chain default expiry is 2026-06-19; report 2026-07-01 is
+        // unambiguously after expiry regardless of when the test runs.
+        let chains = vec![make_chain("AAPL", 90.0, 0.35)];
+
+        let mut sharpe = HashMap::new();
+        sharpe.insert("AAPL".to_string(), 1.5);
+        let mut ranges = HashMap::new();
+        ranges.insert("AAPL".to_string(), PutPriceRange { min: 80.0, max: 120.0 });
+
+        let mut earnings = HashMap::new();
+        earnings.insert(
+            "AAPL".to_string(),
+            EarningsInfo {
+                report_date: "2026-07-01".to_string(),
+                report_time: "AMC".to_string(),
+                expected_eps: None,
+            },
+        );
+
+        let (csv_bytes, top_picks) = option_chain_to_csv_vec(
+            &chains, &sharpe, &ranges, &HashMap::new(), &earnings, &HashMap::new(),
+            &HashMap::new(), &HashMap::new(), &bull_regime(),
+        )
+        .unwrap();
+
+        // CSV column must be blank.
+        let csv_str = String::from_utf8(csv_bytes).unwrap();
+        let mut lines = csv_str.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let earn_idx = header
+            .iter()
+            .position(|h| *h == "earnings_before_expiry")
+            .expect("earnings_before_expiry column must exist");
+        let row: Vec<&str> = lines.next().unwrap().split(',').collect();
+        assert_eq!(
+            row[earn_idx], "",
+            "earnings after expiry must not populate earnings_before_expiry: {}",
+            csv_str
+        );
+
+        // TopPick must not carry earnings (drives the Telegram ⚠️ caption).
+        assert!(
+            top_picks[0].earnings.is_none(),
+            "TopPick must not carry earnings when report is after expiry"
+        );
     }
 
     // --- New contract: the earnings-in-window rule (pure helpers) ---
