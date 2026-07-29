@@ -197,9 +197,15 @@ enum Commands {
     },
     // Up/down directional signal — research tool. Prints a per-symbol
     // directional read to stdout. `--calibrate` / `--backtest` land in tickets
-    // 07/08; the skeleton (ticket 05) is live-predict only.
+    // 07/08; ticket 06 adds the full 5-indicator composite + output polish.
     Direction {
         symbols_file_path: String,
+        /// Limit output to the N most-confident calls.
+        #[arg(long)]
+        top: Option<usize>,
+        /// Emit machine-readable JSON Lines instead of the table.
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 }
 
@@ -587,7 +593,11 @@ async fn main() {
                 Err(e) => log::error!("Failed to fetch earnings: {}", e),
             }
         }
-        Commands::Direction { symbols_file_path } => {
+        Commands::Direction {
+            symbols_file_path,
+            top,
+            json,
+        } => {
             let symbols = match symbols::read_symbols_from_file(&symbols_file_path) {
                 Ok(s) => s,
                 Err(e) => {
@@ -595,7 +605,15 @@ async fn main() {
                     return;
                 }
             };
-            match signal::run_predict(&conn, &symbols) {
+            let opts = signal::PredictOptions {
+                top,
+                format: if json {
+                    Some(signal::OutputFormat::Json)
+                } else {
+                    Some(signal::OutputFormat::Table)
+                },
+            };
+            match signal::run_predict(&conn, &symbols, opts) {
                 Ok(_) => log::info!("Successfully computed directional signals"),
                 Err(e) => log::error!("Error computing directional signals: {}", e),
             }

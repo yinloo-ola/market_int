@@ -74,13 +74,31 @@ pub const VOL_SAFETY_BOOST: f64 = 0.0;
 // horizon. See .scratch/up-down-signal/spec.md and map decisions 01–04.
 //
 // Weights are seeds (momentum-leaning, summing to 100); ticket 08's grid
-// search calibrates them against the 2-year train split. The skeleton (ticket
-// 05) wires only the EMA20/50 alignment term end-to-end; the remaining four
-// indicators (EMA200, MACD, RSI, volume) land in ticket 06.
+// search calibrates them against the 2-year train split.
+//
+// Normalization is hybrid (decision 02): discrete regime flags for the EMAs
+// (alignment + EMA200), continuous magnitudes for MACD/RSI/volume.
 pub const SIGNAL_WEIGHT_EMA_ALIGNMENT: f64 = 25.0;
+pub const SIGNAL_WEIGHT_EMA200: f64 = 15.0;
+pub const SIGNAL_WEIGHT_MACD: f64 = 25.0;
+pub const SIGNAL_WEIGHT_RSI: f64 = 20.0;
+pub const SIGNAL_WEIGHT_VOLUME: f64 = 15.0;
 /// Neutral band edges — held CONSTANT (not calibrated) so only the weights
 /// are tuned against the train split. Used by both the live predictor's
 /// BULL/BEAR/NEUT display and the backtest's abstention rule (one band,
 /// two consumers). <0.40 = BEAR call, >0.60 = BULL call, else abstain/NEUT.
 pub const SIGNAL_NEUTRAL_LOW: f64 = 0.40;
 pub const SIGNAL_NEUTRAL_HIGH: f64 = 0.60;
+// ── Direction-indicator normalization params ──────────────────
+/// RSI normalization band endpoints (decision 02). rsi <= RSI_LOW → 0.0
+/// (oversold/bearish), rsi >= RSI_HIGH → 1.0 (overbought/bullish), linear
+/// between. RSI is a momentum oscillator, so high RSI = bullish momentum here.
+pub const RSI_LOW: f64 = 10.0;
+pub const RSI_HIGH: f64 = 90.0;
+/// Volume-spike ratio that maxes the volume-breakout feature (decision 02).
+/// A day with volume 1.5× its 50-day average → full 1.0; below average → 0.0.
+pub const VOLUME_SPIKE_FULL: f64 = 1.5;
+/// Window (bars) of MACD histogram used for the self-referential stdev
+/// normalization (decision 02): score = clamp(hist / stdev(hist, window)).
+/// Self-referential keeps it stock-agnostic (no price-scale contamination).
+pub const MACD_STDEV_WINDOW: usize = 20;
