@@ -219,6 +219,11 @@ enum Commands {
         /// the last calibrated weights (or it uses default weights).
         #[arg(long, default_value_t = false)]
         band_sweep: bool,
+        /// Print per-class (bull-call vs bear-call) hit-rate breakdown
+        /// out-of-sample. Reveals whether the signal is asymmetric — e.g.
+        /// useless on "up" but decent at catching "down" moves.
+        #[arg(long, default_value_t = false)]
+        class_breakdown: bool,
         /// Prediction horizon in trading days (backtest/calibrate modes). Default 10.
         #[arg(long, default_value_t = signal_backtest::DEFAULT_HORIZON)]
         horizon: usize,
@@ -616,6 +621,7 @@ async fn main() {
             backtest,
             calibrate,
             band_sweep,
+            class_breakdown,
             horizon,
         } => {
             let symbols = match symbols::read_symbols_from_file(&symbols_file_path) {
@@ -652,6 +658,19 @@ async fn main() {
                         log::info!("Successfully ran band sweep");
                     }
                     Err(e) => log::error!("Error running band sweep: {}", e),
+                }
+            } else if class_breakdown {
+                match signal_backtest::class_breakdown_out_of_sample(
+                    &conn,
+                    &symbols,
+                    horizon,
+                    signal::SignalParams::default(),
+                ) {
+                    Ok(bd) => {
+                        signal_backtest::print_class_breakdown(&bd, horizon);
+                        log::info!("Successfully ran class breakdown");
+                    }
+                    Err(e) => log::error!("Error running class breakdown: {}", e),
                 }
             } else {
                 let opts = signal::PredictOptions {
