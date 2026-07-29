@@ -213,6 +213,12 @@ enum Commands {
         /// Grid-search weights on the in-sample (older 2/3) split.
         #[arg(long, default_value_t = false)]
         calibrate: bool,
+        /// Sweep the neutral-band width out-of-sample: prints the accuracy /
+        /// coverage / baseline trade-off at increasing band half-widths.
+        /// Answers "does abstaining more help?" Run after --calibrate to use
+        /// the last calibrated weights (or it uses default weights).
+        #[arg(long, default_value_t = false)]
+        band_sweep: bool,
         /// Prediction horizon in trading days (backtest/calibrate modes). Default 10.
         #[arg(long, default_value_t = signal_backtest::DEFAULT_HORIZON)]
         horizon: usize,
@@ -609,6 +615,7 @@ async fn main() {
             json,
             backtest,
             calibrate,
+            band_sweep,
             horizon,
         } => {
             let symbols = match symbols::read_symbols_from_file(&symbols_file_path) {
@@ -632,6 +639,19 @@ async fn main() {
                 ) {
                     Ok(_) => log::info!("Successfully ran signal backtest"),
                     Err(e) => log::error!("Error running signal backtest: {}", e),
+                }
+            } else if band_sweep {
+                match signal_backtest::band_sweep_out_of_sample(
+                    &conn,
+                    &symbols,
+                    horizon,
+                    signal::SignalParams::default(),
+                ) {
+                    Ok(rows) => {
+                        signal_backtest::print_band_sweep(&rows);
+                        log::info!("Successfully ran band sweep");
+                    }
+                    Err(e) => log::error!("Error running band sweep: {}", e),
                 }
             } else {
                 let opts = signal::PredictOptions {

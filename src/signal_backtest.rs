@@ -382,6 +382,126 @@ pub fn run_calibrate(
     Ok(())
 }
 
+/// A row in the band-sweep trade-off table.
+#[derive(Debug, Clone)]
+pub struct BandRow {
+    pub half_width: f64,      // band is [0.5 − h, 0.5 + h]; h=0.05..0.45
+    pub hit_rate: Option<f64>, // accuracy on called days (None if no calls)
+    pub majority: Option<f64>, // called-days majority baseline (the bar)
+    pub n_calls: usize,
+    pub coverage: f64, // n_calls / n_days
+}
+
+/// Sweep the neutral-band half-width from `0.05` to `0.45` and return the
+/// accuracy / coverage / baseline trade-off for each. Evaluates `params`
+/// out-of-sample at the primary horizon. Used to answer "does abstaining more
+/// help?" — the key column is hit_rate vs majority (the gap that matters).
+pub fn band_sweep_out_of_sample(
+    conn: &Connection,
+    symbols: &[String],
+    horizon: usize,
+    params: SignalParams,
+) -> model::Result<Vec<BandRow>> {
+    let candles_by_symbol = load_all_candles(conn, symbols);
+    let spy_closes = crate::signal::load_spy_closes(conn);
+
+    // Collect out-of-sample rows at the primary horizon (ignore secondary).
+    let mut rows: Vec<DayRow> = Vec::new();
+    for (_symbol, candles) in &candles_by_symbol {
+        if let (_train, Some(test)) = split_rows(candles, &spy_closes, horizon) {
+            rows.extend(test);
+        }
+    }
+    let n_days = rows.len();
+
+    let weights = params.weights_array();
+    // Sweep band half-widths 0.05, 0.10, ..., 0.45 (the existing default is 0.10).
+    let mut out = Vec::new();
+    let mut h = 0.05;
+    while h <= 0.4501 {
+        let low = 0.5 - h;
+        let high = 0.5 + h;
+        let mut n_calls = 0usize;
+        let mut hits = 0usize;
+        let mut bulls_in_calls = 0usize;
+        for r in &rows {
+            let sig = crate::signal::signal_from_scores(r.scores, &params);
+            if sig > high || sig < low {
+                n_calls += 1;
+                let predicts_bull = sig > 0.5;
+                if predicts_bull == r.bullish {
+                    hits += 1;
+                }
+                if r.bullish {
+                    bulls_in_calls += 1;
+                }
+            }
+        }
+        let _ = weights; // weights already folded into sig via signal_from_scores
+        let hit_rate = if n_calls > 0 { Some(hits as f64 / n_calls as f64) } else { None };
+        let majority = if n_calls > 0 {
+            let bears_in_calls = n_calls - bulls_in_calls;
+            Some(bulls_in_calls.max(bears_in_calls) as f64 / n_calls as f64)
+        } else {
+            None
+        };
+        let coverage = if n_days > 0 { n_calls as f64 / n_days as f64 } else { 0.0 };
+        out.push(BandRow {
+            half_width: h,
+            hit_rate,
+            majority,
+            n_calls,
+            coverage,
+        });
+        h += 0.05;
+    }
+    Ok(out)
+}
+
+/// Print the band-sweep trade-off table.
+pub fn print_band_sweep(rows: &[BandRow]) {
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    let _ = writeln!(out, "{}", "=".repeat(70));
+    let _ = writeln!(out, "Neutral-band sweep — out-of-sample (wider band = fewer, more-confident calls)");
+    let _ = writeln!(out, "{}", "=".repeat(70));
+    let _ = writeln!(
+        out,
+        "{:>10} {:>9} {:>9} {:>8} {:>9} {:>9}",
+        "HALF-WIDTH", "BAND", "HIT-RATE", "MAJORITY", "GAP", "COVERAGE"
+    );
+    let _ = writeln!(out, "{}", "-".repeat(70));
+    for r in rows {
+        let band = format!("[{:.2},{:.2}]", 0.5 - r.half_width, 0.5 + r.half_width);
+        let hr = r
+            .hit_rate
+            .map(|h| format!("{:.1}%", h * 100.0))
+            .unwrap_or_else(|| "n/a".to_string());
+        let maj = r
+            .majority
+            .map(|m| format!("{:.1}%", m * 100.0))
+            .unwrap_or_else(|| "n/a".to_string());
+        let gap = match (r.hit_rate, r.majority) {
+            (Some(h), Some(m)) => format!("{:+.1}pp", (h - m) * 100.0),
+            _ => "n/a".to_string(),
+        };
+        let _ = writeln!(
+            out,
+            "{:>10.2} {:>9} {:>9} {:>8} {:>9} {:>8.1}%",
+            r.half_width,
+            band,
+            hr,
+            maj,
+            gap,
+            r.coverage * 100.0
+        );
+    }
+    let _ = writeln!(out, "{}", "-".repeat(70));
+    let _ = writeln!(out, "GAP = HIT-RATE − MAJORITY (the number that matters; >0 = real edge).");
+    let _ = writeln!(out, "COVERAGE = % of days the signal made a call.");
+    let _ = writeln!(out, "Current production band is HALF-WIDTH 0.10.");
+}
+
 fn print_results(
     results: &[HorizonResult],
     primary: usize,
