@@ -210,7 +210,10 @@ enum Commands {
         /// Run out-of-sample evaluation on the most-recent 1/3 of history.
         #[arg(long, default_value_t = false)]
         backtest: bool,
-        /// Prediction horizon in trading days (backtest mode). Default 10.
+        /// Grid-search weights on the in-sample (older 2/3) split.
+        #[arg(long, default_value_t = false)]
+        calibrate: bool,
+        /// Prediction horizon in trading days (backtest/calibrate modes). Default 10.
         #[arg(long, default_value_t = signal_backtest::DEFAULT_HORIZON)]
         horizon: usize,
     },
@@ -605,6 +608,7 @@ async fn main() {
             top,
             json,
             backtest,
+            calibrate,
             horizon,
         } => {
             let symbols = match symbols::read_symbols_from_file(&symbols_file_path) {
@@ -614,8 +618,18 @@ async fn main() {
                     return;
                 }
             };
-            if backtest {
-                match signal_backtest::run_backtest(&conn, &symbols, horizon) {
+            if calibrate {
+                match signal_backtest::run_calibrate(&conn, &symbols, horizon) {
+                    Ok(_) => log::info!("Successfully ran signal calibration"),
+                    Err(e) => log::error!("Error running signal calibration: {}", e),
+                }
+            } else if backtest {
+                match signal_backtest::run_backtest(
+                    &conn,
+                    &symbols,
+                    horizon,
+                    signal::SignalParams::default(),
+                ) {
                     Ok(_) => log::info!("Successfully ran signal backtest"),
                     Err(e) => log::error!("Error running signal backtest: {}", e),
                 }

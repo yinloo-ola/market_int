@@ -138,6 +138,39 @@ pub fn compute_signal(closes: &[f64], volumes: &[f64], params: &SignalParams) ->
     SignalBreakdown::compute(closes, volumes, params).signal
 }
 
+/// The 5 normalized indicator scores, weight-independent. Order:
+/// `[ema_alignment, ema200, macd, rsi, volume]`. Precomputing these once per
+/// day lets the grid-search calibration (ticket 08) evaluate many weight-sets
+/// cheaply as a weighted sum, without recomputing the expensive indicators.
+pub fn indicator_scores(closes: &[f64], volumes: &[f64]) -> [f64; 5] {
+    [
+        indicators::ema_alignment_score(closes),
+        indicators::ema200_score(closes),
+        indicators::macd_score(closes),
+        indicators::rsi_score(closes),
+        indicators::volume_breakout_score(volumes),
+    ]
+}
+
+/// Combine precomputed indicator scores with weights into a `[0, 1]` signal.
+/// Returns `0.5` when total weight is zero (defensive). This is the
+/// weight-dependent half of `compute_signal`, split out for grid search.
+pub fn signal_from_scores(scores: [f64; 5], params: &SignalParams) -> f64 {
+    let weights = [
+        params.weight_ema_alignment,
+        params.weight_ema200,
+        params.weight_macd,
+        params.weight_rsi,
+        params.weight_volume,
+    ];
+    let total: f64 = weights.iter().sum();
+    if total <= 0.0 {
+        return 0.5;
+    }
+    let weighted: f64 = weights.iter().zip(scores.iter()).map(|(w, s)| w * s).sum();
+    weighted / total
+}
+
 /// Direction label derived from a signal value via the fixed neutral band.
 pub fn direction(signal: f64) -> &'static str {
     if signal > constants::SIGNAL_NEUTRAL_HIGH {
