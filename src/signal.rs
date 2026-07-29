@@ -226,9 +226,9 @@ pub fn direction(signal: f64) -> &'static str {
 /// Map `|signal − 0.5|` to a readable confidence band.
 fn confidence(signal: f64) -> &'static str {
     let d = (signal - 0.5).abs();
-    if d >= 0.35 {
+    if d >= constants::SIGNAL_CONFIDENCE_STRONG {
         "STRONG"
-    } else if d >= 0.15 {
+    } else if d >= constants::SIGNAL_CONFIDENCE_MODERATE {
         "MODERATE"
     } else {
         "WEAK"

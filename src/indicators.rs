@@ -25,11 +25,8 @@ fn ema_stack(closes: &[f64]) -> (f64, f64) {
 /// EMA200 for a close-price series. Returns the seed mean when fewer than 200
 /// points are available (the underlying EMA primitive's fallback).
 pub fn ema200(closes: &[f64]) -> f64 {
-    stats::exponential_moving_average(closes, EMA200_PERIOD)
+    stats::exponential_moving_average(closes, constants::EMA200_PERIOD)
 }
-
-/// EMA period for the long-term regime flag.
-pub const EMA200_PERIOD: u32 = 200;
 
 /// MACD components from three EMAs.
 ///
@@ -37,10 +34,10 @@ pub const EMA200_PERIOD: u32 = 200;
 /// `histogram = line − signal`. Returns `(line, signal, histogram)` using the
 /// *latest* values. A positive, rising histogram is the classic bullish read.
 ///
-/// Returns `(0.0, 0.0, 0.0)` if `closes` has fewer than `MACD_LONG_PERIOD`
+/// Returns `(0.0, 0.0, 0.0)` if `closes` has fewer than `constants::MACD_LONG_PERIOD`
 /// points — MACD is undefined on too-short a series.
 pub fn macd(closes: &[f64]) -> (f64, f64, f64) {
-    if (closes.len() as u32) < MACD_LONG_PERIOD {
+    if (closes.len() as u32) < constants::MACD_LONG_PERIOD {
         return (0.0, 0.0, 0.0);
     }
     // Build the MACD line as EMA12 − EMA26 over a rolling window, then smooth
@@ -48,16 +45,11 @@ pub fn macd(closes: &[f64]) -> (f64, f64, f64) {
     // series so the signal EMA and the self-referential stdev have history.
     let line_series = macd_line_series(closes);
     let line = *line_series.last().unwrap();
-    let signal_series = ema_series(&line_series, MACD_SIGNAL_PERIOD);
+    let signal_series = ema_series(&line_series, constants::MACD_SIGNAL_PERIOD);
     let signal = *signal_series.last().unwrap();
     let histogram = line - signal;
     (line, signal, histogram)
 }
-
-/// MACD fast/slow/signal periods.
-pub const MACD_FAST_PERIOD: u32 = 12;
-pub const MACD_LONG_PERIOD: u32 = 26;
-pub const MACD_SIGNAL_PERIOD: u32 = 9;
 
 /// Full MACD line series (EMA12 − EMA26 per bar), length `closes.len()`.
 ///
@@ -70,8 +62,8 @@ fn macd_line_series(closes: &[f64]) -> Vec<f64> {
         .enumerate()
         .map(|(i, _)| {
             let win = &closes[..=i];
-            let fast = stats::exponential_moving_average(win, MACD_FAST_PERIOD);
-            let slow = stats::exponential_moving_average(win, MACD_LONG_PERIOD);
+            let fast = stats::exponential_moving_average(win, constants::MACD_FAST_PERIOD);
+            let slow = stats::exponential_moving_average(win, constants::MACD_LONG_PERIOD);
             fast - slow
         })
         .collect()
@@ -127,9 +119,6 @@ pub fn rsi(closes: &[f64], period: usize) -> f64 {
     }
 }
 
-/// RSI period (Wilder).
-pub const RSI_PERIOD: usize = 14;
-
 /// Volume breakout ratio: latest volume ÷ its trailing 50-bar average.
 ///
 /// Returns `1.0` (average) when there's no volume history. Caller passes the
@@ -139,7 +128,7 @@ pub fn volume_breakout_ratio(volumes: &[f64]) -> f64 {
     if n < 2 {
         return 1.0;
     }
-    let lookback = VOLUME_AVG_PERIOD.min(n - 1);
+    let lookback = constants::VOLUME_AVG_PERIOD.min(n - 1);
     let latest = volumes[n - 1];
     let avg: f64 = volumes[n - 1 - lookback..n - 1].iter().sum::<f64>() / lookback as f64;
     if avg == 0.0 {
@@ -147,9 +136,6 @@ pub fn volume_breakout_ratio(volumes: &[f64]) -> f64 {
     }
     latest / avg
 }
-
-/// Trailing window for the volume average.
-pub const VOLUME_AVG_PERIOD: usize = 50;
 
 // ── Normalizations (raw → [0,1] bullishness) ──────────────────
 
@@ -199,10 +185,10 @@ pub fn ema200_score(closes: &[f64]) -> f64 {
 /// Returns `0.5` (neutral) when there's no histogram history or zero stdev.
 pub fn macd_score(closes: &[f64]) -> f64 {
     let line_series = macd_line_series(closes);
-    if line_series.len() < MACD_SIGNAL_PERIOD as usize + 1 {
+    if line_series.len() < constants::MACD_SIGNAL_PERIOD as usize + 1 {
         return 0.5;
     }
-    let signal_series = ema_series(&line_series, MACD_SIGNAL_PERIOD);
+    let signal_series = ema_series(&line_series, constants::MACD_SIGNAL_PERIOD);
     let hist_series: Vec<f64> = line_series
         .iter()
         .zip(signal_series.iter())
@@ -223,7 +209,7 @@ pub fn macd_score(closes: &[f64]) -> f64 {
 /// neutral band `(RSI_LOW, RSI_HIGH)`, clamped. High RSI = bullish momentum.
 /// Returns `0.5` when RSI can't be computed.
 pub fn rsi_score(closes: &[f64]) -> f64 {
-    let r = rsi(closes, RSI_PERIOD);
+    let r = rsi(closes, constants::RSI_PERIOD);
     let span = constants::RSI_HIGH - constants::RSI_LOW;
     ((r - constants::RSI_LOW) / span).clamp(0.0, 1.0)
 }
@@ -479,21 +465,21 @@ mod tests {
     // ── RSI ──
     #[test]
     fn rsi_too_short_is_neutral_50() {
-        assert_eq!(rsi(&trending(100.0, 1.0, 10), RSI_PERIOD), 50.0);
+        assert_eq!(rsi(&trending(100.0, 1.0, 10), constants::RSI_PERIOD), 50.0);
     }
 
     #[test]
     fn rsi_strong_uptrend_near_100() {
         // Monotonic gains → no losses → RSI saturates at 100.
         let closes = trending(100.0, 1.0, 60);
-        let r = rsi(&closes, RSI_PERIOD);
+        let r = rsi(&closes, constants::RSI_PERIOD);
         assert!(r > 99.0, "pure uptrend RSI should saturate, got {r}");
     }
 
     #[test]
     fn rsi_strong_downtrend_near_0() {
         let closes = trending(200.0, -2.0, 60);
-        let r = rsi(&closes, RSI_PERIOD);
+        let r = rsi(&closes, constants::RSI_PERIOD);
         assert!(r < 1.0, "pure downtrend RSI should bottom, got {r}");
     }
 

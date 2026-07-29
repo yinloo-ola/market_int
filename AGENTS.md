@@ -69,8 +69,8 @@ Convenience targets are available in the `Makefile` (e.g., `make pull-quotes`, `
 
 - Run all tests: `cargo test`
 - Run a specific test: `cargo test <test_name>`
-- All tests are unit tests in `src/model.rs` (`mod tests` block)
-- Tests cover: `calculate_strike_percentile`, `calculate_put_score`, `calculate_trend_factor`, `momentum_flag`, `option_chain_to_csv_vec` (top picks uniqueness, trend filter)
+- All tests are pure-function unit tests with no I/O, each co-located with its module in a `#[cfg(test)] mod tests` block (e.g. `src/model.rs`, `src/indicators.rs`, `src/signal.rs`, `src/signal_backtest.rs`, `src/trend.rs`, `src/greeks.rs`, `src/backtest.rs`, and several `src/store/` modules)
+- Tests cover: `calculate_strike_percentile`, `calculate_put_score`, `calculate_trend_factor`, `momentum_flag`, `option_chain_to_csv_vec` (top picks uniqueness, trend filter), plus the `direction` signal's indicator math, normalizations, composite, backtest metrics, and grid search
 - No integration tests or external API tests — all tests are pure functions with no I/O
 - **Always run `cargo test` before committing**
 

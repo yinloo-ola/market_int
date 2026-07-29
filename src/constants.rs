@@ -96,6 +96,16 @@ pub const SIGNAL_WEIGHT_ADX: f64 = 0.0;
 pub const SIGNAL_NEUTRAL_LOW: f64 = 0.40;
 pub const SIGNAL_NEUTRAL_HIGH: f64 = 0.60;
 // ── Direction-indicator normalization params ──────────────────
+/// EMA period for the long-term regime flag (price above/below EMA200).
+pub const EMA200_PERIOD: u32 = 200;
+/// MACD periods (standard 12/26/9): line = EMA12 − EMA26, signal = EMA9 of line.
+pub const MACD_FAST_PERIOD: u32 = 12;
+pub const MACD_LONG_PERIOD: u32 = 26;
+pub const MACD_SIGNAL_PERIOD: u32 = 9;
+/// RSI period (Wilder smoothing).
+pub const RSI_PERIOD: usize = 14;
+/// Trailing window for the volume average.
+pub const VOLUME_AVG_PERIOD: usize = 50;
 /// RSI normalization band endpoints (decision 02). rsi <= RSI_LOW → 0.0
 /// (oversold/bearish), rsi >= RSI_HIGH → 1.0 (overbought/bullish), linear
 /// between. RSI is a momentum oscillator, so high RSI = bullish momentum here.
@@ -108,6 +118,10 @@ pub const VOLUME_SPIKE_FULL: f64 = 1.5;
 /// normalization (decision 02): score = clamp(hist / stdev(hist, window)).
 /// Self-referential keeps it stock-agnostic (no price-scale contamination).
 pub const MACD_STDEV_WINDOW: usize = 20;
+/// Confidence-band thresholds for the live-predict CONFIDENCE column:
+/// |signal−0.5| >= STRONG ⇒ STRONG, >= MODERATE ⇒ MODERATE, else WEAK.
+pub const SIGNAL_CONFIDENCE_STRONG: f64 = 0.35;
+pub const SIGNAL_CONFIDENCE_MODERATE: f64 = 0.15;
 // ── Relative strength vs SPY (ticket 09) ───────────────────────
 /// RS lookback in trading days (medium-term; classic RS horizon).
 pub const RS_LOOKBACK: usize = 50;

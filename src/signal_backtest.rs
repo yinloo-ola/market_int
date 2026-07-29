@@ -110,12 +110,12 @@ fn collect_rows(
     benchmark: &[f64],
     horizon: usize,
 ) -> Option<Vec<DayRow>> {
-    let min_len = indicators::EMA200_PERIOD as usize + horizon;
+    let min_len = constants::EMA200_PERIOD as usize + horizon;
     if candles.len() < min_len {
         return None;
     }
     let mut rows = Vec::new();
-    for i in (indicators::EMA200_PERIOD as usize - 1)..(candles.len() - horizon) {
+    for i in (constants::EMA200_PERIOD as usize - 1)..(candles.len() - horizon) {
         let bench_slice = if i < benchmark.len() { &benchmark[..=i] } else { benchmark };
         let scores = crate::signal::indicator_scores(&candles[..=i], bench_slice);
         let bullish = candles[i + horizon].close > candles[i].close;
@@ -379,7 +379,54 @@ pub fn run_calibrate(
     };
 
     print_calibration(&calib, &train_rows, horizon);
+
+    // Evaluate the calibrated weights OUT-OF-SAMPLE (the recent 1/3 the
+    // calibration never saw). The spec closes the loop: "calibrate finds the
+    // weights; backtest measures those weights on the test split." Doing it
+    // here means one command yields the headline number, not just train.
+    let mut test_rows: Vec<DayRow> = Vec::new();
+    for (_symbol, candles) in &candles_by_symbol {
+        if let (_train, Some(test)) = split_rows(candles, &spy_closes, horizon) {
+            test_rows.extend(test);
+        }
+    }
+    let (oos_bhr, oos_calls) = banded_hit_rate(&test_rows, &calib.params);
+    let oos_maj = majority_class_baseline(&test_rows, &calib.params);
+    print_calibration_oos(oos_bhr, oos_calls, oos_maj, test_rows.len(), horizon);
     Ok(())
+}
+
+/// Print the out-of-sample evaluation of the calibrated weights — the headline
+/// number the spec calls "the one that matters."
+fn print_calibration_oos(
+    banded: Option<f64>,
+    n_calls: usize,
+    majority: Option<f64>,
+    n_days: usize,
+    horizon: usize,
+) {
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    let _ = writeln!(out, "{}", "-".repeat(64));
+    let _ = writeln!(
+        out,
+        "Out-of-sample (recent 1/3), {}d — the number that matters:",
+        horizon
+    );
+    let b = banded
+        .map(|h| format!("{:.1}%", h * 100.0))
+        .unwrap_or_else(|| "n/a".to_string());
+    let m = majority
+        .map(|x| format!("{:.1}%", x * 100.0))
+        .unwrap_or_else(|| "n/a".to_string());
+    let _ = writeln!(out, "  calibrated-weights banded hit-rate: {} ({} calls, {} days)", b, n_calls, n_days);
+    let _ = writeln!(out, "  majority baseline (the bar):        {}", m);
+    if let (Some(h), Some(maj)) = (banded, majority) {
+        let gap = (h - maj) * 100.0;
+        let verdict = if gap > 0.0 { "✓ clears the bar" } else { "✗ below the bar" };
+        let _ = writeln!(out, "  gap: {gap:+.1}pp  {verdict}");
+    }
+    let _ = writeln!(out, "{}", "-".repeat(64));
 }
 
 /// A row in the band-sweep trade-off table.
@@ -414,7 +461,6 @@ pub fn band_sweep_out_of_sample(
     }
     let n_days = rows.len();
 
-    let weights = params.weights_array();
     // Sweep band half-widths 0.05, 0.10, ..., 0.45 (the existing default is 0.10).
     let mut out = Vec::new();
     let mut h = 0.05;
@@ -437,7 +483,6 @@ pub fn band_sweep_out_of_sample(
                 }
             }
         }
-        let _ = weights; // weights already folded into sig via signal_from_scores
         let hit_rate = if n_calls > 0 { Some(hits as f64 / n_calls as f64) } else { None };
         let majority = if n_calls > 0 {
             let bears_in_calls = n_calls - bulls_in_calls;
@@ -518,13 +563,13 @@ fn print_results(
     let _ = writeln!(out, "weights: EMA={} EMA200={} MACD={} RSI={} Vol={} RS={} ADX={}",
         params.weight_ema_alignment, params.weight_ema200, params.weight_macd,
         params.weight_rsi, params.weight_volume, params.weight_rs, params.weight_adx);
-    let _ = writeln!(out, "{}", "-".repeat(64));
+    let _ = writeln!(out, "{}", "-".repeat(78));
     let _ = writeln!(
         out,
-        "{:<8} {:>8} {:>8} {:>10} {:>10}",
-        "HORIZON", "BANDED", "MAJORITY", "N_CALLS", "N_DAYS"
+        "{:<8} {:>8} {:>8} {:>8} {:>8} {:>9} {:>8}",
+        "HORIZON", "BANDED", "UNCOND", "MAJORITY", "COIN", "N_CALLS", "N_DAYS"
     );
-    let _ = writeln!(out, "{}", "-".repeat(64));
+    let _ = writeln!(out, "{}", "-".repeat(78));
     for r in results {
         let primary_marker = if r.horizon == primary { " *" } else { "" };
         let banded = r
@@ -537,18 +582,22 @@ fn print_results(
             .unwrap_or_else(|| "n/a".to_string());
         let _ = writeln!(
             out,
-            "{:<8} {:>8} {:>8} {:>10} {:>10}",
+            "{:<8} {:>8} {:>8} {:>8} {:>8} {:>9} {:>8}",
             format!("{}d", r.horizon),
             banded,
+            format!("{:.1}%", r.unconditional_hit_rate * 100.0),
             maj,
+            "50.0%",
             r.n_calls,
             r.n_days
         );
     }
-    let _ = writeln!(out, "{}", "-".repeat(64));
+    let _ = writeln!(out, "{}", "-".repeat(78));
     let _ = writeln!(out, "BANDED = hit-rate on called days only (signal outside [{}, {}]).",
         constants::SIGNAL_NEUTRAL_LOW, constants::SIGNAL_NEUTRAL_HIGH);
-    let _ = writeln!(out, "MAJORITY = always-bullish baseline on the same called days (the bar to clear).");
+    let _ = writeln!(out, "UNCOND  = hit-rate on ALL days (no abstention).");
+    let _ = writeln!(out, "MAJORITY = always-bullish baseline on called days (the bar to clear).");
+    let _ = writeln!(out, "COIN    = 50/50 baseline (intuition).");
     let _ = writeln!(out, "* = primary horizon. Secondary horizons reported free from the same signal.");
 }
 
@@ -681,7 +730,7 @@ mod tests {
         let candles = test_candles(&closes);
         let bench = vec![100.0; 220];
         let rows = collect_rows(&candles, &bench, 10).unwrap();
-        assert_eq!(rows.len(), 220 - 10 - (indicators::EMA200_PERIOD as usize - 1));
+        assert_eq!(rows.len(), 220 - 10 - (constants::EMA200_PERIOD as usize - 1));
     }
 
     #[test]
