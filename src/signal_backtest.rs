@@ -65,6 +65,62 @@ fn banded_hit_rate(rows: &[DayRow], params: &SignalParams) -> (Option<f64>, usiz
     (Some(hits as f64 / calls.len() as f64), calls.len())
 }
 
+/// Per-class call breakdown. Splits the signal's calls into the days it
+/// predicted bullish vs bearish and reports each class's hit-rate, count, and
+/// the baseline it must beat: the **unconditional** base rate of that class
+/// over ALL days (the "always guess up" / "always guess down" rate on the
+/// whole test set — the proper no-skill reference). A positive gap means the
+/// signal's calls for that class beat the dumb always-guess strategy, i.e.
+/// the calls carry real class-conditional information. Reveals asymmetry the
+/// combined banded hit-rate hides.
+#[derive(Debug, Clone)]
+pub struct ClassBreakdown {
+    pub bull_hit_rate: Option<f64>,
+    pub bull_n: usize,
+    pub bull_baseline: Option<f64>, // unconditional % bullish over ALL days
+    pub bear_hit_rate: Option<f64>,
+    pub bear_n: usize,
+    pub bear_baseline: Option<f64>, // unconditional % bearish over ALL days
+}
+
+fn class_breakdown(rows: &[DayRow], params: &SignalParams) -> ClassBreakdown {
+    // Unconditional base rates over all rows (the no-skill reference).
+    let total = rows.len();
+    let total_up = rows.iter().filter(|r| r.bullish).count();
+    let total_down = total.saturating_sub(total_up);
+    let bull_base = if total > 0 { Some(total_up as f64 / total as f64) } else { None };
+    let bear_base = if total > 0 { Some(total_down as f64 / total as f64) } else { None };
+
+    let mut bull_calls = 0usize;
+    let mut bull_hits = 0usize;
+    let mut bear_calls = 0usize;
+    let mut bear_hits = 0usize;
+    for r in rows {
+        if !is_call(r.signal(params)) {
+            continue;
+        }
+        if predicts_bullish(r.signal(params)) {
+            bull_calls += 1;
+            if r.bullish {
+                bull_hits += 1;
+            }
+        } else {
+            bear_calls += 1;
+            if !r.bullish {
+                bear_hits += 1;
+            }
+        }
+    }
+    ClassBreakdown {
+        bull_hit_rate: if bull_calls > 0 { Some(bull_hits as f64 / bull_calls as f64) } else { None },
+        bull_n: bull_calls,
+        bull_baseline: bull_base,
+        bear_hit_rate: if bear_calls > 0 { Some(bear_hits as f64 / bear_calls as f64) } else { None },
+        bear_n: bear_calls,
+        bear_baseline: bear_base,
+    }
+}
+
 /// Unconditional hit-rate: accuracy over ALL days (no abstention).
 fn unconditional_hit_rate(rows: &[DayRow], params: &SignalParams) -> f64 {
     if rows.is_empty() {
@@ -545,6 +601,63 @@ pub fn print_band_sweep(rows: &[BandRow]) {
     let _ = writeln!(out, "GAP = HIT-RATE − MAJORITY (the number that matters; >0 = real edge).");
     let _ = writeln!(out, "COVERAGE = % of days the signal made a call.");
     let _ = writeln!(out, "Current production band is HALF-WIDTH 0.10.");
+}
+
+/// Compute the per-class breakdown out-of-sample at the primary horizon.
+pub fn class_breakdown_out_of_sample(
+    conn: &Connection,
+    symbols: &[String],
+    horizon: usize,
+    params: SignalParams,
+) -> model::Result<ClassBreakdown> {
+    let candles_by_symbol = load_all_candles(conn, symbols);
+    let spy_closes = crate::signal::load_spy_closes(conn);
+    let mut rows: Vec<DayRow> = Vec::new();
+    for (_symbol, candles) in &candles_by_symbol {
+        if let (_train, Some(test)) = split_rows(candles, &spy_closes, horizon) {
+            rows.extend(test);
+        }
+    }
+    Ok(class_breakdown(&rows, &params))
+}
+
+/// Print the per-class breakdown: bull-call and bear-call hit-rate, each
+/// against its own class baseline (always-bullish for bull calls,
+/// always-bearish for bear calls) with the gap.
+pub fn print_class_breakdown(bd: &ClassBreakdown, horizon: usize) {
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    let _ = writeln!(out, "{}", "=".repeat(70));
+    let _ = writeln!(out, "Per-class breakdown — out-of-sample (recent 1/3), {}d horizon", horizon);
+    let _ = writeln!(out, "{}", "=".repeat(70));
+    let _ = writeln!(
+        out,
+        "{:<14} {:>9} {:>9} {:>9} {:>10}",
+        "CLASS", "HIT-RATE", "BASELINE", "GAP", "N_CALLS"
+    );
+    let _ = writeln!(out, "{}", "-".repeat(70));
+
+    let hr_bull = bd.bull_hit_rate.map(|h| format!("{:.1}%", h * 100.0)).unwrap_or_else(|| "n/a".to_string());
+    let base_bull = bd.bull_baseline.map(|b| format!("{:.1}%", b * 100.0)).unwrap_or_else(|| "n/a".to_string());
+    let gap_bull = match (bd.bull_hit_rate, bd.bull_baseline) {
+        (Some(h), Some(b)) => format!("{:+.1}pp", (h - b) * 100.0),
+        _ => "n/a".to_string(),
+    };
+    let _ = writeln!(out, "{:<14} {:>9} {:>9} {:>9} {:>10}", "BULL calls", hr_bull, base_bull, gap_bull, bd.bull_n);
+
+    let hr_bear = bd.bear_hit_rate.map(|h| format!("{:.1}%", h * 100.0)).unwrap_or_else(|| "n/a".to_string());
+    let base_bear = bd.bear_baseline.map(|b| format!("{:.1}%", b * 100.0)).unwrap_or_else(|| "n/a".to_string());
+    let gap_bear = match (bd.bear_hit_rate, bd.bear_baseline) {
+        (Some(h), Some(b)) => format!("{:+.1}pp", (h - b) * 100.0),
+        _ => "n/a".to_string(),
+    };
+    let _ = writeln!(out, "{:<14} {:>9} {:>9} {:>9} {:>10}", "BEAR calls", hr_bear, base_bear, gap_bear, bd.bear_n);
+
+    let _ = writeln!(out, "{}", "-".repeat(70));
+    let _ = writeln!(out, "BASELINE = unconditional base rate over ALL test days (no-skill reference).");
+    let _ = writeln!(out, "  bull-call baseline = % of ALL days that were up (always-guess-up rate).");
+    let _ = writeln!(out, "  bear-call baseline = % of ALL days that were down (always-guess-down rate).");
+    let _ = writeln!(out, "GAP > 0 = the signal's calls for that class beat the dumb baseline (real edge).");
 }
 
 fn print_results(
