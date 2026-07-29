@@ -67,3 +67,20 @@ pub const MIN_REALIZED_VOL: f64 = 0.50;
 /// low-vol (<0.28) → 0.0. The boost is `safety *= (1 + VOL_SAFETY_BOOST * tier)`.
 /// 0.0 = disabled (production default — the bot annotates vol tiers instead).
 pub const VOL_SAFETY_BOOST: f64 = 0.0;
+
+// ── Up/down direction signal (`direction` subcommand) ─────────
+// v1 is a research tool: 5 indicators across Trend + Momentum layers,
+// combined into a [0,1] composite where >0.5 = bullish bias over a ~10-day
+// horizon. See .scratch/up-down-signal/spec.md and map decisions 01–04.
+//
+// Weights are seeds (momentum-leaning, summing to 100); ticket 08's grid
+// search calibrates them against the 2-year train split. The skeleton (ticket
+// 05) wires only the EMA20/50 alignment term end-to-end; the remaining four
+// indicators (EMA200, MACD, RSI, volume) land in ticket 06.
+pub const SIGNAL_WEIGHT_EMA_ALIGNMENT: f64 = 25.0;
+/// Neutral band edges — held CONSTANT (not calibrated) so only the weights
+/// are tuned against the train split. Used by both the live predictor's
+/// BULL/BEAR/NEUT display and the backtest's abstention rule (one band,
+/// two consumers). <0.40 = BEAR call, >0.60 = BULL call, else abstain/NEUT.
+pub const SIGNAL_NEUTRAL_LOW: f64 = 0.40;
+pub const SIGNAL_NEUTRAL_HIGH: f64 = 0.60;

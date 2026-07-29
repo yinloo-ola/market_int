@@ -56,6 +56,12 @@ mod metrics;
 mod greeks;
 mod backtest;
 
+// Up/down directional signal (`direction` subcommand) — research tool.
+// Skeleton (ticket 05): EMA20/50 alignment only; ticket 06 adds the full
+// 5-indicator composite.
+mod indicators;
+mod signal;
+
 use chrono::{Datelike, Local};
 use chrono::NaiveDate;
 use chrono_tz::America::New_York;
@@ -188,6 +194,12 @@ enum Commands {
         /// CSV output path
         #[arg(long, default_value = "earnings.csv")]
         output: String,
+    },
+    // Up/down directional signal — research tool. Prints a per-symbol
+    // directional read to stdout. `--calibrate` / `--backtest` land in tickets
+    // 07/08; the skeleton (ticket 05) is live-predict only.
+    Direction {
+        symbols_file_path: String,
     },
 }
 
@@ -573,6 +585,19 @@ async fn main() {
             match option::fetch_earnings_to_file(&mut requester, from_date, to_date, &output).await {
                 Ok(n) => log::info!("Wrote {} earnings entries to {}", n, output),
                 Err(e) => log::error!("Failed to fetch earnings: {}", e),
+            }
+        }
+        Commands::Direction { symbols_file_path } => {
+            let symbols = match symbols::read_symbols_from_file(&symbols_file_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("Failed to read symbols: {}", e);
+                    return;
+                }
+            };
+            match signal::run_predict(&conn, &symbols) {
+                Ok(_) => log::info!("Successfully computed directional signals"),
+                Err(e) => log::error!("Error computing directional signals: {}", e),
             }
         }
     }
