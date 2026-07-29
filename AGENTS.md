@@ -125,3 +125,17 @@ make gcloud-job
 - Top picks are deduplicated by underlying symbol (max 3 picks — `TOP_PICKS_COUNT`). NB: raising this to 4 added absolute premium but *lowered* avg ror (the 4th pick deployed more capital for less return), so 3 is retained.
 - Strike ranges are tightened by up to 10% when trend is strong (production hardcodes `trend_factor = 1.0` so this is currently inactive)
 - Momentum flags (`NORMAL` / `HIGH` / `EXTENDED`) are based on price percentile thresholds (0.80 / 0.90)
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as markdown files under `.scratch/<feature-slug>/` (local tracker). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five default role labels (needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
