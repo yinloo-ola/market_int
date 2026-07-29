@@ -62,6 +62,7 @@ mod backtest;
 mod indicators;
 mod signal;
 mod signal_backtest;
+mod signal_rank;
 
 use chrono::{Datelike, Local};
 use chrono::NaiveDate;
@@ -224,6 +225,23 @@ enum Commands {
         /// useless on "up" but decent at catching "down" moves.
         #[arg(long, default_value_t = false)]
         class_breakdown: bool,
+        /// Cross-sectional ranking test: does the top decile outperform the
+        /// bottom decile over the horizon (market-neutral / relative hypothesis,
+        /// distinct from --backtest's pooled accuracy)? Reports Newey-West
+        /// t-stat, mean spread, and Sharpe for (a) documented calibrated weights
+        /// and (b) a recalibrated ranking-optimal weight-set. See signal_rank.rs.
+        #[arg(long, default_value_t = false)]
+        rank: bool,
+        /// Walk-forward ranking: evaluate the FROZEN documented weights across
+        /// contiguous, non-overlapping windows of `--rank-walk-window` trading
+        /// days spanning the FULL candle history. Tests whether the +spread
+        /// persists across earlier regimes (e.g. the 2022 bear) — Threat 2.
+        /// Run against a deeper-history DB (CANDLE_COUNT>=1200) to be meaningful.
+        #[arg(long, default_value_t = false)]
+        rank_walk: bool,
+        /// Window length (trading days) for --rank-walk. Default ~one quarter.
+        #[arg(long, default_value_t = 60)]
+        rank_walk_window: usize,
         /// Prediction horizon in trading days (backtest/calibrate modes). Default 10.
         #[arg(long, default_value_t = signal_backtest::DEFAULT_HORIZON)]
         horizon: usize,
@@ -622,6 +640,9 @@ async fn main() {
             calibrate,
             band_sweep,
             class_breakdown,
+            rank,
+            rank_walk,
+            rank_walk_window,
             horizon,
         } => {
             let symbols = match symbols::read_symbols_from_file(&symbols_file_path) {
@@ -631,7 +652,17 @@ async fn main() {
                     return;
                 }
             };
-            if calibrate {
+            if rank {
+                match signal_rank::run_rank(&conn, &symbols, horizon) {
+                    Ok(_) => log::info!("Successfully ran cross-sectional ranking"),
+                    Err(e) => log::error!("Error running cross-sectional ranking: {}", e),
+                }
+            } else if rank_walk {
+                match signal_rank::run_rank_walk(&conn, &symbols, horizon, rank_walk_window) {
+                    Ok(_) => log::info!("Successfully ran walk-forward ranking"),
+                    Err(e) => log::error!("Error running walk-forward ranking: {}", e),
+                }
+            } else if calibrate {
                 match signal_backtest::run_calibrate(&conn, &symbols, horizon) {
                     Ok(_) => log::info!("Successfully ran signal calibration"),
                     Err(e) => log::error!("Error running signal calibration: {}", e),

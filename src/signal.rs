@@ -272,6 +272,21 @@ pub fn load_spy_closes(conn: &Connection) -> Vec<f64> {
     }
 }
 
+/// Load ALL SPY closes (no `CANDLE_COUNT` cap). Used by the walk-forward rank
+/// test, which spans the full candle history — the capped loader would leave
+/// the RS benchmark too short/misaligned for earlier dates.
+pub fn load_spy_closes_full(conn: &Connection) -> Vec<f64> {
+    match crate::store::candle::get_all_candles(conn, "SPY") {
+        Ok(candles) if !candles.is_empty() => {
+            candles.iter().map(|c| c.close).collect()
+        }
+        _ => {
+            log::warn!("No SPY candles; RS feature will be neutral (0.5).");
+            Vec::new()
+        }
+    }
+}
+
 /// Live-predict mode: read each symbol's cached candles, compute the signal,
 /// and emit the directional reads (table or JSON).
 ///

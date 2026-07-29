@@ -27,6 +27,7 @@ telegram-bot-api = "0.1.0"
 rsa = "0.9"
 sha1 = { version = "0.10", features = ["oid"] }
 base64 = "0.21"
+rand = "0.8"
 
 [profile.dev]
 debug = 2               # full debug info for debugger

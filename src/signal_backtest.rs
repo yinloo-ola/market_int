@@ -15,7 +15,7 @@
 
 use std::io::{self, Write};
 
-use crate::{constants, indicators, model, signal::SignalParams};
+use crate::{constants, model, signal::SignalParams};
 use rusqlite::Connection;
 
 /// Default prediction horizon (trading days). Map decision 03.
@@ -181,7 +181,7 @@ fn collect_rows(
 }
 
 /// Load all candles per symbol into memory (mirrors `backtest::load_all_candles`).
-fn load_all_candles(
+pub(crate) fn load_all_candles(
     conn: &Connection,
     symbols: &[String],
 ) -> std::collections::HashMap<String, Vec<model::Candle>> {
@@ -233,7 +233,7 @@ fn dedup_horizons(primary: usize, secondaries: &[usize]) -> Vec<usize> {
 /// A candidate weight-set from the grid, as the 7 raw weights (multiples of
 /// `GRID_STEP`, summing to 100). Order matches `indicator_scores`:
 /// `[ema_alignment, ema200, macd, rsi, volume, rs, adx]`.
-fn params_from_weights(w: [f64; 7]) -> SignalParams {
+pub(crate) fn params_from_weights(w: [f64; 7]) -> SignalParams {
     SignalParams {
         weight_ema_alignment: w[0],
         weight_ema200: w[1],
@@ -248,7 +248,7 @@ fn params_from_weights(w: [f64; 7]) -> SignalParams {
 /// Enumerate every weight combination where each of 7 weights is a non-negative
 /// multiple of `GRID_STEP` and all sum to 100. Stars-and-bars over steps:
 /// C(20+7−1, 7−1) = C(26,6) = 230230 combinations.
-fn grid_weight_combos() -> Vec<[f64; 7]> {
+pub(crate) fn grid_weight_combos() -> Vec<[f64; 7]> {
     let total_steps = (100.0 / GRID_STEP) as usize; // 20
     let mut out = Vec::new();
     for a in 0..=total_steps {

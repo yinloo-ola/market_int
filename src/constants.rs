@@ -71,7 +71,7 @@ pub const VOL_SAFETY_BOOST: f64 = 0.0;
 // ── Up/down direction signal (`direction` subcommand) ─────────
 // v1 is a research tool: 5 indicators across Trend + Momentum layers,
 // combined into a [0,1] composite where >0.5 = bullish bias over a ~10-day
-// horizon. See .scratch/up-down-signal/spec.md and map decisions 01–04.
+// horizon. See docs/research/up-down-signal/spec.md and map decisions 01–04.
 //
 // Weights are seeds (momentum-leaning, summing to 100); ticket 08's grid
 // search calibrates them against the 2-year train split.
@@ -136,3 +136,12 @@ pub const ADX_PERIOD: usize = 14;
 /// 25 threshold). The score ramps linearly from 0 (ADX=0, no trend) to 1
 /// (ADX >= this), then directionalized by ±DI sign.
 pub const ADX_FULL_STRENGTH: f64 = 25.0;
+// ── Cross-sectional ranking (`direction --rank`) ──────────────
+/// Minimum names present on a trading day to form deciles. Below this the
+/// cross-section is too thin to be meaningful, so the day is dropped.
+pub const RANK_MIN_NAMES_PER_DAY: usize = 20;
+/// Number of permutations for the within-day decile-spread null test. 10,000 is
+/// the standard resolution to distinguish p≈0.001 from p≈0.20.
+pub const RANK_PERMUTATIONS: usize = 10_000;
+/// Fixed seed for the permutation-test RNG, for reproducible p-values.
+pub const RANK_PERMUTATION_SEED: u64 = 0x6D_61_72_6B_65_74; // "market"
