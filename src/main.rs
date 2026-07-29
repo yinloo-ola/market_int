@@ -58,9 +58,10 @@ mod backtest;
 
 // Up/down directional signal (`direction` subcommand) — research tool.
 // Skeleton (ticket 05): EMA20/50 alignment only; ticket 06 adds the full
-// 5-indicator composite.
+// 5-indicator composite; ticket 07 adds --backtest.
 mod indicators;
 mod signal;
+mod signal_backtest;
 
 use chrono::{Datelike, Local};
 use chrono::NaiveDate;
@@ -200,12 +201,18 @@ enum Commands {
     // 07/08; ticket 06 adds the full 5-indicator composite + output polish.
     Direction {
         symbols_file_path: String,
-        /// Limit output to the N most-confident calls.
+        /// Limit output to the N most-confident calls (live-predict mode).
         #[arg(long)]
         top: Option<usize>,
-        /// Emit machine-readable JSON Lines instead of the table.
+        /// Emit machine-readable JSON Lines instead of the table (live-predict mode).
         #[arg(long, default_value_t = false)]
         json: bool,
+        /// Run out-of-sample evaluation on the most-recent 1/3 of history.
+        #[arg(long, default_value_t = false)]
+        backtest: bool,
+        /// Prediction horizon in trading days (backtest mode). Default 10.
+        #[arg(long, default_value_t = signal_backtest::DEFAULT_HORIZON)]
+        horizon: usize,
     },
 }
 
@@ -597,6 +604,8 @@ async fn main() {
             symbols_file_path,
             top,
             json,
+            backtest,
+            horizon,
         } => {
             let symbols = match symbols::read_symbols_from_file(&symbols_file_path) {
                 Ok(s) => s,
@@ -605,17 +614,24 @@ async fn main() {
                     return;
                 }
             };
-            let opts = signal::PredictOptions {
-                top,
-                format: if json {
-                    Some(signal::OutputFormat::Json)
-                } else {
-                    Some(signal::OutputFormat::Table)
-                },
-            };
-            match signal::run_predict(&conn, &symbols, opts) {
-                Ok(_) => log::info!("Successfully computed directional signals"),
-                Err(e) => log::error!("Error computing directional signals: {}", e),
+            if backtest {
+                match signal_backtest::run_backtest(&conn, &symbols, horizon) {
+                    Ok(_) => log::info!("Successfully ran signal backtest"),
+                    Err(e) => log::error!("Error running signal backtest: {}", e),
+                }
+            } else {
+                let opts = signal::PredictOptions {
+                    top,
+                    format: if json {
+                        Some(signal::OutputFormat::Json)
+                    } else {
+                        Some(signal::OutputFormat::Table)
+                    },
+                };
+                match signal::run_predict(&conn, &symbols, opts) {
+                    Ok(_) => log::info!("Successfully computed directional signals"),
+                    Err(e) => log::error!("Error computing directional signals: {}", e),
+                }
             }
         }
     }
