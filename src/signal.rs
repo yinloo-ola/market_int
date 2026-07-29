@@ -27,6 +27,7 @@ pub struct SignalParams {
     pub weight_macd: f64,
     pub weight_rsi: f64,
     pub weight_volume: f64,
+    pub weight_rs: f64,
 }
 
 impl Default for SignalParams {
@@ -37,18 +38,32 @@ impl Default for SignalParams {
             weight_macd: constants::SIGNAL_WEIGHT_MACD,
             weight_rsi: constants::SIGNAL_WEIGHT_RSI,
             weight_volume: constants::SIGNAL_WEIGHT_VOLUME,
+            weight_rs: constants::SIGNAL_WEIGHT_RS,
         }
     }
 }
 
 impl SignalParams {
-    /// Total of the five weights (the composite's divisor).
+    /// Total of the weights (the composite's divisor).
     fn total(&self) -> f64 {
         self.weight_ema_alignment
             + self.weight_ema200
             + self.weight_macd
             + self.weight_rsi
             + self.weight_volume
+            + self.weight_rs
+    }
+
+    /// The 6 weights as an array, in indicator-scores order.
+    pub fn weights_array(&self) -> [f64; 6] {
+        [
+            self.weight_ema_alignment,
+            self.weight_ema200,
+            self.weight_macd,
+            self.weight_rsi,
+            self.weight_volume,
+            self.weight_rs,
+        ]
     }
 }
 
@@ -68,8 +83,10 @@ struct SignalBreakdown {
 }
 
 impl SignalBreakdown {
-    /// Compute the full 5-indicator breakdown for a close series + volumes.
-    fn compute(closes: &[f64], volumes: &[f64], params: &SignalParams) -> Self {
+    /// Compute the full 6-indicator breakdown for a close series + volumes +
+    /// benchmark (SPY) closes. The benchmark feeds only the RS feature; an
+    /// empty benchmark yields RS = neutral (0.5).
+    fn compute(closes: &[f64], volumes: &[f64], benchmark: &[f64], params: &SignalParams) -> Self {
         let contributions = vec![
             Contribution {
                 name: "EMA20/50",
@@ -95,6 +112,11 @@ impl SignalBreakdown {
                 name: "Volume",
                 weight: params.weight_volume,
                 score: indicators::volume_breakout_score(volumes),
+            },
+            Contribution {
+                name: "RS",
+                weight: params.weight_rs,
+                score: indicators::relative_strength_score(closes, benchmark),
             },
         ];
         let total = params.total();
@@ -133,36 +155,37 @@ impl SignalBreakdown {
 
 /// The directional signal value for a single symbol. Weighted sum of normalized
 /// indicators divided by total weight, in `[0, 1]`. Returns `0.5` when total
-/// weight is zero (defensive).
-pub fn compute_signal(closes: &[f64], volumes: &[f64], params: &SignalParams) -> f64 {
-    SignalBreakdown::compute(closes, volumes, params).signal
+/// weight is zero (defensive). `benchmark` is SPY closes (RS feature); pass
+/// `&[]` when no benchmark is available.
+pub fn compute_signal(
+    closes: &[f64],
+    volumes: &[f64],
+    benchmark: &[f64],
+    params: &SignalParams,
+) -> f64 {
+    SignalBreakdown::compute(closes, volumes, benchmark, params).signal
 }
 
-/// The 5 normalized indicator scores, weight-independent. Order:
-/// `[ema_alignment, ema200, macd, rsi, volume]`. Precomputing these once per
-/// day lets the grid-search calibration (ticket 08) evaluate many weight-sets
-/// cheaply as a weighted sum, without recomputing the expensive indicators.
-pub fn indicator_scores(closes: &[f64], volumes: &[f64]) -> [f64; 5] {
+/// The 6 normalized indicator scores, weight-independent. Order:
+/// `[ema_alignment, ema200, macd, rsi, volume, rs]`. Precomputing these once
+/// per day lets the grid-search calibration evaluate many weight-sets cheaply
+/// as a weighted sum, without recomputing the expensive indicators.
+pub fn indicator_scores(closes: &[f64], volumes: &[f64], benchmark: &[f64]) -> [f64; 6] {
     [
         indicators::ema_alignment_score(closes),
         indicators::ema200_score(closes),
         indicators::macd_score(closes),
         indicators::rsi_score(closes),
         indicators::volume_breakout_score(volumes),
+        indicators::relative_strength_score(closes, benchmark),
     ]
 }
 
 /// Combine precomputed indicator scores with weights into a `[0, 1]` signal.
 /// Returns `0.5` when total weight is zero (defensive). This is the
 /// weight-dependent half of `compute_signal`, split out for grid search.
-pub fn signal_from_scores(scores: [f64; 5], params: &SignalParams) -> f64 {
-    let weights = [
-        params.weight_ema_alignment,
-        params.weight_ema200,
-        params.weight_macd,
-        params.weight_rsi,
-        params.weight_volume,
-    ];
+pub fn signal_from_scores(scores: [f64; 6], params: &SignalParams) -> f64 {
+    let weights = params.weights_array();
     let total: f64 = weights.iter().sum();
     if total <= 0.0 {
         return 0.5;
@@ -216,17 +239,34 @@ pub struct PredictOptions {
     pub format: Option<OutputFormat>,
 }
 
+/// Load SPY (benchmark) closes from the candle store. Returns an empty vec if
+/// unavailable — RS then defaults to neutral. Logged once. Shared by
+/// `run_predict` (live) and the signal backtest (reused via the public path).
+pub fn load_spy_closes(conn: &Connection) -> Vec<f64> {
+    match crate::store::candle::get_candles(conn, "SPY", constants::CANDLE_COUNT) {
+        Ok(candles) if !candles.is_empty() => {
+            candles.iter().map(|c| c.close).collect()
+        }
+        _ => {
+            log::warn!("No SPY candles; RS feature will be neutral (0.5).");
+            Vec::new()
+        }
+    }
+}
+
 /// Live-predict mode: read each symbol's cached candles, compute the signal,
 /// and emit the directional reads (table or JSON).
 ///
 /// DB-read-only (no live fetching) — see map decision 04. Candle retrieval
-/// failures for an individual symbol are logged and skipped.
+/// failures for an individual symbol are logged and skipped. SPY (benchmark for
+/// the RS feature) is loaded once.
 pub fn run_predict(
     conn: &Connection,
     symbols: &[String],
     opts: PredictOptions,
 ) -> model::Result<()> {
     let params = SignalParams::default();
+    let spy_closes = load_spy_closes(conn);
 
     let mut reads: Vec<DirectionRead> = Vec::new();
     for symbol in symbols {
@@ -247,7 +287,7 @@ pub fn run_predict(
         }
         let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
         let volumes: Vec<f64> = candles.iter().map(|c| c.volume as f64).collect();
-        let breakdown = SignalBreakdown::compute(&closes, &volumes, &params);
+        let breakdown = SignalBreakdown::compute(&closes, &volumes, &spy_closes, &params);
         reads.push(DirectionRead {
             symbol: symbol.clone(),
             signal: breakdown.signal,
@@ -346,7 +386,8 @@ mod tests {
     fn signal_bullish_on_uptrend() {
         let closes = trending(100.0, 1.0, 250);
         let vols = vec![1000.0; 250];
-        let s = compute_signal(&closes, &vols, &SignalParams::default());
+        let spy = trending(100.0, 1.0, 250); // matching benchmark → RS neutral
+        let s = compute_signal(&closes, &vols, &spy, &SignalParams::default());
         assert!(s > 0.5, "uptrend should be bullish, got {s}");
     }
 
@@ -354,7 +395,8 @@ mod tests {
     fn signal_bearish_on_downtrend() {
         let closes = trending(300.0, -1.0, 250);
         let vols = vec![1000.0; 250];
-        let s = compute_signal(&closes, &vols, &SignalParams::default());
+        let spy = trending(300.0, -1.0, 250); // matching benchmark → RS neutral
+        let s = compute_signal(&closes, &vols, &spy, &SignalParams::default());
         assert!(s < 0.5, "downtrend should be bearish, got {s}");
     }
 
@@ -363,7 +405,8 @@ mod tests {
         // Mixed/random series must still land in [0,1].
         let closes: Vec<f64> = (0..250).map(|i| 100.0 + (i as f64).sin() * 10.0).collect();
         let vols = vec![1000.0; 250];
-        let s = compute_signal(&closes, &vols, &SignalParams::default());
+        let spy = vec![100.0; 250];
+        let s = compute_signal(&closes, &vols, &spy, &SignalParams::default());
         assert!((0.0..=1.0).contains(&s), "signal out of [0,1]: {s}");
     }
 
@@ -375,8 +418,9 @@ mod tests {
             weight_macd: 0.0,
             weight_rsi: 0.0,
             weight_volume: 0.0,
+            weight_rs: 0.0,
         };
-        let s = compute_signal(&trending(100.0, 1.0, 250), &vec![1000.0; 250], &params);
+        let s = compute_signal(&trending(100.0, 1.0, 250), &vec![1000.0; 250], &[], &params);
         assert!((s - 0.5).abs() < 1e-9);
     }
 
@@ -408,10 +452,18 @@ mod tests {
     fn top_drivers_picks_highest_impact() {
         let closes = trending(100.0, 1.0, 250);
         let vols = vec![1000.0; 250];
-        let bd = SignalBreakdown::compute(&closes, &vols, &SignalParams::default());
+        let spy = trending(100.0, 1.0, 250);
+        let bd = SignalBreakdown::compute(&closes, &vols, &spy, &SignalParams::default());
         let drv = bd.top_drivers();
         // On a clean uptrend every score is bullish; drivers string is non-empty.
         assert!(!drv.is_empty());
         assert!(drv.contains("EMA") || drv.contains("MACD") || drv.contains("RSI"));
+    }
+
+    #[test]
+    fn signal_from_scores_weights_six_terms() {
+        // All-0.5 scores → neutral regardless of weights.
+        let params = SignalParams::default();
+        assert!((signal_from_scores([0.5; 6], &params) - 0.5).abs() < 1e-9);
     }
 }

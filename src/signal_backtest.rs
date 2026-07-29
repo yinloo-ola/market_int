@@ -26,10 +26,11 @@ pub const GRID_STEP: f64 = 5.0;
 
 /// A single day's precomputed indicator scores plus the realized label.
 /// Weight-independent: the signal for any weight-set is derived from `scores`
-/// via `signal::signal_from_scores`.
+/// via `signal::signal_from_scores`. Scores order matches `signal::indicator_scores`:
+/// `[ema_alignment, ema200, macd, rsi, volume, rs]`.
 #[derive(Debug, Clone, Copy)]
 struct DayRow {
-    scores: [f64; 5],
+    scores: [f64; 6],
     bullish: bool, // realized: close[i+H] > close[i]
 }
 
@@ -101,15 +102,22 @@ pub struct HorizonResult {
 
 /// Collect per-day indicator scores + label for one symbol's series at a
 /// horizon. Returns `None` if too short. Weight-independent — the same rows
-/// feed both calibration (train split) and evaluation (test split).
-fn collect_rows(closes: &[f64], volumes: &[f64], horizon: usize) -> Option<Vec<DayRow>> {
+/// feed both calibration (train split) and evaluation (test split). `benchmark`
+/// (SPY closes) is sliced in parallel with the symbol for the RS feature.
+fn collect_rows(
+    closes: &[f64],
+    volumes: &[f64],
+    benchmark: &[f64],
+    horizon: usize,
+) -> Option<Vec<DayRow>> {
     let min_len = indicators::EMA200_PERIOD as usize + horizon;
     if closes.len() < min_len {
         return None;
     }
     let mut rows = Vec::new();
     for i in (indicators::EMA200_PERIOD as usize - 1)..(closes.len() - horizon) {
-        let scores = crate::signal::indicator_scores(&closes[..=i], &volumes[..=i]);
+        let bench_slice = if i < benchmark.len() { &benchmark[..=i] } else { benchmark };
+        let scores = crate::signal::indicator_scores(&closes[..=i], &volumes[..=i], bench_slice);
         let bullish = closes[i + horizon] > closes[i];
         rows.push(DayRow { scores, bullish });
     }
@@ -135,9 +143,11 @@ fn load_all_candles(
 }
 
 /// Split a symbol's candles into (train, test) by the older-2/3 / recent-1/3
-/// boundary and collect DayRows for each, at the given horizon.
+/// boundary and collect DayRows for each, at the given horizon. `benchmark`
+/// (SPY closes) is passed through to `collect_rows` for the RS feature.
 fn split_rows(
     candles: &[model::Candle],
+    benchmark: &[f64],
     horizon: usize,
 ) -> (Option<Vec<DayRow>>, Option<Vec<DayRow>>) {
     let split_at = candles.len() * 2 / 3;
@@ -149,7 +159,7 @@ fn split_rows(
     let to_rows = |slice: &[model::Candle]| {
         let closes: Vec<f64> = slice.iter().map(|c| c.close).collect();
         let volumes: Vec<f64> = slice.iter().map(|c| c.volume as f64).collect();
-        collect_rows(&closes, &volumes, horizon)
+        collect_rows(&closes, &volumes, benchmark, horizon)
     };
     (to_rows(train_c), to_rows(test_c))
 }
@@ -168,35 +178,41 @@ fn dedup_horizons(primary: usize, secondaries: &[usize]) -> Vec<usize> {
 
 // ── Grid search ───────────────────────────────────────────────
 
-/// A candidate weight-set from the grid, as the 5 raw weights (multiples of
-/// `GRID_STEP`, summing to 100).
-fn params_from_weights(w: [f64; 5]) -> SignalParams {
+/// A candidate weight-set from the grid, as the 6 raw weights (multiples of
+/// `GRID_STEP`, summing to 100). Order matches `indicator_scores`:
+/// `[ema_alignment, ema200, macd, rsi, volume, rs]`.
+fn params_from_weights(w: [f64; 6]) -> SignalParams {
     SignalParams {
         weight_ema_alignment: w[0],
         weight_ema200: w[1],
         weight_macd: w[2],
         weight_rsi: w[3],
         weight_volume: w[4],
+        weight_rs: w[5],
     }
 }
 
-/// Enumerate every weight combination where each of 5 weights is a non-negative
-/// multiple of `GRID_STEP` and all sum to 100. Stars-and-bars over steps.
-fn grid_weight_combos() -> Vec<[f64; 5]> {
+/// Enumerate every weight combination where each of 6 weights is a non-negative
+/// multiple of `GRID_STEP` and all sum to 100. Stars-and-bars over steps:
+/// C(20+6−1, 6−1) = C(25,5) = 53130 combinations.
+fn grid_weight_combos() -> Vec<[f64; 6]> {
     let total_steps = (100.0 / GRID_STEP) as usize; // 20
     let mut out = Vec::new();
     for a in 0..=total_steps {
         for b in 0..=(total_steps - a) {
             for c in 0..=(total_steps - a - b) {
                 for d in 0..=(total_steps - a - b - c) {
-                    let e = total_steps - a - b - c - d;
-                    out.push([
-                        a as f64 * GRID_STEP,
-                        b as f64 * GRID_STEP,
-                        c as f64 * GRID_STEP,
-                        d as f64 * GRID_STEP,
-                        e as f64 * GRID_STEP,
-                    ]);
+                    for e in 0..=(total_steps - a - b - c - d) {
+                        let f = total_steps - a - b - c - d - e;
+                        out.push([
+                            a as f64 * GRID_STEP,
+                            b as f64 * GRID_STEP,
+                            c as f64 * GRID_STEP,
+                            d as f64 * GRID_STEP,
+                            e as f64 * GRID_STEP,
+                            f as f64 * GRID_STEP,
+                        ]);
+                    }
                 }
             }
         }
@@ -208,7 +224,7 @@ fn grid_weight_combos() -> Vec<[f64; 5]> {
 #[derive(Debug, Clone)]
 pub struct CalibResult {
     pub params: SignalParams,
-    pub weights: [f64; 5],
+    pub weights: [f64; 6],
     pub train_banded_hit_rate: Option<f64>,
     pub train_n_calls: usize,
 }
@@ -267,13 +283,14 @@ pub fn run_backtest(
         log::warn!("No candles loaded for any symbol; nothing to backtest.");
         return Ok(());
     }
+    let spy_closes = crate::signal::load_spy_closes(conn);
 
     let horizons = dedup_horizons(primary, &[5, 7]);
     let mut results: Vec<HorizonResult> = Vec::new();
     for &h in &horizons {
         let mut all_rows: Vec<DayRow> = Vec::new();
         for (_symbol, candles) in &candles_by_symbol {
-            if let (_train, Some(test)) = split_rows(candles, h) {
+            if let (_train, Some(test)) = split_rows(candles, &spy_closes, h) {
                 all_rows.extend(test);
             }
         }
@@ -305,11 +322,12 @@ pub fn run_calibrate(
         log::warn!("No candles loaded for any symbol; nothing to calibrate on.");
         return Ok(());
     }
+    let spy_closes = crate::signal::load_spy_closes(conn);
 
     // Collect train rows (in-sample) at the primary horizon.
     let mut train_rows: Vec<DayRow> = Vec::new();
     for (_symbol, candles) in &candles_by_symbol {
-        if let (Some(train), _test) = split_rows(candles, horizon) {
+        if let (Some(train), _test) = split_rows(candles, &spy_closes, horizon) {
             train_rows.extend(train);
         }
     }
@@ -349,9 +367,9 @@ fn print_results(
         "Signal backtest — {} symbols, out-of-sample split (most-recent 1/3)",
         candles_by_symbol.len()
     );
-    let _ = writeln!(out, "weights: EMA={} EMA200={} MACD={} RSI={} Vol={}",
+    let _ = writeln!(out, "weights: EMA={} EMA200={} MACD={} RSI={} Vol={} RS={}",
         params.weight_ema_alignment, params.weight_ema200, params.weight_macd,
-        params.weight_rsi, params.weight_volume);
+        params.weight_rsi, params.weight_volume, params.weight_rs);
     let _ = writeln!(out, "{}", "-".repeat(64));
     let _ = writeln!(
         out,
@@ -395,8 +413,8 @@ fn print_calibration(calib: &CalibResult, train_rows: &[DayRow], horizon: usize)
     let _ = writeln!(out, "best weights (sum 100, step {}):", GRID_STEP as u32);
     let _ = writeln!(
         out,
-        "  EMA20/50={}  EMA200={}  MACD={}  RSI={}  Volume={}",
-        calib.weights[0], calib.weights[1], calib.weights[2], calib.weights[3], calib.weights[4]
+        "  EMA20/50={}  EMA200={}  MACD={}  RSI={}  Volume={}  RS={}",
+        calib.weights[0], calib.weights[1], calib.weights[2], calib.weights[3], calib.weights[4], calib.weights[5]
     );
     let _ = writeln!(
         out,
@@ -417,7 +435,7 @@ fn print_calibration(calib: &CalibResult, train_rows: &[DayRow], horizon: usize)
 mod tests {
     use super::*;
 
-    fn row(scores: [f64; 5], bullish: bool) -> DayRow {
+    fn row(scores: [f64; 6], bullish: bool) -> DayRow {
         DayRow { scores, bullish }
     }
 
@@ -426,17 +444,13 @@ mod tests {
         // signals via default params: 0.70-call bull-correct, 0.30-call bear-correct,
         // 0.50 abstains, 0.80-call bull-wrong.
         let params = SignalParams::default();
-        let s = |v: f64| {
-            // build a row whose signal is `v` under default weights: set all 5
-            // scores to v (composite = v when all equal).
-            row([v, v, v, v, v], false)
-        };
-        // Use explicit bullish flags via a helper.
+        // Build rows whose signal is `v` under default weights: set all 6
+        // scores to v (composite = v when all equal).
         let rows = vec![
-            row([0.7, 0.7, 0.7, 0.7, 0.7], true),
-            row([0.3, 0.3, 0.3, 0.3, 0.3], false),
-            row([0.5, 0.5, 0.5, 0.5, 0.5], true),
-            row([0.8, 0.8, 0.8, 0.8, 0.8], false),
+            row([0.7; 6], true),
+            row([0.3; 6], false),
+            row([0.5; 6], true),
+            row([0.8; 6], false),
         ];
         let (hr, n) = banded_hit_rate(&rows, &params);
         assert_eq!(n, 3); // the 0.50 abstains
@@ -447,8 +461,8 @@ mod tests {
     fn banded_hit_rate_none_when_all_abstain() {
         let params = SignalParams::default();
         let rows = vec![
-            row([0.5, 0.5, 0.5, 0.5, 0.5], true),
-            row([0.45, 0.45, 0.45, 0.45, 0.45], false),
+            row([0.5; 6], true),
+            row([0.45; 6], false),
         ];
         let (hr, n) = banded_hit_rate(&rows, &params);
         assert_eq!(n, 0);
@@ -459,10 +473,10 @@ mod tests {
     fn unconditional_counts_all_days() {
         let params = SignalParams::default();
         let rows = vec![
-            row([0.7, 0.7, 0.7, 0.7, 0.7], true),
-            row([0.3, 0.3, 0.3, 0.3, 0.3], false),
-            row([0.5, 0.5, 0.5, 0.5, 0.5], true), // predicts bear (not >0.5) vs bull → miss
-            row([0.8, 0.8, 0.8, 0.8, 0.8], false),
+            row([0.7; 6], true),
+            row([0.3; 6], false),
+            row([0.5; 6], true), // predicts bear (not >0.5) vs bull → miss
+            row([0.8; 6], false),
         ];
         let hr = unconditional_hit_rate(&rows, &params);
         assert!((hr - 0.5).abs() < 1e-9);
@@ -473,10 +487,10 @@ mod tests {
         let params = SignalParams::default();
         // all are calls; 3 bull, 1 bear → majority 3/4.
         let rows = vec![
-            row([0.7, 0.7, 0.7, 0.7, 0.7], true),
-            row([0.3, 0.3, 0.3, 0.3, 0.3], true),
-            row([0.8, 0.8, 0.8, 0.8, 0.8], true),
-            row([0.2, 0.2, 0.2, 0.2, 0.2], false),
+            row([0.7; 6], true),
+            row([0.3; 6], true),
+            row([0.8; 6], true),
+            row([0.2; 6], false),
         ];
         assert!((majority_class_baseline(&rows, &params).unwrap() - 0.75).abs() < 1e-9);
     }
@@ -491,7 +505,8 @@ mod tests {
     fn collect_rows_returns_none_when_too_short() {
         let closes = vec![100.0; 50];
         let vols = vec![1000.0; 50];
-        assert!(collect_rows(&closes, &vols, 10).is_none());
+        let bench = vec![100.0; 50];
+        assert!(collect_rows(&closes, &vols, &bench, 10).is_none());
     }
 
     #[test]
@@ -499,7 +514,8 @@ mod tests {
         // 220 closes, horizon 10: walks i in [199..210) → 11 rows.
         let closes: Vec<f64> = (0..220).map(|i| 100.0 + i as f64).collect();
         let vols = vec![1000.0; 220];
-        let rows = collect_rows(&closes, &vols, 10).unwrap();
+        let bench = vec![100.0; 220];
+        let rows = collect_rows(&closes, &vols, &bench, 10).unwrap();
         assert_eq!(rows.len(), 220 - 10 - (indicators::EMA200_PERIOD as usize - 1));
     }
 
@@ -526,22 +542,22 @@ mod tests {
 
     #[test]
     fn grid_combos_count_matches_stars_and_bars() {
-        // C(20+5-1, 5-1) = C(24,4) = 10626 combinations.
-        assert_eq!(grid_weight_combos().len(), 10626);
+        // C(20+6-1, 6-1) = C(25,5) = 53130 combinations.
+        assert_eq!(grid_weight_combos().len(), 53130);
     }
 
     #[test]
     fn grid_search_picks_higher_hit_rate() {
         // Construct train rows where the truth is: bullish iff EMA200 score high.
-        // EMA200 is scores[1]. Default seed weights EMA200=15. Build rows so that
-        // a weight-set that listens only to EMA200 (w=[0,100,0,0,0]) scores ~100%.
+        // EMA200 is scores[1]. Build rows so that a weight-set that listens only
+        // to EMA200 (w=[0,100,0,0,0,0]) scores ~100%.
         let rows: Vec<DayRow> = (0..40)
             .map(|i| {
                 let ema200_high = i % 2 == 0;
-                // scores: [alignment, ema200, macd, rsi, volume]
-                // Put noise on the other 4, truth on ema200.
+                // scores: [alignment, ema200, macd, rsi, volume, rs]
+                // Put noise on the other 5, truth on ema200.
                 let noise = if i % 3 == 0 { 0.2 } else { 0.8 };
-                let scores = [noise, if ema200_high { 0.9 } else { 0.1 }, noise, noise, noise];
+                let scores = [noise, if ema200_high { 0.9 } else { 0.1 }, noise, noise, noise, noise];
                 row(scores, ema200_high) // bullish iff ema200 high — perfectly separable
             })
             .collect();
@@ -564,8 +580,8 @@ mod tests {
     fn grid_search_returns_none_when_no_calls() {
         // All-0.5 scores → every weight-set abstains → no viable candidate.
         let rows = vec![
-            row([0.5; 5], true),
-            row([0.5; 5], false),
+            row([0.5; 6], true),
+            row([0.5; 6], false),
         ];
         assert!(grid_search(&rows).is_none());
     }

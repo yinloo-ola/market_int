@@ -249,6 +249,44 @@ fn population_stdev(values: &[f64]) -> f64 {
     variance.sqrt()
 }
 
+// ── Relative strength vs SPY (ticket 09) ──────────────────────
+
+/// Relative strength vs a benchmark: ratio of price ratios over `lookback`.
+/// `RS = (sym[t]/sym[t−N]) / (bench[t]/bench[t−N])`. RS > 1 ⇒ outperforming
+/// the benchmark, < 1 ⇒ lagging.
+///
+/// Uses ratio-of-price-ratios (not returns-ratio) to avoid blow-up when the
+/// benchmark's N-day return ≈ 0. Returns `1.0` (neutral = matching market)
+/// when either series is too short for the lookback.
+pub fn relative_strength(symbol_closes: &[f64], benchmark_closes: &[f64], lookback: usize) -> f64 {
+    let n = symbol_closes.len().min(benchmark_closes.len());
+    if n <= lookback {
+        return 1.0;
+    }
+    // Align by tail: use the last `lookback+1` points of each (both indexed
+    // from their own end), so a symbol and the benchmark need not share dates
+    // exactly — only recent length.
+    let sym_now = *symbol_closes.last().unwrap();
+    let sym_then = symbol_closes[n - 1 - lookback];
+    let bench_now = *benchmark_closes.last().unwrap();
+    let bench_then = benchmark_closes[n - 1 - lookback];
+    if sym_then == 0.0 || bench_then == 0.0 || bench_now == bench_then {
+        return 1.0;
+    }
+    let sym_ratio = sym_now / sym_then;
+    let bench_ratio = bench_now / bench_then;
+    sym_ratio / bench_ratio
+}
+
+/// Normalizes RS into a continuous `[0, 1]` score, centered at RS = 1.0:
+/// `(rs − (1 − band)) / (2 × band)`, clamped. RS within `±band` of 1.0 maps
+/// linearly; outperforming strongly → 1, lagging strongly → 0.
+pub fn relative_strength_score(symbol_closes: &[f64], benchmark_closes: &[f64]) -> f64 {
+    let rs = relative_strength(symbol_closes, benchmark_closes, constants::RS_LOOKBACK);
+    let band = constants::RS_BAND;
+    ((rs - (1.0 - band)) / (2.0 * band)).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,4 +432,66 @@ mod tests {
     fn volume_empty_is_neutral() {
         assert_eq!(volume_breakout_score(&[]), 0.5);
     }
+
+    // ── Relative strength vs SPY ──
+    #[test]
+    fn rs_too_short_is_neutral_one() {
+        // < lookback+1 points → RS returns 1.0 (matching market).
+        let sym = trending(100.0, 1.0, 30);
+        let bench = trending(100.0, 1.0, 30);
+        assert!((relative_strength(&sym, &bench, RS_LOOKBACK_DEFAULT) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rs_match_is_one() {
+        // Symbol and benchmark identical → RS exactly 1.0.
+        let sym = trending(100.0, 1.0, 60);
+        let bench = sym.clone();
+        assert!((relative_strength(&sym, &bench, RS_LOOKBACK_DEFAULT) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rs_outperformer_above_one() {
+        // Symbol rises faster than benchmark → RS > 1.
+        let sym = trending(100.0, 2.0, 60); // +2/day
+        let bench = trending(100.0, 1.0, 60); // +1/day
+        let rs = relative_strength(&sym, &bench, RS_LOOKBACK_DEFAULT);
+        assert!(rs > 1.0, "outperformer RS should be > 1, got {rs}");
+    }
+
+    #[test]
+    fn rs_laggard_below_one() {
+        let sym = trending(100.0, 0.5, 60); // +0.5/day
+        let bench = trending(100.0, 1.0, 60); // +1/day
+        let rs = relative_strength(&sym, &bench, RS_LOOKBACK_DEFAULT);
+        assert!(rs < 1.0, "laggard RS should be < 1, got {rs}");
+    }
+
+    #[test]
+    fn rs_score_match_is_midpoint() {
+        let sym = trending(100.0, 1.0, 60);
+        let bench = sym.clone();
+        // RS = 1.0 → centered → score 0.5.
+        assert!((relative_strength_score(&sym, &bench) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rs_score_outperformer_above_midpoint() {
+        let sym = trending(100.0, 2.0, 60);
+        let bench = trending(100.0, 1.0, 60);
+        assert!(relative_strength_score(&sym, &bench) > 0.5);
+    }
+
+    #[test]
+    fn rs_score_strong_outperformer_clamps_to_one() {
+        // Symbol doubles while benchmark barely moves (a tiny rise avoids the
+        // flat-benchmark div-zero guard) → RS huge → score clamps to 1.0.
+        let mut sym = vec![100.0; 60];
+        sym[59] = 200.0;
+        let bench = trending(100.0, 0.001, 60); // ~flat but strictly rising
+        assert!((relative_strength_score(&sym, &bench) - 1.0).abs() < 1e-9);
+    }
+
+    /// Local alias so tests don't depend on the constants module's value.
+    const RS_LOOKBACK_DEFAULT: usize = 50;
 }

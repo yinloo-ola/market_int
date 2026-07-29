@@ -83,6 +83,9 @@ pub const SIGNAL_WEIGHT_EMA200: f64 = 15.0;
 pub const SIGNAL_WEIGHT_MACD: f64 = 25.0;
 pub const SIGNAL_WEIGHT_RSI: f64 = 20.0;
 pub const SIGNAL_WEIGHT_VOLUME: f64 = 15.0;
+/// Relative strength vs SPY (ticket 09): outperformance vs the index. Seed
+/// weight 0 — calibrated by the grid search along with the others.
+pub const SIGNAL_WEIGHT_RS: f64 = 0.0;
 /// Neutral band edges — held CONSTANT (not calibrated) so only the weights
 /// are tuned against the train split. Used by both the live predictor's
 /// BULL/BEAR/NEUT display and the backtest's abstention rule (one band,
@@ -102,3 +105,10 @@ pub const VOLUME_SPIKE_FULL: f64 = 1.5;
 /// normalization (decision 02): score = clamp(hist / stdev(hist, window)).
 /// Self-referential keeps it stock-agnostic (no price-scale contamination).
 pub const MACD_STDEV_WINDOW: usize = 20;
+// ── Relative strength vs SPY (ticket 09) ───────────────────────
+/// RS lookback in trading days (medium-term; classic RS horizon).
+pub const RS_LOOKBACK: usize = 50;
+/// Half-width of the RS normalization band around 1.0 (decision: ratio of
+/// price ratios). RS within [1−band, 1+band] maps linearly to [0,1]; outside
+/// clamps. 0.10 ⇒ RS < 0.90 → fully bearish, RS > 1.10 → fully bullish.
+pub const RS_BAND: f64 = 0.10;
