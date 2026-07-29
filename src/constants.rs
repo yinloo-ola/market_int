@@ -86,6 +86,9 @@ pub const SIGNAL_WEIGHT_VOLUME: f64 = 15.0;
 /// Relative strength vs SPY (ticket 09): outperformance vs the index. Seed
 /// weight 0 — calibrated by the grid search along with the others.
 pub const SIGNAL_WEIGHT_RS: f64 = 0.0;
+/// ADX trend-strength filter (ticket 10): directionalized via ±DI sign so it
+/// fits the flat weighted-sum composite (Option B in the ticket). Seed 0.
+pub const SIGNAL_WEIGHT_ADX: f64 = 0.0;
 /// Neutral band edges — held CONSTANT (not calibrated) so only the weights
 /// are tuned against the train split. Used by both the live predictor's
 /// BULL/BEAR/NEUT display and the backtest's abstention rule (one band,
@@ -112,3 +115,10 @@ pub const RS_LOOKBACK: usize = 50;
 /// price ratios). RS within [1−band, 1+band] maps linearly to [0,1]; outside
 /// clamps. 0.10 ⇒ RS < 0.90 → fully bearish, RS > 1.10 → fully bullish.
 pub const RS_BAND: f64 = 0.10;
+// ── ADX trend-strength (ticket 10) ────────────────────────────
+/// Wilder period for ADX and the DI smoothing (standard ADX(14)).
+pub const ADX_PERIOD: usize = 14;
+/// ADX value at which a trend counts as "full strength" for the score (classic
+/// 25 threshold). The score ramps linearly from 0 (ADX=0, no trend) to 1
+/// (ADX >= this), then directionalized by ±DI sign.
+pub const ADX_FULL_STRENGTH: f64 = 25.0;

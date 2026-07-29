@@ -10,7 +10,7 @@
 //! Each `*_score` function returns a value in `[0, 1]` (1.0 = maximally
 //! bullish) that the composite in `signal.rs` weights together.
 
-use crate::{constants, stats};
+use crate::{constants, model, stats};
 
 // ── Raw indicator values ──────────────────────────────────────
 
@@ -287,6 +287,105 @@ pub fn relative_strength_score(symbol_closes: &[f64], benchmark_closes: &[f64]) 
     ((rs - (1.0 - band)) / (2.0 * band)).clamp(0.0, 1.0)
 }
 
+// ── ADX trend-strength (ticket 10) ────────────────────────────
+// First ATR-family math in the codebase: true range + Wilder smoothing.
+// ADX is non-directional (trend strength), so `adx_score` directionalizes it
+// via the ±DI sign (Option B in the ticket) to fit the flat weighted-sum
+// composite: strong trend + +DI>−DI → bullish, strong + −DI>+DI → bearish,
+// weak trend → neutral regardless of sign.
+
+/// Wilder ADX components: `(adx, plus_di, minus_di)`. Returns `(0.0, 0.0, 0.0)`
+/// when `candles` is too short for a full ADX(14) (needs ~2× the period).
+pub fn adx(candles: &[model::Candle]) -> (f64, f64, f64) {
+    let period = constants::ADX_PERIOD;
+    // Need period bars to seed the smoothed sums, then another period to smooth
+    // DX into ADX — roughly 2*period + 1 total.
+    if candles.len() < 2 * period + 1 {
+        return (0.0, 0.0, 0.0);
+    }
+
+    // Per-bar true range and directional movement (Wilder).
+    let mut trs: Vec<f64> = Vec::with_capacity(candles.len() - 1);
+    let mut plus_dms: Vec<f64> = Vec::with_capacity(candles.len() - 1);
+    let mut minus_dms: Vec<f64> = Vec::with_capacity(candles.len() - 1);
+    for i in 1..candles.len() {
+        let c = &candles[i];
+        let prev = &candles[i - 1];
+        let high_low = c.high - c.low;
+        let high_pc = (c.high - prev.close).abs();
+        let low_pc = (c.low - prev.close).abs();
+        trs.push(high_low.max(high_pc).max(low_pc));
+
+        let up_move = c.high - prev.high;
+        let down_move = prev.low - c.low;
+        let plus_dm = if up_move > down_move && up_move > 0.0 { up_move } else { 0.0 };
+        let minus_dm = if down_move > up_move && down_move > 0.0 { down_move } else { 0.0 };
+        plus_dms.push(plus_dm);
+        minus_dms.push(minus_dm);
+    }
+
+    // Wilder smoothing: seed with the sum of the first `period`, then
+    // prev − prev/period + current for each subsequent bar.
+    let smooth = |series: &[f64]| -> Vec<f64> {
+        let seed: f64 = series.iter().take(period).sum();
+        let mut out = Vec::with_capacity(series.len() - period + 1);
+        out.push(seed);
+        let mut prev = seed;
+        for &v in series.iter().skip(period) {
+            prev = prev - prev / period as f64 + v;
+            out.push(prev);
+        }
+        out
+    };
+    let tr_s = smooth(&trs);
+    let pdm_s = smooth(&plus_dms);
+    let mdm_s = smooth(&minus_dms);
+
+    // DI and DX series (one per smoothed bar).
+    let mut dx_series: Vec<f64> = Vec::with_capacity(tr_s.len());
+    let mut last_plus_di = 0.0;
+    let mut last_minus_di = 0.0;
+    for k in 0..tr_s.len() {
+        let plus_di = if tr_s[k] != 0.0 { 100.0 * pdm_s[k] / tr_s[k] } else { 0.0 };
+        let minus_di = if tr_s[k] != 0.0 { 100.0 * mdm_s[k] / tr_s[k] } else { 0.0 };
+        let sum_di = plus_di + minus_di;
+        let dx = if sum_di != 0.0 { 100.0 * (plus_di - minus_di).abs() / sum_di } else { 0.0 };
+        dx_series.push(dx);
+        last_plus_di = plus_di;
+        last_minus_di = minus_di;
+    }
+
+    // ADX = Wilder smoothing of DX over the same period. Needs >= period DXs.
+    if dx_series.len() < period {
+        return (0.0, last_plus_di, last_minus_di);
+    }
+    let dx_seed: f64 = dx_series.iter().take(period).sum::<f64>() / period as f64;
+    let mut adx_val = dx_seed;
+    for &dx in dx_series.iter().skip(period) {
+        adx_val = (adx_val * (period as f64 - 1.0) + dx) / period as f64;
+    }
+    (adx_val, last_plus_di, last_minus_di)
+}
+
+/// Normalizes ADX into a directional `[0, 1]` score (Option B). ADX strength
+/// ramps 0→1 over `[0, ADX_FULL_STRENGTH]`; the direction comes from ±DI sign:
+/// `+DI > −DI` → bullish (score above 0.5), else bearish. Returns `0.5`
+/// (neutral) when ADX can't be computed (too few candles).
+pub fn adx_score(candles: &[model::Candle]) -> f64 {
+    let (adx, plus_di, minus_di) = adx(candles);
+    if adx == 0.0 && plus_di == 0.0 && minus_di == 0.0 {
+        return 0.5;
+    }
+    let strength = (adx / constants::ADX_FULL_STRENGTH).clamp(0.0, 1.0);
+    if plus_di >= minus_di {
+        // Bullish bias: neutral (0.5) + strength/2 → [0.5, 1.0].
+        0.5 + strength * 0.5
+    } else {
+        // Bearish bias: neutral (0.5) − strength/2 → [0.0, 0.5].
+        0.5 - strength * 0.5
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,4 +593,63 @@ mod tests {
 
     /// Local alias so tests don't depend on the constants module's value.
     const RS_LOOKBACK_DEFAULT: usize = 50;
+
+    // ── ADX ──
+    /// Build candles from a close series with synthetic high/low (±range) and
+    /// fixed volume, for ADX testing.
+    fn candles_from_closes(closes: &[f64], range: f64, vol: u32) -> Vec<model::Candle> {
+        closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| model::Candle {
+                symbol: "TEST".into(),
+                open: c,
+                high: c + range,
+                low: c - range,
+                close: c,
+                volume: vol,
+                timestamp: i as u32,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn adx_too_short_returns_zeros() {
+        let closes = trending(100.0, 1.0, 20); // < 2*14+1
+        let candles = candles_from_closes(&closes, 1.0, 1000);
+        assert_eq!(adx(&candles), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn adx_score_too_short_is_neutral() {
+        let closes = trending(100.0, 1.0, 20);
+        let candles = candles_from_closes(&closes, 1.0, 1000);
+        assert!((adx_score(&candles) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn adx_strong_uptrend_is_bullish() {
+        // Steady uptrend: +DI dominates, ADX high → score > 0.5.
+        let closes = trending(100.0, 1.5, 60);
+        let candles = candles_from_closes(&closes, 0.5, 1000);
+        let s = adx_score(&candles);
+        assert!(s > 0.5, "uptrend ADX score should be bullish, got {s}");
+    }
+
+    #[test]
+    fn adx_strong_downtrend_is_bearish() {
+        let closes = trending(200.0, -1.5, 60);
+        let candles = candles_from_closes(&closes, 0.5, 1000);
+        let s = adx_score(&candles);
+        assert!(s < 0.5, "downtrend ADX score should be bearish, got {s}");
+    }
+
+    #[test]
+    fn adx_returns_direction_dominance() {
+        // On an uptrend, +DI should exceed −DI.
+        let closes = trending(100.0, 1.5, 60);
+        let candles = candles_from_closes(&closes, 0.5, 1000);
+        let (_adx, plus_di, minus_di) = adx(&candles);
+        assert!(plus_di > minus_di, "uptrend: +DI ({plus_di}) should exceed −DI ({minus_di})");
+    }
 }
