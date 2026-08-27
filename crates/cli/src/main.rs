@@ -235,6 +235,8 @@ async fn main() {
             // publishing is injected as a hook so the webapp can run none.
             let opts = market_int_core::pipeline::PerformAllOptions {
                 publish: Some(publish::telegram_publish_hook()),
+                // CLI emits no pipeline events (no-op reporter default).
+                progress: None,
             };
             // Everything is reported inside the pipeline — stage failures keep
             // their historical wording there, and its sole outer Err

@@ -4,9 +4,12 @@ use csv::Writer;
 use rusqlite::Connection;
 use std::collections::HashMap;
 
+use std::collections::HashSet;
+
 use crate::{
     constants,
     model,
+    pipeline::{PipelineEvent, ProgressReporter, Stage},
     store::{candle, earnings, max_drop, option_chain, price_percentile, sharpe_ratio, trend},
     symbols,
     tiger::api_caller::Requester,
@@ -137,6 +140,14 @@ fn filter_option_chains(
         .collect()
 }
 
+/// Everything one retrieval's batch loop produced: the saved chains plus the
+/// underlyings whose batch failed at the API level (chunk granularity — an
+/// expired/failed batch costs all its symbols their strikes this run).
+pub(crate) struct BatchedChains {
+    pub chains: Vec<model::OptionStrikeCandle>,
+    pub failed_symbols: Vec<String>,
+}
+
 async fn fetch_option_chains_in_batches(
     symbols: &[String],
     conn: &mut Connection,
@@ -144,10 +155,27 @@ async fn fetch_option_chains_in_batches(
     period: usize,
     expiry_timeframe: ExpiryTimeframe,
     requester: &mut Requester,
-) -> model::Result<Vec<model::OptionStrikeCandle>> {
+    progress: &ProgressReporter,
+) -> model::Result<BatchedChains> {
     let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
+    let mut failed_symbols: Vec<String> = Vec::new();
+    let total_batches = symbols.len().div_ceil(10);
+    let stage = if expiry_timeframe == ExpiryTimeframe::Short {
+        Stage::ChainsShort
+    } else {
+        Stage::ChainsMedium
+    };
+    // Emitted after every chunk attempt so the progress bar advances even
+    // when a batch fails.
+    let emit_batch_done = |done: usize| {
+        progress.emit(PipelineEvent::BatchDone {
+            stage,
+            done,
+            total: total_batches,
+        });
+    };
 
-    for chunk in symbols.chunks(10) {
+    for (batch_no, chunk) in symbols.chunks(10).enumerate() {
         let symbols_for_expiry: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
 
         let expirations = match requester.option_expiration(&symbols_for_expiry).await {
@@ -157,6 +185,8 @@ async fn fetch_option_chains_in_batches(
                 for symbol in &symbols_for_expiry {
                     log::error!("Failed symbol in batch: {}", symbol);
                 }
+                failed_symbols.extend(chunk.iter().cloned());
+                emit_batch_done(batch_no + 1);
                 continue;
             }
         };
@@ -174,6 +204,8 @@ async fn fetch_option_chains_in_batches(
                     for symbol in &symbols_for_expiry {
                         log::error!("Failed symbol in batch: {}", symbol);
                     }
+                    failed_symbols.extend(chunk.iter().cloned());
+                    emit_batch_done(batch_no + 1);
                     continue;
                 }
             };
@@ -233,11 +265,17 @@ async fn fetch_option_chains_in_batches(
                 for (symbol, _) in &symbol_strike_ranges {
                     log::error!("Failed symbol in batch: {}", symbol);
                 }
+                failed_symbols.extend(symbol_strike_ranges.iter().map(|(s, _)| (*s).to_string()));
             }
         }
+
+        emit_batch_done(batch_no + 1);
     }
 
-    Ok(all_chains)
+    Ok(BatchedChains {
+        chains: all_chains,
+        failed_symbols,
+    })
 }
 
 async fn fetch_earnings_map(
@@ -331,6 +369,16 @@ pub struct RetrievedData {
     pub earnings_map: HashMap<String, model::EarningsInfo>,
     /// 5 for Short, 20 for Medium — drives scoring windows and captions.
     pub period: usize,
+    /// Rows retrieved and persisted this run (= `all_chains.len()`); the
+    /// chain stage's `row_count` in the result document.
+    pub row_count: usize,
+    /// Distinct underlyings with at least one saved strike — the exact
+    /// per-timeframe coverage figure (spec §2.4c).
+    pub symbols_with_chains: usize,
+    /// Underlyings whose API batch failed outright this run (chunk-level
+    /// failures only; a symbol whose strikes all filtered out is not here).
+    /// Drives the "N symbols failed: …" partial/failed stage text.
+    pub api_failed_symbols: Vec<String>,
 }
 
 /// Retrieves option chains with a configurable expiry timeframe and
@@ -344,6 +392,7 @@ pub async fn retrieve_option_chains(
     conn: &mut Connection,
     expiry_timeframe: ExpiryTimeframe,
     requester: &mut Requester,
+    progress: &ProgressReporter,
 ) -> model::Result<RetrievedData> {
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
@@ -355,15 +404,25 @@ pub async fn retrieve_option_chains(
         5
     };
 
-    let all_chains = fetch_option_chains_in_batches(
+    let batched = fetch_option_chains_in_batches(
         &symbols,
         conn,
         side,
         period,
         expiry_timeframe,
         requester,
+        progress,
     )
     .await?;
+
+    let all_chains = batched.chains;
+    let row_count = all_chains.len();
+    let symbols_with_chains = all_chains
+        .iter()
+        .map(|c| c.underlying.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    let api_failed_symbols = batched.failed_symbols;
 
     let (sharpe_ratios, price_ranges, price_percentiles, trend_data, realized_vols) =
         collect_metrics_from_db(conn, &symbols);
@@ -398,6 +457,9 @@ pub async fn retrieve_option_chains(
         realized_vols,
         earnings_map,
         period,
+        row_count,
+        symbols_with_chains,
+        api_failed_symbols,
     })
 }
 

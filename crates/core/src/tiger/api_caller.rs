@@ -65,6 +65,9 @@ pub struct Requester {
     client: reqwest::Client,
     option_expiration_cache: HashMap<String, OptionExpirationCacheEntry>,
     cache_ttl: Duration,
+    /// Gateway URL. Defaults to `ENDPOINT`; the pipeline test seam overrides
+    /// it with a loopback address so stubbed runs can never reach out.
+    endpoint: String,
 }
 
 impl Requester {
@@ -79,6 +82,7 @@ impl Requester {
             client,
             option_expiration_cache: HashMap::new(),
             cache_ttl: Duration::from_secs(300), // 5 minutes cache TTL
+            endpoint: ENDPOINT.to_string(),
         };
 
         // Try to grab quote permission to test the connection
@@ -92,6 +96,23 @@ impl Requester {
         }
 
         Some(requester)
+    }
+
+    /// Test-seam constructor: a Requester whose gateway is guaranteed
+    /// unreachable (`127.0.0.1:1` → instant connection refused), so pipeline
+    /// tests exercise failure paths offline no matter what credentials are in
+    /// the environment. Never used by production code.
+    #[cfg(test)]
+    pub(crate) fn pipeline_test_stub() -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_millis(50))
+                .build()
+                .expect("test http client"),
+            option_expiration_cache: HashMap::new(),
+            cache_ttl: Duration::from_secs(0),
+            endpoint: "http://127.0.0.1:1".to_string(),
+        }
     }
 
     /// Query earnings calendar from Tiger corporate_action API.
@@ -664,7 +685,7 @@ impl Requester {
 
         let response = self
             .client
-            .post(ENDPOINT)
+            .post(&self.endpoint)
             .header(
                 "Content-Type",
                 format!("application/json;charset={}", CHARSET),

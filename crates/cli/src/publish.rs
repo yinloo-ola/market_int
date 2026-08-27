@@ -36,9 +36,16 @@ pub async fn retrieve_option_chains_with_expiry(
     regime: &MarketRegime,
     sectors: &HashMap<String, String>,
 ) -> model::Result<()> {
-    let retrieved =
-        option::retrieve_option_chains(symbols_file_path, side, conn, expiry_timeframe, requester)
-            .await?;
+    let retrieved = option::retrieve_option_chains(
+        symbols_file_path,
+        side,
+        conn,
+        expiry_timeframe,
+        requester,
+        // Pull arms emit no pipeline events (unchanged CLI behavior).
+        &market_int_core::pipeline::ProgressReporter::default(),
+    )
+    .await?;
 
     publish_to_telegram(
         &retrieved.all_chains,
