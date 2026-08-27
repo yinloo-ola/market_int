@@ -44,6 +44,11 @@ other assets inlined), which lets the release build include them via
 | env | `webapp_result_file` |
 | default | `/data/webapp/last_run.json` |
 
+| bind address | value |
+|---|---|
+| default | `0.0.0.0:8080` (Cloud Run port mapping; spec §8) |
+| env override | `webapp_bind=127.0.0.1:8080` for local-only exposure |
+
 | auth (ticket 17) | value |
 |---|---|
 | CLI flag | `--firebase-project-id <id>` |

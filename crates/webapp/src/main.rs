@@ -19,7 +19,10 @@ const RESULT_FILE_ENV: &str = "webapp_result_file";
 /// Public Firebase project id; arming auth is exactly "this is set".
 const FIREBASE_PROJECT_ID_ENV: &str = "FIREBASE_PROJECT_ID";
 const DEFAULT_RESULT_PATH: &str = "/data/webapp/last_run.json";
-const BIND_ADDR: &str = "127.0.0.1:8080";
+/// Cloud Run (spec §7/§8) requires binding 0.0.0.0 so the platform port
+/// mapping reaches the server; local dev narrows back via `webapp_bind`.
+const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
+const BIND_ENV: &str = "webapp_bind";
 
 /// Value following `flag` in argv, if present.
 fn first_flag_value(flag: &str) -> Option<String> {
@@ -35,6 +38,19 @@ fn first_flag_value(flag: &str) -> Option<String> {
 }
 
 /// Precedence: `--result-file <path>` arg → `${RESULT_FILE_ENV}` → default.
+fn bind_addr() -> String {
+    match std::env::var(BIND_ENV) {
+        Ok(v) if !v.trim().is_empty() => {
+            log::info!("bind address: {v} (from ${BIND_ENV})");
+            v
+        }
+        _ => {
+            log::info!("bind address: {DEFAULT_BIND_ADDR} (default)");
+            DEFAULT_BIND_ADDR.to_string()
+        }
+    }
+}
+
 fn result_path() -> PathBuf {
     if let Some(v) = first_flag_value("--result-file") {
         log::info!("result file: {v} (from --result-file)");
@@ -93,9 +109,10 @@ async fn main() {
 
     let router = router::app_router(result_path(), auth_guard);
 
-    log::info!("market_int_webapp listening on http://{BIND_ADDR}");
-    let listener = tokio::net::TcpListener::bind(BIND_ADDR)
+    let bind_addr = bind_addr();
+    log::info!("market_int_webapp listening on http://{bind_addr}");
+    let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
-        .expect("bind 8080");
+        .unwrap_or_else(|e| panic!("bind {bind_addr}: {e}"));
     axum::serve(listener, router).await.expect("server");
 }
