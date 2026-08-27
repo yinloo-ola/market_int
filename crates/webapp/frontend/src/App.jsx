@@ -190,17 +190,24 @@ function App() {
         <RunStrip run={run} />
         {/* ── end RUN_SLOT part 2 ── */}
 
+        {/* S1: no-run-yet hero */}
         <Show
           when={!latest.loading && latest()?.result}
           fallback={
             <Show when={!latest.loading}>
-              <div class="cache-line">
-                No results yet — press Run once the pipeline endpoints land
-                (ticket 18). Meanwhile this page serves whatever the result
-                file holds; point <code>webapp_result_file</code> (or{" "}
-                <code>--result-file</code>) at{" "}
-                <code>crates/webapp/fixtures/sample_last_run.json</code> for
-                demo data.
+              <div class="hero">
+                <h2>No run yet</h2>
+                <p>
+                  Press <b>▶ Run pipeline</b> to pull quotes, compute max-drop
+                  bands / Sharpe / percentiles, then score every in-range put
+                  strike across the universe. A full run typically takes 4–7
+                  minutes and streams live progress right here.
+                </p>
+                <p class="muted-note">
+                  Demo data: point <code>webapp_result_file</code> (or{" "}
+                  <code>--result-file</code>) at{" "}
+                  <code>crates/webapp/fixtures/sample_last_run.json</code>.
+                </p>
               </div>
             </Show>
           }
@@ -217,6 +224,7 @@ function App() {
                   active={() => tab() === "short"}
                   tf={result().timeframes?.short}
                   stageError={stageErrorOf(result(), "chains_short")}
+                  stages={result().stages}
                   thresholds={result().thresholds}
                   columns={columns}
                 />
@@ -225,6 +233,7 @@ function App() {
                   active={() => tab() === "medium"}
                   tf={result().timeframes?.medium}
                   stageError={stageErrorOf(result(), "chains_medium")}
+                  stages={result().stages}
                   thresholds={result().thresholds}
                   columns={columns}
                 />

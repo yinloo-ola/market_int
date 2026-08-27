@@ -11,3 +11,6 @@ crates/webapp/frontend/node_modules/
 
 # local firebase envs (real values live here, never committed)
 crates/webapp/frontend/.env.local
+
+# DOM-smoke build output
+crates/webapp/frontend/dist-smoke/

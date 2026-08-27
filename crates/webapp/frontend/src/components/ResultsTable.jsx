@@ -12,12 +12,17 @@
 import { For, Show, createMemo } from "solid-js";
 
 import { COLUMNS } from "../lib/columns";
+import ExpansionPanel from "./ExpansionPanel";
+import Tip from "./Tip";
+import { tipText } from "../lib/tips";
 import {
   formatCell,
   isNullValue,
   momentumOf,
   volTier,
 } from "../lib/format";
+
+const rowKey = (row) => `${row.underlying}|${row.strike}`;
 
 function NullMark(props) {
   return <span class="null-mark">{props.text}</span>;
@@ -97,7 +102,9 @@ function Cell(props) {
 
 export default function ResultsTable(props) {
   // props.visibleCols(), props.rows(), props.sortKey(), props.sortDir(),
-  // props.onSort(id), props.thresholds, props.pickRankOf(row)
+  // props.onSort(id), props.thresholds, props.pickRankOf(row),
+  // props.openKey()/onToggleRow(row) — ticket 19 expansion seam,
+  // props.hiddenDefs() — currently-hidden column defs for the chips block.
   const visible = createMemo(() =>
     COLUMNS.filter((c) => props.visibleCols().includes(c.id))
   );
@@ -106,6 +113,8 @@ export default function ResultsTable(props) {
     <table>
       <thead>
         <tr>
+          {/* leading expander column (26px per §6.3) */}
+          <th class="exp-col" aria-hidden="true" />
           <For each={visible()}>
             {(c) => {
               const active = () => props.sortKey() === c.id;
@@ -129,12 +138,17 @@ export default function ResultsTable(props) {
                     }
                   }}
                 >
-                  {c.label}
-                  <Show when={active()}>
-                    <span class="sort-arrow">
-                      {props.sortDir() === "asc" ? "↑" : "↓"}
+                  <Tip text={tipText(c.id, props.thresholds)}>
+                    <span class="tip-target">
+                      {c.label}
+                      <Show when={active()}>
+                        {" "}
+                        <span class="sort-arrow">
+                          {props.sortDir() === "asc" ? "↑" : "↓"}
+                        </span>
+                      </Show>
                     </span>
-                  </Show>
+                  </Tip>
                 </th>
               );
             }}
@@ -145,24 +159,45 @@ export default function ResultsTable(props) {
         <For each={props.rows()}>
           {(row) => {
             const rank = () => props.pickRankOf(row);
+            const key = () => rowKey(row);
+            const isOpen = () => props.openKey() != null && props.openKey() === key();
             return (
-              <tr
-                classList={{
-                  pick: rank() != null,
-                  prow: isNullValue(row.score),
-                }}
-              >
-                <For each={visible()}>
-                  {(def) => (
-                    <Cell
-                      col={def}
-                      row={row}
-                      thresholds={props.thresholds}
-                      pickRank={rank()}
-                    />
-                  )}
-                </For>
-              </tr>
+              <>
+                <tr
+                  classList={{
+                    pick: rank() != null,
+                    prow: isNullValue(row.score),
+                    expandable: true,
+                    open: isOpen(),
+                  }}
+                  onClick={() => props.onToggleRow(row)}
+                >
+                  <td class="exp-col">
+                    {isOpen() ? "▾" : "▸"}
+                  </td>
+                  <For each={visible()}>
+                    {(def) => (
+                      <Cell
+                        col={def}
+                        row={row}
+                        thresholds={props.thresholds}
+                        pickRank={rank()}
+                      />
+                    )}
+                  </For>
+                </tr>
+                <Show when={isOpen()}>
+                  <tr class="exp-row">
+                    <td colspan={visible().length + 1}>
+                      <ExpansionPanel
+                        row={row}
+                        thresholds={props.thresholds}
+                        hiddenDefs={props.hiddenDefs()}
+                      />
+                    </td>
+                  </tr>
+                </Show>
+              </>
             );
           }}
         </For>

@@ -5,6 +5,7 @@
 // → scored-only → sort over the FULL filtered array → 100-row slice.
 
 import {
+  For,
   Show,
   createEffect,
   createMemo,
@@ -13,6 +14,7 @@ import {
   onCleanup,
 } from "solid-js";
 
+import { COLUMNS } from "../lib/columns";
 import ColumnPicker from "./ColumnPicker";
 import Pagination from "./Pagination";
 import ResultsTable from "./ResultsTable";
@@ -22,23 +24,42 @@ import { defaultSort, sortRows } from "../lib/sort";
 const PAGE_SIZE = 100;
 const FILTER_DEBOUNCE_MS = 150;
 
-const STAGE_BY_TAB = { short: "chains·short", medium: "chains·medium" };
+// Stage names use the result-document vocabulary (underscores).
+const STAGE_BY_TAB = {
+  short: { id: "chains_short", label: "Chains · Short" },
+  medium: { id: "chains_medium", label: "Chains · Medium" },
+};
 
-function emptyStateMessage(tabId, tf, stageError) {
-  if (!tf) {
-    // A timeframe key is present iff that stage produced data (spec §3.4);
-    // when absent, name the failed chain stage per the S6 presentation.
-    return stageError
-      ? `No rows — ${STAGE_BY_TAB[tabId]} failed: ${stageError}`
-      : `No rows — ${STAGE_BY_TAB[tabId]} produced no data for this run.`;
-  }
-  return "No rows match the current filter.";
+/// S6 badges: one ✗ / △ / ✓ chip per pipeline stage; failed and partial
+/// stages carry an expandable error block (spec §6.6).
+export function StageBadges(props) {
+  const cls = (st) =>
+    st === "failed" ? "failed" : st === "partial" ? "partial" : "ok";
+  const mark = (st) => (st === "failed" ? "✗" : st === "partial" ? "△" : "✓");
+  const pretty = (name) => name.replaceAll("_", " ");
+  return (
+    <div class="stage-badges">
+      <For each={props.stages ?? []}>
+        {(stg) => (
+          <details class={`sbadge ${cls(stg.status)}`}>
+            <summary>
+              {mark(stg.status)} {pretty(stg.name)}
+            </summary>
+            <Show when={stg.error}>
+              <pre class="errbox">{stg.error}</pre>
+            </Show>
+          </details>
+        )}
+      </For>
+    </div>
+  );
 }
 
 export default function ResultsPane(props) {
   // props.id ("short" | "medium"), props.active() — tab visibility getter,
   // props.tf (timeframe object or undefined), props.stageError,
-  // props.thresholds, props.columns — the shared column store.
+  // props.stages (pipeline stage reports), props.thresholds,
+  // props.columns — the shared column store.
   const [rawFilter, setRawFilter] = createSignal("");
   const [filter, setFilter] = createSignal("");
   const [scoredOnly, setScoredOnly] = createSignal(true); // default ON
@@ -78,8 +99,21 @@ export default function ResultsPane(props) {
     setPage(1);
   };
 
-  // Column changes are shared across tabs; reset this tab's page too.
+  // Ticket 19 expansion state: exactly one open row per pane; collapses on
+  // sort/filter/scored-only/page change and on tab switch (§6.4).
+  const [openKey, setOpenKey] = createSignal(null);
+  const onToggleRow = (row) => {
+    const k = `${row.underlying}|${row.strike}`;
+    setOpenKey((cur) => (cur === k ? null : k));
+  };
+  createEffect(on([sortKey, sortDir, page, filter, scoredOnly], () => setOpenKey(null)));
+  createEffect(on(props.active, () => setOpenKey(null)));
   createEffect(on(props.columns.visible, () => setPage(1)));
+
+  const hiddenDefs = () =>
+    COLUMNS.filter((c) => !props.columns.visible().includes(c.id));
+  const chainStage = () =>
+    (props.stages ?? []).find((s) => s.name === STAGE_BY_TAB[props.id].id);
 
   const filteredRows = createMemo(() => {
     const needle = filter();
@@ -123,6 +157,9 @@ export default function ResultsPane(props) {
 
   return (
     <section class="pane" hidden={!props.active()}>
+      {/* S6 strip: ✗/△/✓ per stage with expandable errors */}
+      <StageBadges stages={props.stages} />
+
       <div class="controls">
         <input
           type="search"
@@ -148,24 +185,47 @@ export default function ResultsPane(props) {
         </span>
       </div>
 
-      <Show
-        when={pageRows().length > 0}
-        fallback={
-          <div class="empty-panel">
-            {emptyStateMessage(props.id, props.tf, props.stageError)}
-          </div>
-        }
-      >
-        <ResultsTable
-          visibleCols={props.columns.visible}
-          rows={pageRows}
-          sortKey={sortKey}
-          sortDir={sortDir}
-          onSort={onSort}
-          thresholds={props.thresholds}
-          pickRankOf={pickRankOf}
-        />
-      </Show>
+      <div class="scroll-region">
+        <Show
+          when={pageRows().length > 0}
+          fallback={
+            <Show
+              when={
+                chainStage()?.status === "failed" ||
+                chainStage()?.status === "partial"
+              }
+              fallback={
+                <div class="empty-panel">No rows match the current filter.</div>
+              }
+            >
+              {(stg) => (
+                <div class="empty-panel stage-failed-panel">
+                  <b>
+                    {stg().status === "partial" ? "△" : "✗"}{" "}
+                    {STAGE_BY_TAB[props.id].label} — no rows
+                  </b>
+                  <pre class="errbox">
+                    {stg().error ?? "stage produced no data"}
+                  </pre>
+                </div>
+              )}
+            </Show>
+          }
+        >
+          <ResultsTable
+            visibleCols={props.columns.visible}
+            rows={pageRows}
+            sortKey={sortKey}
+            sortDir={sortDir}
+            onSort={onSort}
+            thresholds={props.thresholds}
+            pickRankOf={pickRankOf}
+            openKey={openKey}
+            onToggleRow={onToggleRow}
+            hiddenDefs={hiddenDefs}
+          />
+        </Show>
+      </div>
 
       <Show when={sortedRows().length > 0}>
         <Pagination page={safePage} pageCount={pageCount} onGo={setPage} />
