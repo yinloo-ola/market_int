@@ -69,12 +69,24 @@ clean:
 docker-build:
 	docker build --platform linux/amd64 -t us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:$(tag) .
 	docker push us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:$(tag)
-	sed -i.bak 's|us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:[0-9.]*|us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:'$(tag)'|' job.yaml && rm -f job.yaml.bak
-	@echo "Updated job.yaml with tag $(tag)"
+	sed -i.bak 's|us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:[0-9.]*|us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:'$(tag)'|' job.yaml service.yaml && rm -f job.yaml.bak service.yaml.bak
+	@echo "Updated job.yaml and service.yaml with tag $(tag)"
+
+# Local webapp iteration (spec §8): build frontend, then run the axum server
+webapp-frontend:
+	npm --prefix crates/webapp/frontend ci
+	npm --prefix crates/webapp/frontend run build
+
+webapp-run:
+	cargo run -p market_int_webapp
 
 # Google Cloud operations
 gcloud-job:
 	gcloud run jobs replace job.yaml
+
+# Deploy/update the webapp Service (ticket 20); the Job keeps its own revision
+gcloud-service:
+	gcloud run services replace service.yaml --region us-west1
 
 # Help target
 help:
@@ -93,3 +105,6 @@ help:
 	@echo "  clean                - Clean build artifacts"
 	@echo "  docker-build         - Build and push Docker image"
 	@echo "  gcloud-job           - Update Google Cloud job"
+	@echo "  gcloud-service       - Deploy/update the webapp Cloud Run Service"
+	@echo "  webapp-frontend      - npm ci + build the webapp frontend"
+	@echo "  webapp-run           - Run the webapp server locally (:8080)"

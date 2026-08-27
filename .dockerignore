@@ -1,0 +1,12 @@
+# keep the build context lean; node deps install fresh inside the frontend stage
+.git/
+.target/
+target/
+data/
+.env
+.env.*
+.scratch/
+crates/webapp/frontend/node_modules/
+crates/webapp/frontend/dist/
+crates/webapp/frontend/dist-smoke/
+docs/

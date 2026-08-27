@@ -1,0 +1,57 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: market-int-web            # second artifact; Job market-int stays untouched
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/maxScale: "1"           # single writer for the SQLite-on-GCS db (no file locking)
+        run.googleapis.com/execution-environment: gen2  # required by the GCS FUSE CSI volume
+    spec:
+      serviceAccountName: 628240778300-compute@developer.gserviceaccount.com
+      containerConcurrency: 80   # keep >1: view endpoints share the instance with the minutes-long trigger request
+      containers:
+        - name: webapp
+          image: us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:0.13.0  # bumped by make docker-build
+          command: ["/market_int/market_int_webapp"]   # Service overrides command; Job keeps the CLI binary
+          ports:
+            - name: h2c          # HTTP/2 end-to-end: browser disconnects propagate to axum (cancel-on-close)
+              containerPort: 8080
+          timeoutSeconds: 900    # default 300 would 504 a slow run; max 3600
+          env:
+            - name: sqlite_file
+              value: /data/data.db
+            - name: webapp_symbols_file
+              value: /data/symbols.csv
+            - name: webapp_result_file
+              value: /data/webapp/last_run.json
+            - name: FIREBASE_PROJECT_ID   # public value (t06) — not a secret; set to your project id
+              value: <PROJECT_ID>
+            - name: RUST_LOG
+              value: info
+            - name: marketdata_token
+              valueFrom:
+                secretKeyRef: { key: latest, name: marketdata_token }
+            # Tiger creds: repo job.yaml omits them, but perform-all hard-requires them.
+            # Create tiger_id/tiger_rsa in Secret Manager (the live Job injects them
+            # out-of-band) and grant the SA roles/secretmanager.secretAccessor — see §7.3.
+            - name: TIGER_ID
+              valueFrom:
+                secretKeyRef: { key: latest, name: tiger_id }
+            - name: TIGER_RSA
+              valueFrom:
+                secretKeyRef: { key: latest, name: tiger_rsa }
+          resources:
+            limits:
+              cpu: 1000m
+              memory: 512Mi    # matches the Job; bump to 1Gi if view traffic during runs shows pressure
+          volumeMounts:
+            - name: gcs-1
+              mountPath: /data
+      volumes:
+        - name: gcs-1
+          csi:
+            driver: gcsfuse.run.googleapis.com   # same CSI driver as the Job
+            volumeAttributes:
+              bucketName: opt-intel
