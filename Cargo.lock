@@ -993,7 +993,12 @@ dependencies = [
 name = "market_int_webapp"
 version = "0.9.0"
 dependencies = [
+ "chrono",
+ "chrono-tz",
  "market_int_core",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

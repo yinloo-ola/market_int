@@ -147,9 +147,9 @@ fn format_telegram_caption(top_picks: &[model::TopPick], period: usize, regime: 
         let vol_str = pick
             .realized_vol
             .map(|v| {
-                let tier = if v >= 0.38 {
+                let tier = if v >= market_int_core::constants::VOL_TIER_HIGH {
                     "🟢"
-                } else if v >= 0.28 {
+                } else if v >= market_int_core::constants::VOL_TIER_MID {
                     "🟡"
                 } else {
                     "🔴"

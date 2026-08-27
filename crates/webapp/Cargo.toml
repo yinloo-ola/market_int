@@ -16,3 +16,10 @@ bundled-sqlite = ["market_int_core/bundled-sqlite"]
 
 [dependencies]
 market_int_core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

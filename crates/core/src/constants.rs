@@ -73,5 +73,7 @@ pub const MIN_REALIZED_VOL: f64 = 0.50;
 ///
 /// Tier multipliers: high-vol (>=0.38) → 1.0, mid-vol (>=0.28) → 0.5,
 /// low-vol (<0.28) → 0.0. The boost is `safety *= (1 + VOL_SAFETY_BOOST * tier)`.
+pub const VOL_TIER_HIGH: f64 = 0.38; // realized vol ≥ this → green tier
+pub const VOL_TIER_MID: f64 = 0.28; // ≥ this (else) → yellow tier
 /// 0.0 = disabled (production default — the bot annotates vol tiers instead).
 pub const VOL_SAFETY_BOOST: f64 = 0.0;

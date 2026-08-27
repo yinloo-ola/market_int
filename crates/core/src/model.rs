@@ -367,9 +367,9 @@ pub fn calculate_put_chain_score_components(
     // Vol-tier safety boost.
     if vol_safety_boost > 0.0 {
         if let Some(vol) = realized_vol {
-            let tier = if vol >= 0.38 {
+            let tier = if vol >= crate::constants::VOL_TIER_HIGH {
                 1.0
-            } else if vol >= 0.28 {
+            } else if vol >= crate::constants::VOL_TIER_MID {
                 0.5
             } else {
                 0.0

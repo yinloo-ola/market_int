@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "thresholds": {
+    "vol_tier_high": 0.38,
+    "vol_tier_mid": 0.28,
+    "momentum_high": 0.8,
+    "momentum_extended": 0.9
+  },
+  "run": {
+    "started_at_utc": "2026-08-27T13:02:11Z",
+    "finished_at_utc": "2026-08-27T13:07:46Z",
+    "duration_secs": 335,
+    "market_date_ny": "2026-08-27",
+    "triggered_by": "web",
+    "symbols_requested": 232,
+    "symbols_succeeded": 229
+  },
+  "stages": [
+    {
+      "name": "quotes",
+      "status": "partial",
+      "duration_secs": 92,
+      "error": "3 symbols failed: XYZ, ABC, QQQ"
+    },
+    {
+      "name": "metrics",
+      "status": "ok",
+      "duration_secs": 3
+    },
+    {
+      "name": "chains_short",
+      "status": "ok",
+      "duration_secs": 118
+    },
+    {
+      "name": "chains_medium",
+      "status": "ok",
+      "duration_secs": 122
+    }
+  ],
+  "timeframes": {
+    "short": {
+      "expiration": "2026-09-02",
+      "row_count": 1842,
+      "symbols_with_chains": 171,
+      "rows": [
+        {
+          "underlying": "NVDA",
+          "sector": "Technology",
+          "strike": 175.0,
+          "underlying_price": 206.84,
+          "side": "put",
+          "bid": 2.05,
+          "mid": 2.1,
+          "ask": 2.15,
+          "bid_size": 10,
+          "ask_size": 10,
+          "expiration": "2026-09-04",
+          "volume": 352,
+          "open_interest": 1204,
+          "rate_of_return": 0.624,
+          "strike_from": 170.0,
+          "strike_to": 192.5,
+          "sharpe_ratio": 1.83,
+          "strike_percentile": 0.412,
+          "score": 0.5941234567890123,
+          "score_components": {
+            "sharpe": 0.11882469135780248,
+            "safety": 0.23764938271560496,
+            "return": 0.23764938271560496
+          },
+          "price_percentile": 0.81,
+          "earnings_before_expiry": {
+            "report_date": "2026-08-31",
+            "report_time": "after_close",
+            "expected_eps": 1.24
+          },
+          "trend_short": 1.036,
+          "trend_long": 1.089,
+          "realized_vol": 0.452,
+          "implied_vol": 0.481,
+          "delta": -0.28,
+          "iv_rv_ratio": 1.0642
+        },
+        {
+          "underlying": "AAPL",
+          "sector": "Technology",
+          "strike": 210.0,
+          "underlying_price": 252.0,
+          "side": "put",
+          "bid": 4.2,
+          "mid": 4.41,
+          "ask": 4.62,
+          "bid_size": 10,
+          "ask_size": 10,
+          "expiration": "2026-09-04",
+          "volume": 100,
+          "open_interest": 500,
+          "rate_of_return": 0.35,
+          "strike_from": 189.0,
+          "strike_to": 201.6,
+          "sharpe_ratio": 1.5,
+          "strike_percentile": 0.4,
+          "score": 0.512,
+          "score_components": {
+            "sharpe": 0.1024,
+            "safety": 0.2048,
+            "return": 0.2048
+          },
+          "price_percentile": 0.81,
+          "trend_short": 1.036,
+          "trend_long": 1.089,
+          "realized_vol": 0.452,
+          "implied_vol": 0.481,
+          "delta": -0.28,
+          "iv_rv_ratio": 1.06
+        }
+      ],
+      "top_picks": [
+        {
+          "rank": 1,
+          "underlying": "NVDA",
+          "sector": "Technology",
+          "strike": 175.0,
+          "bid": 2.05,
+          "ask": 2.15,
+          "rate_of_return": 0.624,
+          "score": 0.5941234567890123,
+          "sharpe": 1.83,
+          "price_percentile": 0.81,
+          "earnings": {
+            "report_date": "2026-08-31",
+            "report_time": "after_close",
+            "expected_eps": 1.24
+          },
+          "trend_short": 1.036,
+          "trend_long": 1.089,
+          "realized_vol": 0.452
+        }
+      ]
+    },
+    "medium": {
+      "expiration": "2026-09-16",
+      "row_count": 913,
+      "symbols_with_chains": 198,
+      "rows": [
+        {
+          "underlying": "XOM",
+          "sector": "Energy",
+          "strike": 48.0,
+          "underlying_price": 51.23,
+          "side": "put",
+          "bid": 0.45,
+          "mid": 0.525,
+          "ask": 0.6,
+          "bid_size": 44,
+          "ask_size": 19,
+          "expiration": "2026-09-16",
+          "volume": 1204,
+          "open_interest": 8832,
+          "rate_of_return": 0.1777,
+          "strike_from": 44.0,
+          "strike_to": 51.0,
+          "sharpe_ratio": 0.0,
+          "strike_percentile": null,
+          "score": null,
+          "score_components": null,
+          "price_percentile": null,
+          "trend_short": null,
+          "trend_long": null,
+          "realized_vol": null,
+          "implied_vol": null,
+          "delta": null,
+          "iv_rv_ratio": null
+        }
+      ],
+      "top_picks": []
+    }
+  }
+}
