@@ -201,6 +201,30 @@ pub fn calculate_put_score(
     _regime: &crate::regime::MarketRegime,
     params: ScoreParams,
 ) -> Option<f64> {
+    calculate_put_score_parts(sharpe, safety, rate_of_return, trend_short, _regime, params)
+        .map(|(total, _)| total)
+}
+
+/// The weighted 20/40/40 parts behind a total score, plus the total itself.
+/// Produced inside the ONE scoring implementation so the breakdown can never
+/// drift from it (spec §2.5). The trend term adds to the total when its
+/// weight is non-zero; under production defaults it is zero, so
+/// `sharpe + safety + return == total` holds exactly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScoreComponents {
+    pub sharpe: f64,
+    pub safety: f64,
+    pub return_part: f64,
+}
+
+fn calculate_put_score_parts(
+    sharpe: f64,
+    safety: f64,
+    rate_of_return: f64,
+    trend_short: f64,
+    _regime: &crate::regime::MarketRegime,
+    params: ScoreParams,
+) -> Option<(f64, ScoreComponents)> {
     // Pre-filters: keep the min-return floor and the positive-Sharpe requirement.
     // The hard rate-of-return cap and the strike_percentile cap were removed —
     // danger is now expressed via the max_drop band position (`safety`).
@@ -225,12 +249,18 @@ pub fn calculate_put_score(
     let trend_norm = ((trend_short - params.trend_score_floor) / params.trend_score_band)
         .clamp(0.0, 1.0);
 
-    Some(
-        params.weight_sharpe * sharpe_norm
-            + params.weight_safety * safety_norm
-            + params.weight_return * return_norm
-            + params.weight_trend * trend_norm,
-    )
+    let components = ScoreComponents {
+        sharpe: params.weight_sharpe * sharpe_norm,
+        safety: params.weight_safety * safety_norm,
+        return_part: params.weight_return * return_norm,
+    };
+
+    let total = params.weight_sharpe * sharpe_norm
+        + params.weight_safety * safety_norm
+        + params.weight_return * return_norm
+        + params.weight_trend * trend_norm;
+
+    Some((total, components))
 }
 
 /// Returns true if the symbol's earnings `report_date` falls inside the option's
@@ -280,19 +310,47 @@ pub fn calculate_put_chain_score(
     trend_short: f64,
     regime: &crate::regime::MarketRegime,
     earnings_in_window: bool,
-    // Tiger put delta (negative). When available (`Some`), safety is derived
-    // from delta (`1 + delta`, clamped to [0,1]) instead of the historical
-    // max_drop band. `None` falls back to band position — this preserves
-    // backward compatibility for historical re-publishes that lack delta.
     delta: Option<f64>,
-    // Realized vol for the underlying (annualized). When provided and
-    // `vol_safety_boost > 0.0`, high-vol names get a safety boost so the
-    // picker favors richer picks from the capital-efficient tier without
-    // removing low-vol candidates from the pool.
     realized_vol: Option<f64>,
     vol_safety_boost: f64,
     params: ScoreParams,
 ) -> Option<f64> {
+    calculate_put_chain_score_components(
+        sharpe,
+        strike,
+        strike_from,
+        strike_to,
+        rate_of_return,
+        trend_short,
+        regime,
+        earnings_in_window,
+        delta,
+        realized_vol,
+        vol_safety_boost,
+        params,
+    )
+    .map(|(total, _)| total)
+}
+
+/// Chain-level scoring that also returns the weighted 20/40/40 parts. This is
+/// the ONLY implementation of the safety funnel + weighting; [`calculate_put_chain_score`]
+/// delegates to it, so the breakdown can never drift from the total (spec §2.5).
+#[allow(clippy::too_many_arguments)]
+pub fn calculate_put_chain_score_components(
+    sharpe: f64,
+    strike: f64,
+    strike_from: f64,
+    strike_to: f64,
+    rate_of_return: f64,
+    trend_short: f64,
+    regime: &crate::regime::MarketRegime,
+    earnings_in_window: bool,
+    delta: Option<f64>,
+    realized_vol: Option<f64>,
+    vol_safety_boost: f64,
+    params: ScoreParams,
+) -> Option<(f64, ScoreComponents)> {
+    // Earnings rule: strikes in the upper half of the band are excluded outright.
     if earnings_in_window {
         let midpoint = (strike_from + strike_to) / 2.0;
         if strike > midpoint {
@@ -300,24 +358,14 @@ pub fn calculate_put_chain_score(
         }
     }
     // Safety: real Tiger delta when available, max_drop band as fallback.
-    // The strike RANGE (strike_from/strike_to) is unchanged — only the
-    // intra-band safety metric changes. Delta more accurately reflects the
-    // market's forward breach estimate, especially when IV/RV is inflated
-    // (backtest at IV/RV=2.0: 92.5% ror, 1.8% assignment vs band's 61.9%,
-    // 2.4% — same strike range, different ranking).
-    let safety = delta
+    let mut safety = delta
         .map(|d| (1.0 + d).clamp(0.0, 1.0))
         .unwrap_or_else(|| calculate_max_drop_safety(strike, strike_from, strike_to));
-    let safety = if earnings_in_window {
-        safety * params.earnings_safety_multiplier
-    } else {
-        safety
-    };
-    // Vol-tier safety boost: high-vol names deliver higher rate_of_return at
-    // matched assignment rate. Boost safety for higher-vol names so the
-    // picker's ranking slots go to richer picks — without removing any
-    // candidates from the pool (unlike a hard vol filter).
-    let safety = if vol_safety_boost > 0.0 {
+    if earnings_in_window {
+        safety *= params.earnings_safety_multiplier;
+    }
+    // Vol-tier safety boost.
+    if vol_safety_boost > 0.0 {
         if let Some(vol) = realized_vol {
             let tier = if vol >= 0.38 {
                 1.0
@@ -326,17 +374,13 @@ pub fn calculate_put_chain_score(
             } else {
                 0.0
             };
-            (safety * (1.0 + vol_safety_boost * tier)).clamp(0.0, 1.0)
-        } else {
-            safety
+            safety = (safety * (1.0 + vol_safety_boost * tier)).clamp(0.0, 1.0);
         }
-    } else {
-        safety
-    };
-    calculate_put_score(sharpe, safety, rate_of_return, trend_short, regime, params)
+    }
+    calculate_put_score_parts(sharpe, safety, rate_of_return, trend_short, regime, params)
 }
 
-/// Returns a momentum flag based on price percentile.
+/// Returns a momentum flag based on price percentile./// Returns a momentum flag based on price percentile.
 pub fn momentum_flag(price_percentile: f64) -> &'static str {
     if price_percentile > constants::MOMENTUM_EXTENDED_THRESHOLD {
         "EXTENDED"
@@ -348,7 +392,7 @@ pub fn momentum_flag(price_percentile: f64) -> &'static str {
 }
 
 /// Represents the side of an option (call or put).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub enum OptionChainSide {
     Call,
     Put,
@@ -451,7 +495,63 @@ pub struct TopPick {
     pub realized_vol: Option<f64>,
 }
 
-pub fn option_chain_to_csv_vec(
+/// One scored chain row: the 27 CSV columns as typed values, exactly what the
+/// Telegram CSV serializes and the webapp result document mirrors (spec §4.2).
+/// Produced by the single scoring pass; nothing recomputes scores downstream.
+#[derive(Debug, Clone)]
+pub struct ScoredChainRow {
+    pub underlying: String,
+    pub sector: String,
+    pub strike: f64,
+    pub underlying_price: f64,
+    pub side: OptionChainSide,
+    pub bid: f64,
+    pub mid: f64,
+    pub ask: f64,
+    pub bid_size: u32,
+    pub ask_size: u32,
+    pub expiration: String,
+    pub volume: u32,
+    pub open_interest: u32,
+    pub rate_of_return: f64,
+    pub strike_from: f64,
+    pub strike_to: f64,
+    /// Symbol's Sharpe ratio, defaulted to `0.0` when missing (mirrors CSV).
+    pub sharpe_ratio: f64,
+    /// Strike position in the 20-day price range; `None` when no range exists.
+    pub strike_percentile: Option<f64>,
+    /// `None` for below-floor ror, non-positive Sharpe, earnings-window
+    /// upper-half strikes, or a non-finite band.
+    pub score: Option<f64>,
+    /// `None` exactly when [`ScoredChainRow::score`] is `None`.
+    pub score_components: Option<ScoreComponents>,
+    pub price_percentile: Option<f64>,
+    /// In-window report only; `report_time` already normalized.
+    pub earnings_before_expiry: Option<EarningsInfo>,
+    /// `None` when the trend map has no entry (CSV column blank). Scoring
+    /// consumed a `0.0` default independently of these display values.
+    pub trend_short: Option<f64>,
+    pub trend_long: Option<f64>,
+    pub realized_vol: Option<f64>,
+    pub implied_vol: Option<f64>,
+    pub delta: Option<f64>,
+    pub iv_rv_ratio: Option<f64>,
+}
+
+/// Normalizes Tiger's report-time labels to the stable English pair used by
+/// the result document; unrecognized values pass through untouched.
+pub fn normalized_report_time(report_time: &str) -> &str {
+    match report_time {
+        "盘前" | "BMO" | "before_open" => "before_open",
+        "盘后" | "AMC" | "after_close" => "after_close",
+        other => other,
+    }
+}
+
+/// Scores every chain through the one scoring path, returning structured rows
+/// (the CSV and the result document both serialize FROM these — spec §4.2).
+#[allow(clippy::too_many_arguments)]
+pub fn scored_chain_rows(
     all_chains: &[OptionStrikeCandle],
     sharpe_ratios: &HashMap<String, f64>,
     price_ranges: &HashMap<String, PutPriceRange>,
@@ -461,11 +561,104 @@ pub fn option_chain_to_csv_vec(
     realized_vols: &HashMap<String, f64>,
     sectors: &HashMap<String, String>,
     regime: &crate::regime::MarketRegime,
-) -> Result<(Vec<u8>, Vec<TopPick>)> {
+) -> Vec<ScoredChainRow> {
+    // Today for the earnings-in-window check. Use New York time to match the
+    // earnings-calendar fetch (fetch_earnings_map queries in NY); `Local` is UTC
+    // on the Cloud Run deployment and would drift ±1 day at the boundary. [T-003]
+    let today = chrono::Local::now().with_timezone(&New_York).date_naive();
+    // Per-symbol flag computed once per symbol (uniform expiration per retrieval). [O-001]
+    let mut in_window_cache: HashMap<String, bool> = HashMap::new();
+    for chain in all_chains {
+        in_window_cache
+            .entry(chain.underlying.clone())
+            .or_insert_with(|| match earnings_map.get(&chain.underlying) {
+                Some(info) => earnings_in_window(&info.report_date, &chain.expiration, today),
+                None => false,
+            });
+    }
+    let in_earnings_window =
+        |sym: &str| in_window_cache.get(sym).copied().unwrap_or(false);
+
+    all_chains
+        .iter()
+        .map(|chain| {
+            let sharpe_ratio = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
+            let trend_data_entry = trend_data.get(&chain.underlying);
+            let trend_scoring_short = trend_data_entry.map(|(s, _)| *s).unwrap_or(0.0);
+            let (score, score_components) =
+                match calculate_put_chain_score_components(
+                    sharpe_ratio,
+                    chain.strike,
+                    chain.strike_from,
+                    chain.strike_to,
+                    chain.rate_of_return,
+                    trend_scoring_short,
+                    regime,
+                    in_earnings_window(&chain.underlying),
+                    chain.delta,
+                    realized_vols.get(&chain.underlying).copied(),
+                    constants::VOL_SAFETY_BOOST,
+                    ScoreParams::default(),
+                ) {
+                    Some((total, parts)) => (Some(total), Some(parts)),
+                    None => (None, None),
+                };
+            let strike_percentile = price_ranges.get(&chain.underlying).map(|range| {
+                calculate_strike_percentile(chain.strike, range.min, range.max)
+            });
+            let earnings_before_expiry = match earnings_map.get(&chain.underlying) {
+                Some(info) if in_earnings_window(&chain.underlying) => Some(EarningsInfo {
+                    report_time: normalized_report_time(&info.report_time).to_string(),
+                    ..info.clone()
+                }),
+                _ => None,
+            };
+
+            ScoredChainRow {
+                underlying: chain.underlying.clone(),
+                sector: sector_of(sectors, &chain.underlying).to_string(),
+                strike: chain.strike,
+                underlying_price: chain.underlying_price,
+                side: chain.side,
+                bid: chain.bid,
+                mid: chain.mid,
+                ask: chain.ask,
+                bid_size: chain.bid_size,
+                ask_size: chain.ask_size,
+                expiration: chain.expiration.clone(),
+                volume: chain.volume,
+                open_interest: chain.open_interest,
+                rate_of_return: chain.rate_of_return,
+                strike_from: chain.strike_from,
+                strike_to: chain.strike_to,
+                sharpe_ratio,
+                strike_percentile,
+                score,
+                score_components,
+                price_percentile: price_percentiles.get(&chain.underlying).copied(),
+                earnings_before_expiry,
+                trend_short: trend_data_entry.map(|(s, _)| *s),
+                trend_long: trend_data_entry.map(|(_, l)| *l),
+                realized_vol: realized_vols.get(&chain.underlying).copied(),
+                implied_vol: chain.implied_vol,
+                delta: chain.delta,
+                iv_rv_ratio: chain.implied_vol.and_then(|iv| {
+                    realized_vols
+                        .get(&chain.underlying)
+                        .filter(|&&rv| rv > 0.0)
+                        .map(|&rv| iv / rv)
+                }),
+            }
+        })
+        .collect()
+}
+
+/// Serializes scored rows into the byte-identical Telegram CSV attachment
+/// format (all 27 columns, same formatting as the pre-refactor writer).
+pub fn csv_from_scored_rows(rows: &[ScoredChainRow]) -> Result<Vec<u8>> {
     let buf = BufWriter::new(Vec::new());
     let mut writer = Writer::from_writer(buf);
 
-    // Write header row
     writer
         .write_record([
             "underlying",
@@ -498,165 +691,71 @@ pub fn option_chain_to_csv_vec(
         ])
         .map_err(QuotesError::CsvError)?;
 
-    // Today for the earnings-in-window check. Use New York time to match the
-    // earnings-calendar fetch (fetch_earnings_map queries in NY); `Local` is UTC
-    // on the Cloud Run deployment and would drift ±1 day at the boundary. [T-003]
-    let today = chrono::Local::now().with_timezone(&New_York).date_naive();
-    // Earnings-in-window is a per-symbol flag (expiration is uniform across a
-    // single retrieval), so compute it once per symbol and reuse — avoids
-    // re-parsing the same date strings for every chain of a symbol. [O-001]
-    let mut earnings_in_window_cache: HashMap<String, bool> = HashMap::new();
-    for chain in all_chains {
-        earnings_in_window_cache
-            .entry(chain.underlying.clone())
-            .or_insert_with(|| match earnings_map.get(&chain.underlying) {
-                Some(info) => earnings_in_window(&info.report_date, &chain.expiration, today),
-                None => false,
-            });
-    }
-    let in_earnings_window = |sym: &str| earnings_in_window_cache.get(sym).copied().unwrap_or(false);
-
-    // Write the data rows.
-    for chain in all_chains {
-        let sharpe_ratio = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
-        let price_percentile = price_percentiles.get(&chain.underlying).copied();
-
-        // Band safety + the earnings rule live inside `calculate_put_chain_score`:
-        // it drops upper-half strikes and discounts `safety` when the symbol
-        // reports earnings inside [today, expiry]. NOTE (T-002): scoring is no
-        // longer gated on a 20-day price_range, so every chain is eligible for
-        // top-3 even when its 20-day range is missing (then `strike_percentile`
-        // below is blank) — band safety does not need the 20-day range.
-        // `trend_short` (price/EMA20) is surfaced here too: it is an independent
-        // breach predictor that the band does not capture (calibration-validated
-        // 2026-07), so strong-uptrend picks can win slots at shallower strikes.
-        let trend_short = trend_data.get(&chain.underlying).map(|(s, _)| *s).unwrap_or(0.0);
-        let score = calculate_put_chain_score(
-            sharpe_ratio,
-            chain.strike,
-            chain.strike_from,
-            chain.strike_to,
-            chain.rate_of_return,
-            trend_short,
-            regime,
-            in_earnings_window(&chain.underlying),
-            chain.delta,
-            realized_vols.get(&chain.underlying).copied(),
-            constants::VOL_SAFETY_BOOST,
-            ScoreParams::default(),
-        );
-        let score_str = score.map(|s| format!("{:.3}", s)).unwrap_or_default();
-        let strike_percentile_str = match price_ranges.get(&chain.underlying) {
-            Some(range) => format!(
-                "{:.3}",
-                calculate_strike_percentile(chain.strike, range.min, range.max)
-            ),
-            None => String::new(),
-        };
-
-        let momentum = price_percentile
+    for row in rows {
+        let score_str = row.score.map(|s| format!("{:.3}", s)).unwrap_or_default();
+        let strike_percentile_str = row
+            .strike_percentile
+            .map(|p| format!("{:.3}", p))
+            .unwrap_or_default();
+        let momentum = row
+            .price_percentile
             .map(|p| format!("{:.0}%", p * 100.0))
             .unwrap_or_default();
-
-        // The earnings calendar map may carry a forward-looking entry whose
-        // report_date falls AFTER this option's expiry (the fetch window is
-        // [today, today+period+7], wider than any single chain's lifetime).
-        // Only in-window earnings are material, so gate the annotation on
-        // `in_earnings_window` — otherwise the column mislabels post-expiry
-        // reports as "before expiry" (and the TopPick would feed a spurious
-        // Telegram ⚠️ caption). [T-004]
-        let earnings_str = match earnings_map.get(&chain.underlying) {
-            Some(info) if in_earnings_window(&chain.underlying) => {
-                let time_label = match info.report_time.as_str() {
-                    "盘前" | "BMO" | "before_open" => "before_open",
-                    "盘后" | "AMC" | "after_close" => "after_close",
-                    _ => info.report_time.as_str(),
-                };
-                format!("{} ({})", info.report_date, time_label)
-            }
-            _ => String::new(),
-        };
-
-        let (trend_short_str, trend_long_str) = match trend_data.get(&chain.underlying) {
-            Some((short, long)) => (format!("{:.3}", short), format!("{:.3}", long)),
-            None => (String::new(), String::new()),
-        };
-
-        let realized_vol_str = match realized_vols.get(&chain.underlying) {
-            Some(v) => format!("{:.3}", v),
+        let earnings_str = match &row.earnings_before_expiry {
+            Some(info) => format!("{} ({})", info.report_date, info.report_time),
             None => String::new(),
         };
+        let (trend_short_str, trend_long_str) = match (&row.trend_short, &row.trend_long) {
+            (Some(s), Some(l)) => (format!("{:.3}", s), format!("{:.3}", l)),
+            _ => (String::new(), String::new()),
+        };
+        let realized_vol_str = row
+            .realized_vol
+            .map(|v| format!("{:.3}", v))
+            .unwrap_or_default();
 
-        let sector_str = sector_of(sectors, &chain.underlying).to_string();
-
-        writer
-            .write_record([
-                &chain.underlying,
-                &sector_str,
-                &chain.strike.to_string(),
-                &chain.underlying_price.to_string(),
-                &format!("{:?}", chain.side),
-                &chain.bid.to_string(),
-                &chain.mid.to_string(),
-                &chain.ask.to_string(),
-                &chain.bid_size.to_string(),
-                &chain.ask_size.to_string(),
-                &chain.expiration,
-                &chain.volume.to_string(),
-                &chain.open_interest.to_string(),
-                &chain.rate_of_return.to_string(),
-                &chain.strike_from.to_string(),
-                &chain.strike_to.to_string(),
-                &format!("{:.3}", sharpe_ratio),
-                &strike_percentile_str,
-                &score_str,
-                &momentum,
-                &earnings_str,
-                &trend_short_str,
-                &trend_long_str,
-                &realized_vol_str,
-                &chain.implied_vol.map(|v| format!("{:.3}", v)).unwrap_or_default(),
-                &chain.delta.map(|v| format!("{:.3}", v)).unwrap_or_default(),
-                &chain
-                    .implied_vol
-                    .and_then(|iv| {
-                        realized_vols
-                            .get(&chain.underlying)
-                            .filter(|&&rv| rv > 0.0)
-                            .map(|&rv| format!("{:.2}", iv / rv))
-                    })
-                    .unwrap_or_default(),
-            ])
-            .map_err(QuotesError::CsvError)?;
+        let record = [
+            row.underlying.as_str(),
+            row.sector.as_str(),
+            &row.strike.to_string(),
+            &row.underlying_price.to_string(),
+            &format!("{:?}", row.side),
+            &row.bid.to_string(),
+            &row.mid.to_string(),
+            &row.ask.to_string(),
+            &row.bid_size.to_string(),
+            &row.ask_size.to_string(),
+            row.expiration.as_str(),
+            &row.volume.to_string(),
+            &row.open_interest.to_string(),
+            &row.rate_of_return.to_string(),
+            &row.strike_from.to_string(),
+            &row.strike_to.to_string(),
+            &format!("{:.3}", row.sharpe_ratio),
+            &strike_percentile_str,
+            &score_str,
+            &momentum,
+            &earnings_str,
+            &trend_short_str,
+            &trend_long_str,
+            &realized_vol_str,
+            &row.implied_vol.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+            &row.delta.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+            &row.iv_rv_ratio.map(|v| format!("{:.2}", v)).unwrap_or_default(),
+        ];
+        writer.write_record(&record).map_err(QuotesError::CsvError)?;
     }
 
-    let bytes = writer.into_inner().unwrap().into_inner().unwrap();
+    Ok(writer.into_inner().unwrap().into_inner().unwrap())
+}
 
-    // Select top N scored chains for TopPicks (N = TOP_PICKS_COUNT). Raised
-    // from 3 to 4 in 2026-07 — see constants::TOP_PICKS_COUNT doc for the
-    // backtest evidence (picks-4 preset: +23% premium, assignment flat).
-    let mut scored: Vec<(usize, f64)> = all_chains
+/// Selects top picks from already-scored rows (score-descending, per-symbol
+/// and per-sector dedupe) — pure selection over the single scoring pass.
+pub fn top_picks_from_rows(rows: &[ScoredChainRow]) -> Vec<TopPick> {
+    let mut scored: Vec<(usize, f64)> = rows
         .iter()
         .enumerate()
-        .filter_map(|(i, chain)| {
-            let sharpe = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
-            let trend_short = trend_data.get(&chain.underlying).map(|(s, _)| *s).unwrap_or(0.0);
-            let score = calculate_put_chain_score(
-                sharpe,
-                chain.strike,
-                chain.strike_from,
-                chain.strike_to,
-                chain.rate_of_return,
-                trend_short,
-                regime,
-                in_earnings_window(&chain.underlying),
-                chain.delta,
-                realized_vols.get(&chain.underlying).copied(),
-                constants::VOL_SAFETY_BOOST,
-                ScoreParams::default(),
-            )?;
-            Some((i, score))
-        })
+        .filter_map(|(i, row)| row.score.map(|s| (i, s)))
         .collect();
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
 
@@ -665,54 +764,71 @@ pub fn option_chain_to_csv_vec(
     let mut top_picks: Vec<TopPick> = Vec::new();
     let mut rank = 0;
 
-    for (idx, score) in &scored {
+    for (idx, _) in &scored {
         if rank >= constants::TOP_PICKS_COUNT {
             break;
         }
-        let chain = &all_chains[*idx];
-        if seen.contains(&chain.underlying) {
+        let row = &rows[*idx];
+        if seen.contains(&row.underlying) {
             continue;
         }
-        let sector = sector_of(sectors, &chain.underlying).to_string();
-        if sector != UNKNOWN_SECTOR && seen_sectors.contains(&sector) {
+        if row.sector != UNKNOWN_SECTOR && seen_sectors.contains(&row.sector) {
             continue;
         }
 
-        let sharpe = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
-        let pp = price_percentiles.get(&chain.underlying).copied();
-        let ts = trend_data.get(&chain.underlying).map(|(s, _)| *s);
-        let tl = trend_data.get(&chain.underlying).map(|(_, l)| *l);
-        let rv = realized_vols.get(&chain.underlying).copied();
-
-        seen.insert(chain.underlying.clone());
-        if sector != UNKNOWN_SECTOR {
-            seen_sectors.insert(sector.clone());
+        seen.insert(row.underlying.clone());
+        if row.sector != UNKNOWN_SECTOR {
+            seen_sectors.insert(row.sector.clone());
         }
-
         rank += 1;
+
         top_picks.push(TopPick {
             rank,
-            underlying: chain.underlying.clone(),
-            sector,
-            strike: chain.strike,
-            bid: chain.bid,
-            ask: chain.ask,
-            rate_of_return: chain.rate_of_return,
-            score: *score,
-            sharpe,
-            price_percentile: pp,
-            earnings: if in_earnings_window(&chain.underlying) {
-                earnings_map.get(&chain.underlying).cloned()
-            } else {
-                None
-            },
-            trend_short: ts,
-            trend_long: tl,
-            realized_vol: rv,
+            underlying: row.underlying.clone(),
+            sector: row.sector.clone(),
+            strike: row.strike,
+            bid: row.bid,
+            ask: row.ask,
+            rate_of_return: row.rate_of_return,
+            score: *row.score.as_ref().unwrap(),
+            sharpe: row.sharpe_ratio,
+            price_percentile: row.price_percentile,
+            earnings: row.earnings_before_expiry.clone(),
+            trend_short: row.trend_short,
+            trend_long: row.trend_long,
+            realized_vol: row.realized_vol,
         });
     }
 
-    Ok((bytes, top_picks))
+    top_picks
+}
+
+pub fn option_chain_to_csv_vec(
+    all_chains: &[OptionStrikeCandle],
+    sharpe_ratios: &HashMap<String, f64>,
+    price_ranges: &HashMap<String, PutPriceRange>,
+    price_percentiles: &HashMap<String, f64>,
+    earnings_map: &HashMap<String, EarningsInfo>,
+    trend_data: &HashMap<String, (f64, f64)>,
+    realized_vols: &HashMap<String, f64>,
+    sectors: &HashMap<String, String>,
+    regime: &crate::regime::MarketRegime,
+) -> Result<(Vec<u8>, Vec<TopPick>)> {
+    // One scoring pass feeds both products (spec §4/t14): the CSV bytes are
+    // serialized from the same rows the result document will mirror.
+    let rows = scored_chain_rows(
+        all_chains,
+        sharpe_ratios,
+        price_ranges,
+        price_percentiles,
+        earnings_map,
+        trend_data,
+        realized_vols,
+        sectors,
+        regime,
+    );
+    let bytes = csv_from_scored_rows(&rows)?;
+    Ok((bytes, top_picks_from_rows(&rows)))
 }
 
 pub type Result<T> = std::result::Result<T, QuotesError>;

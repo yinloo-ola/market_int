@@ -15,6 +15,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 use crate::{
@@ -123,6 +124,8 @@ pub struct StageReport {
     /// For `Partial`: `"N symbol(s) failed: …"`; for `Failed`: either that
     /// same text (no rows produced at all) or the underlying error display.
     pub error: Option<String>,
+    /// Wall-clock duration rounded down to whole seconds (result document).
+    pub duration_secs: u64,
 }
 
 /// Quotes-stage coverage for the whole run (spec §2.4c's
@@ -174,11 +177,14 @@ pub struct PerformAllOptions {
 }
 
 /// One timeframe's scored output — the CSV is byte-identical to the Telegram
-/// attachment (same `option_chain_to_csv_vec` call).
+/// attachment and the rows are the same scoring pass's structured output.
 pub struct ScoredTimeframe {
     /// 5 (Short) or 20 (Medium).
     pub period: usize,
     pub csv: Vec<u8>,
+    /// Structured mirror of every CSV row (spec §4.2 provenance) — what the
+    /// result document serializes. Empty when a publish hook consumed the run.
+    pub rows: Vec<model::ScoredChainRow>,
     pub top_picks: Vec<model::TopPick>,
     /// Exact per-timeframe coverage (spec §2.4c), mirrored from the retrieval.
     pub symbols_with_chains: usize,
@@ -186,6 +192,10 @@ pub struct ScoredTimeframe {
 }
 
 pub struct PerformAllOutcome {
+    /// Run clock: RFC 3339 serialization happens in the result document;
+    /// `finished_at_utc` is the cache anchor (spec §4.3).
+    pub started_at: DateTime<Utc>,
+    pub finished_at: DateTime<Utc>,
     /// Execution order; always populated up to the fatal point.
     pub stages: Vec<StageReport>,
     /// `None` when that stage failed or a publish hook consumed the output.
@@ -235,7 +245,9 @@ async fn publish_or_score(
             hook.publish(ctx).await.map(|_| None)
         }
         None => {
-            let (csv, top_picks) = model::option_chain_to_csv_vec(
+            // One scoring pass feeds both products; the CSV is serialized
+            // from the same rows the result document will mirror.
+            let rows = model::scored_chain_rows(
                 &retrieved.all_chains,
                 &retrieved.sharpe_ratios,
                 &retrieved.price_ranges,
@@ -245,10 +257,13 @@ async fn publish_or_score(
                 &retrieved.realized_vols,
                 sectors_map,
                 regime,
-            )?;
+            );
+            let csv = model::csv_from_scored_rows(&rows)?;
+            let top_picks = model::top_picks_from_rows(&rows);
             Ok(Some(ScoredTimeframe {
                 period: retrieved.period,
                 csv,
+                rows,
                 top_picks,
                 symbols_with_chains: retrieved.symbols_with_chains,
                 row_count: retrieved.row_count,
@@ -279,12 +294,14 @@ fn resolve_chain_status(retrieved: &RetrievedData) -> (StageStatus, Option<Strin
 /// Records a finished stage: logs non-ok results at debug level (the caller
 /// already logs with historical wording), emits `StageFinished`, pushes the
 /// report.
+#[allow(clippy::too_many_arguments)]
 fn finish_stage(
     progress: &ProgressReporter,
     stages: &mut Vec<StageReport>,
     stage: Stage,
     status: StageStatus,
     error: Option<String>,
+    duration_secs: u64,
 ) {
     if status != StageStatus::Ok {
         if let Some(err) = &error {
@@ -304,6 +321,7 @@ fn finish_stage(
         stage,
         status,
         error,
+        duration_secs,
     });
 }
 
@@ -329,6 +347,8 @@ async fn run_chains_stage(
     let day_label = stage.day_label();
 
     progress.emit(PipelineEvent::StageStarted(stage));
+    let stage_started = std::time::Instant::now();
+    let elapsed = || stage_started.elapsed().as_secs();
     let retrieved = match option::retrieve_option_chains(
         symbols_file_path,
         &model::OptionChainSide::Put,
@@ -342,7 +362,7 @@ async fn run_chains_stage(
         Ok(retrieved) => retrieved,
         Err(err) => {
             log::error!("Error pulling {} option chains: {}", day_label, err);
-            finish_stage(progress, stages, stage, StageStatus::Failed, Some(err.to_string()));
+            finish_stage(progress, stages, stage, StageStatus::Failed, Some(err.to_string()), elapsed());
             return None;
         }
     };
@@ -367,12 +387,12 @@ async fn run_chains_stage(
         Err(err) => {
             // Historical wording covers scoring/publish failures too.
             log::error!("Error pulling {} option chains: {}", day_label, err);
-            finish_stage(progress, stages, stage, StageStatus::Failed, Some(err.to_string()));
+            finish_stage(progress, stages, stage, StageStatus::Failed, Some(err.to_string()), elapsed());
             return None;
         }
     };
 
-    finish_stage(progress, stages, stage, status, error);
+    finish_stage(progress, stages, stage, status, error, elapsed());
     scored_result
 }
 
@@ -392,10 +412,12 @@ async fn run_pipeline(
     let hook = opts.publish;
     let hook_ref = hook.as_ref();
     let mut stages: Vec<StageReport> = Vec::new();
+    let started_at = Utc::now();
 
     // Quotes stage — barrel on Err onto the stale DB, exactly as the arm did.
     let mut coverage = RunCoverage::default();
     progress.emit(PipelineEvent::StageStarted(Stage::Quotes));
+    let quotes_started = std::time::Instant::now();
     let (quotes_status, quotes_error) =
         match crate::quotes::pull_and_save_with(symbols_file_path, conn, factory, &progress, &mut coverage)
             .await
@@ -415,10 +437,12 @@ async fn run_pipeline(
         Stage::Quotes,
         quotes_status,
         quotes_error,
+        quotes_started.elapsed().as_secs(),
     );
 
     // Metrics stage — fast pure-DB math, stage events only.
     progress.emit(PipelineEvent::StageStarted(Stage::Metrics));
+    let metrics_started = std::time::Instant::now();
     let (metrics_status, metrics_error) = match crate::metrics::run_all(symbols_file_path, conn) {
         Ok(()) => {
             log::info!("Successfully completed metric calculation pipeline");
@@ -435,6 +459,7 @@ async fn run_pipeline(
         Stage::Metrics,
         metrics_status,
         metrics_error,
+        metrics_started.elapsed().as_secs(),
     );
 
     // Requester init — the single fatal step: outer Err reserved for this alone.
@@ -480,6 +505,8 @@ async fn run_pipeline(
     .await;
 
     Ok(PerformAllOutcome {
+        started_at,
+        finished_at: Utc::now(),
         stages,
         short,
         medium,
