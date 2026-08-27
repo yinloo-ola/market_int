@@ -59,6 +59,12 @@ pub const EARNINGS_SAFETY_MULTIPLIER: f64 = 0.5;
 // ── Telegram publication ──────────────────────────────────────
 pub const TOP_PICKS_COUNT: usize = 3;
 
+// ── Webapp result cache (ticket 05) ───────────────────────────
+/// How long a completed run's result counts as fresh. Anchored at run
+/// COMPLETION (`run.finished_at_utc` in the result file), not run start.
+/// Strict `<`: at exactly this age the result is expired (spec §5).
+pub const WEBAPP_CACHE_SECS: u64 = 600;
+
 // ── Vol-tier annotation (D2) ──────────────────────────────────
 /// Backtest-only threshold for the `vol-high-only` preset.
 /// Production does NOT filter — it annotates each pick with a vol tier instead.

@@ -1,0 +1,80 @@
+/* Tracer-bullet styling only — the visual language (§6.2 table) lands with
+   ticket 16's full Analyst Table. Light theme + hairline borders to match. */
+
+:root {
+  --page: #f6f7f9;
+  --panel: #ffffff;
+  --border: #dde3ea;
+  --accent: #0d5cd7;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: #1c2733;
+  font: 13px/1.45 -apple-system, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+}
+
+.shell {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+header h1 {
+  font-size: 15px;
+  margin: 0 0 4px;
+}
+
+.cache-line {
+  color: #51606f;
+  margin-bottom: 12px;
+}
+
+.pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  margin-left: 6px;
+}
+
+.pill.fresh { border-color: #137a3a; color: #137a3a; }
+.pill.stale { border-color: #a06b00; color: #a06b00; }
+.pill.none  { color: #51606f; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  font-size: 12.5px;
+}
+
+th, td {
+  text-align: left;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+th { position: sticky; top: 0; background: var(--panel); }
+
+td.num, th.num { text-align: right; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+
+tr.pick td { background: #fdf6e0; }
+tr.pick td:first-child .star { color: #c08a00; font-weight: 700; }
+
+.null-mark { color: #b3555f; opacity: 0.85; }
+
+.error-banner {
+  border: 1px solid #e4b7b7;
+  background: #fdf0f0;
+  color: #a02a1a;
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
