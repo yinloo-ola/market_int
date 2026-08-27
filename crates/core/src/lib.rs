@@ -51,6 +51,8 @@ pub mod store {
     /// Trend data storage.
     pub mod trend;
 }
+// Shared perform-all pipeline (CLI + webapp)
+pub mod pipeline;
 // Module storing defaults
 pub mod constants;
 // Black-Scholes Greeks shared by backtest and production scoring.

@@ -14,7 +14,7 @@ use market_int_core::model::OptionChainSide;
 use market_int_core::option::ExpiryTimeframe;
 use market_int_core::tiger::api_caller::Requester;
 use market_int_core::{
-    constants, metrics, model, quotes, sectors, store, symbols, tiger,
+    constants, model, quotes, sectors, store, symbols, tiger,
 };
 
 // Helper function to calculate the target expiration date (next Friday + 7 days)
@@ -231,55 +231,17 @@ async fn main() {
         }
 
         Commands::PerformAll { symbols_file_path } => {
-            match quotes::pull_and_save(&symbols_file_path, &mut conn).await {
-                Ok(_) => log::info!("Successfully pulled and saved quotes"),
-                Err(err) => log::error!("Error pulling and saving quotes: {}", err),
-            }
-            match metrics::run_all(&symbols_file_path, &mut conn) {
-                Ok(_) => log::info!("Successfully completed metric calculation pipeline"),
-                Err(err) => log::error!("Error running metric pipeline: {}", err),
-            }
-            // Initialize Tiger API requester once to cache option expiration data
-            let mut requester = match tiger::api_caller::Requester::new().await {
-                Some(r) => r,
-                None => {
-                    log::error!("Failed to initialize Tiger API requester");
-                    return;
-                }
+            // One orchestration path (market_int_core::pipeline); Telegram
+            // publishing is injected as a hook so the webapp can run none.
+            let opts = market_int_core::pipeline::PerformAllOptions {
+                publish: Some(publish::telegram_publish_hook()),
             };
-            // Set standard bull regime directly (bypasses dynamic SPY checks to save time/API calls)
-            let regime = market_int_core::regime::MarketRegime::from_spy_trend(1.05);
-            let sectors = sectors::load_sectors(&symbols_file_path).unwrap_or_default();
-            match publish::retrieve_option_chains_with_expiry(
-                &symbols_file_path,
-                &model::OptionChainSide::Put,
-                &mut conn,
-                ExpiryTimeframe::Short,
-                &mut requester,
-                &regime,
-                &sectors,
-            )
-            .await
-            {
-                Ok(_) => log::info!("Successfully pulled and saved 5-day option chains"),
-                Err(err) => log::error!("Error pulling 5-day option chains: {}", err),
-            }
-
-            // Pull option chains with 20-day expiry (medium timeframe) - reuse the same connection
-            match publish::retrieve_option_chains_with_expiry(
-                &symbols_file_path,
-                &model::OptionChainSide::Put,
-                &mut conn,
-                ExpiryTimeframe::Medium,
-                &mut requester,
-                &regime,
-                &sectors,
-            )
-            .await
-            {
-                Ok(_) => log::info!("Successfully pulled and saved 20-day option chains"),
-                Err(err) => log::error!("Error pulling 20-day option chains: {}", err),
-            }
+            // Everything is reported inside the pipeline — stage failures keep
+            // their historical wording there, and its sole outer Err
+            // (requester-init) is logged there too. The arm stays silent,
+            // matching the old behavior exactly.
+            let _ = market_int_core::pipeline::perform_all(&mut conn, &symbols_file_path, opts)
+                .await;
         }
 
         Commands::PublishOptionChain { symbols_file_path } => {

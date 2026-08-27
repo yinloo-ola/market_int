@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::env;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use chrono::Local;
 use chrono_tz::Asia::Singapore;
@@ -10,6 +13,7 @@ use telegram_bot_api::{
 };
 
 use market_int_core::{
+    pipeline::{PublishContext, PublishHook},
     model::{self, QuotesError},
     option::{self, ExpiryTimeframe},
     regime::MarketRegime,
@@ -233,7 +237,10 @@ pub async fn publish_to_telegram(
 
     let caption = format_telegram_caption(&top_picks, period, regime);
 
-    let resp = bot
+    // Convert each API response to our error type immediately: the SDK returns
+    // Box<dyn Error> (not Send), and the pipeline hook requires a Send future,
+    // so the raw box must not live across any subsequent await.
+    let doc_result: model::Result<()> = match bot
         .send_document(telegram_bot_api::methods::SendDocument {
             chat_id: ChatId::IntType(chat_id),
             document: InputFile::FileBytes(filename, csv),
@@ -248,18 +255,21 @@ pub async fn publish_to_telegram(
             allow_sending_without_reply: None,
             reply_markup: None,
         })
-        .await;
-
-    match resp {
-        Ok(_) => log::info!("telegram send doc ok"),
+        .await
+    {
+        Ok(_) => {
+            log::info!("telegram send doc ok");
+            Ok(())
+        }
         Err(err) => {
             log::error!("telegram send doc failed: {:?}", err);
-            return Err(model::QuotesError::TelegramError(err.to_string()));
+            Err(model::QuotesError::TelegramError(err.to_string()))
         }
-    }
+    };
+    doc_result?;
 
     // Send caption as a separate message (multipart upload escapes newlines in caption)
-    let msg_resp = bot
+    let msg_result: model::Result<()> = match bot
         .send_message(telegram_bot_api::methods::SendMessage {
             chat_id: ChatId::IntType(chat_id),
             text: caption,
@@ -272,17 +282,54 @@ pub async fn publish_to_telegram(
             allow_sending_without_reply: None,
             reply_markup: None,
         })
-        .await;
-
-    match msg_resp {
-        Ok(_) => log::info!("telegram send caption ok"),
+        .await
+    {
+        Ok(_) => {
+            log::info!("telegram send caption ok");
+            Ok(())
+        }
         Err(err) => {
             log::error!("telegram send caption failed: {:?}", err);
-            return Err(model::QuotesError::TelegramError(err.to_string()));
+            Err(model::QuotesError::TelegramError(err.to_string()))
         }
-    }
+    };
+    msg_result?;
 
     Ok(())
+}
+
+/// The CLI's publish sink for `market_int_core::pipeline::perform_all`:
+/// stateless wrapper that forwards straight into [`publish_to_telegram`],
+/// preserving the historical score-then-send behavior byte-for-byte.
+pub struct TelegramPublish;
+
+impl PublishHook for TelegramPublish {
+    fn publish<'a>(
+        &'a self,
+        ctx: PublishContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = model::Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let d = ctx.data;
+            publish_to_telegram(
+                &d.all_chains,
+                &d.sharpe_ratios,
+                &d.price_ranges,
+                &d.earnings_map,
+                &d.price_percentiles,
+                &d.trend_data,
+                &d.realized_vols,
+                ctx.sectors,
+                d.period,
+                ctx.regime,
+            )
+            .await
+        })
+    }
+}
+
+/// Convenience constructor for the PerformAll arm's options.
+pub fn telegram_publish_hook() -> Arc<dyn PublishHook> {
+    Arc::new(TelegramPublish)
 }
 
 #[cfg(test)]
