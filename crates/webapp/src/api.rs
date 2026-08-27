@@ -49,7 +49,7 @@ pub fn build_router(state: AppState) -> axum::Router {
 }
 
 fn envelope_for(result_path: &std::path::Path) -> LatestEnvelope {
-    let empty = || LatestEnvelope {
+    let no_clock = || LatestEnvelope {
         schema_version: crate::result::SCHEMA_VERSION,
         age_secs: None,
         cache_secs: market_int_core::constants::WEBAPP_CACHE_SECS,
@@ -58,29 +58,26 @@ fn envelope_for(result_path: &std::path::Path) -> LatestEnvelope {
         result: None,
     };
 
-    match read_document(result_path) {
-        None => empty(),
-        Some(doc) => {
-            let finished: Option<DateTime<Utc>> =
-                doc.run.finished_at_utc.parse::<DateTime<Utc>>().ok();
-            let Some(finished) = finished else {
-                return empty(); // present but clockless counts as nothing usable
-            };
-            let age_secs = (Utc::now() - finished).num_seconds().max(0) as u64;
-            let cache_state = if age_secs < market_int_core::constants::WEBAPP_CACHE_SECS {
-                "fresh"
-            } else {
-                "stale"
-            };
-            LatestEnvelope {
-                schema_version: crate::result::SCHEMA_VERSION,
-                age_secs: Some(age_secs),
-                cache_secs: market_int_core::constants::WEBAPP_CACHE_SECS,
-                cache_state,
-                run_state: RunStateView { status: "idle" },
-                result: Some(doc),
-            }
-        }
+    let Some(doc) = read_document(result_path) else {
+        return no_clock(); // missing or unparseable file
+    };
+    // Present but clockless also counts as nothing usable (spec §5).
+    let Ok(finished) = doc.run.finished_at_utc.parse::<DateTime<Utc>>() else {
+        return no_clock();
+    };
+    let age_secs = (Utc::now() - finished).num_seconds().max(0) as u64;
+    let cache_state = if age_secs < market_int_core::constants::WEBAPP_CACHE_SECS {
+        "fresh"
+    } else {
+        "stale"
+    };
+    LatestEnvelope {
+        schema_version: crate::result::SCHEMA_VERSION,
+        age_secs: Some(age_secs),
+        cache_secs: market_int_core::constants::WEBAPP_CACHE_SECS,
+        cache_state,
+        run_state: RunStateView { status: "idle" },
+        result: Some(doc),
     }
 }
 
@@ -100,7 +97,7 @@ mod tests {
     use market_int_core::pipeline::{PerformAllOutcome, ScoredTimeframe};
     use tower::ServiceExt;
 
-    fn epoch(t: i64) -> DateTime<Utc> {
+    fn utc_at(t: i64) -> DateTime<Utc> {
         chrono::TimeZone::timestamp_opt(&Utc, t, 0).unwrap()
     }
 
@@ -174,11 +171,9 @@ mod tests {
     async fn latest_present_fresh() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("last_run.json");
-        let mut outcome = sample_outcome(epoch(Utc::now().timestamp()));
-        // Re-stamp finish to *now* so age is 0 regardless of constructor math.
-        let mut outcome = outcome;
+        // Finish stamped to *now* so age is ~0 regardless of test timing.
+        let mut outcome = sample_outcome(Utc::now());
         outcome.started_at = Utc::now() - chrono::Duration::seconds(335);
-        outcome.finished_at = Utc::now();
         write_document(&path, &build_document(&outcome)).unwrap();
 
         let v = get_latest(AppState { result_path: path }).await;

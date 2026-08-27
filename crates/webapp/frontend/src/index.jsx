@@ -8,10 +8,10 @@ import { render } from "solid-js/web";
 import "./style.css";
 
 // The §3.2 envelope: cache metadata server-computed; nulls mean no data yet.
-const NULL_MARK = <span class="null-mark">∅</span>;
-
 function fmt(v, digits) {
-  if (v === null || v === undefined) return NULL_MARK;
+  // Fresh node per cell (Solid moves nodes into the DOM; a shared singleton
+  // would empty all-but-the-last null cell).
+  if (v === null || v === undefined) return <span class="null-mark">∅</span>;
   return Number(v).toFixed(digits);
 }
 
@@ -30,8 +30,21 @@ function CacheLine(props) {
   const mins = () => Math.floor((props.envelope.age_secs ?? 0) / 60);
   return (
     <div class="cache-line">
-      <Show when={state() === "fresh"}fallback={<Show when={state() === "stale"}><span>Last run <b>{mins()}</b> min ago</span></Show>} >
-        <span>Cached · <b>{600 - (props.envelope.age_secs ?? 0)}s</b> left · age <b>{mins()}</b> min</span>
+      <Show
+        when={state() === "fresh"}
+        fallback={
+          <Show when={state() === "stale"}>
+            <span>
+              Last run <b>{mins()}</b> min ago
+            </span>
+          </Show>
+        }
+      >
+        {/* Window comes from the server (cache_secs) — never hardcode it. */}
+        <span>
+          Cached · <b>{props.envelope.cache_secs - (props.envelope.age_secs ?? 0)}s</b> left · age{" "}
+          <b>{mins()}</b> min
+        </span>
       </Show>
       <span class={"pill " + state()}>{state()}</span>
       <span class="pill">run: {props.envelope.run_state?.status ?? "idle"}</span>

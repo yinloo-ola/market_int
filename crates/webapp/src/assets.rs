@@ -27,22 +27,21 @@ mod embedded {
     pub const APP_CSS: &[u8] = include_bytes!("../frontend/dist/assets/app.css");
 }
 
-/// Looks up an asset by dist-relative key. Debug reads from disk
-/// (manifest-relative), release serves the compiled-in copies.
+/// Debug: read from dist on disk (manifest-relative) for live-reload.
+#[cfg(debug_assertions)]
 fn lookup(key: &str) -> Option<Vec<u8>> {
-    #[cfg(debug_assertions)]
-    {
-        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/frontend/dist/");
-        std::fs::read(format!("{root}{key}")).ok()
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        match key {
-            "index.html" => Some(embedded::INDEX_HTML.as_bytes().to_vec()),
-            "assets/app.js" => Some(embedded::APP_JS.to_vec()),
-            "assets/app.css" => Some(embedded::APP_CSS.to_vec()),
-            _ => None,
-        }
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/frontend/dist/");
+    std::fs::read(format!("{root}{key}")).ok()
+}
+
+/// Release: serve the compiled-in copies.
+#[cfg(not(debug_assertions))]
+fn lookup(key: &str) -> Option<Vec<u8>> {
+    match key {
+        "index.html" => Some(embedded::INDEX_HTML.as_bytes().to_vec()),
+        "assets/app.js" => Some(embedded::APP_JS.to_vec()),
+        "assets/app.css" => Some(embedded::APP_CSS.to_vec()),
+        _ => None,
     }
 }
 
@@ -83,26 +82,26 @@ fn serve_asset(path: &str) -> Response {
 
     for key in &keys {
         if let Some(body) = lookup(key) {
-            if key.ends_with(".html") {
-                return Html(String::from_utf8_lossy(&body).into_owned()).into_response();
-            }
-            let ctype = content_type(key);
-            return (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, ctype)],
-                body,
-            )
-                .into_response();
+            let mut resp = if key.ends_with(".html") {
+                Html(String::from_utf8_lossy(&body).into_owned()).into_response()
+            } else {
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, content_type(key))],
+                    body,
+                )
+                    .into_response()
+            };
+            resp.headers_mut().insert(
+                header::CACHE_CONTROL,
+                header::HeaderValue::from_static("no-cache"),
+            );
+            return resp;
         }
     }
 
     // dist missing entirely (pre-npm debug): helpful page instead of empty.
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        NOT_BUILT_PAGE,
-    )
-        .into_response()
+    Html(NOT_BUILT_PAGE).into_response()
 }
 
 async fn index() -> Response {
