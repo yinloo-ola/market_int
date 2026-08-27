@@ -24,6 +24,10 @@ export default defineConfig({
         entryFileNames: "assets/app.js",
         chunkFileNames: "assets/[name].js",
         assetFileNames: "assets/app[extname]",
+        // t17 (firebase SDK) made accidental code-splits likelier; an extra
+        // chunk would silently 404 in the release binary's embedded set.
+        // Single entry ⇒ inlining keeps everything in app.js.
+        inlineDynamicImports: true,
       },
     },
   },

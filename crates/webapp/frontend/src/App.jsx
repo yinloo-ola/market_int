@@ -1,13 +1,27 @@
 /* Application shell. Owned regions:
-   - results area .... ticket 16 (Analyst Table: tabs/sort/filter/scored-only/
-     column picker/pagination/top picks)
-   - AUTH_GATE_SLOT .. ticket 17
+   - results area .... ticket 16 DONE (Analyst Table: tabs/sort/filter/
+     scored-only/column picker/pagination/top picks)
+   - AUTH_GATE_SLOT .. ticket 17 DONE (S0 overlay + signed-out suppression)
+   - USER_SLOT ....... ticket 17 DONE (header email + Sign out)
    - RUN_SLOT ........ ticket 18 (Run button + progress strip)
-   Overlap lives ONLY here and is merged by hand along the slot markers. */
+   Overlap lives ONLY here and is merged by hand along the slot markers.
 
-import { Show, createResource, createSignal } from "solid-js";
+   Ticket 17: nothing renders until `onAuthStateChanged` resolves a user —
+   no API call fires before that (§6.2 region 1). Unconfigured Firebase ⇒
+   resolves straight to null and AuthGate shows its notice card. */
+
+import {
+  Show,
+  createResource,
+  createSignal,
+  onCleanup,
+  onMount,
+} from "solid-js";
 
 import { getLatest } from "./api";
+import { AUTH_CONFIGURED, firebaseAuth, signOutUser } from "./firebase";
+import { onAuthStateChanged } from "firebase/auth";
+import { AuthGate } from "./components/AuthGate";
 import ResultsPane from "./components/ResultsPane";
 import { comma } from "./lib/format";
 import {
@@ -96,73 +110,113 @@ function TabsRow(props) {
 }
 
 function App() {
-  // t17 gates everything below via the AUTH_GATE_SLOT overlay.
-  const [latest] = createResource(getLatest);
+  // t17 auth state: undefined = resolving, null = signed out, object = in.
+  // The results resource sources off it, so /api traffic starts only after a
+  // user exists — never before auth state resolves.
+  const [user, setUser] = createSignal(undefined);
+  const [latest] = createResource(user, (u) => (u ? getLatest() : undefined));
+
+  /* USER_SLOT(t17):start — observer lives in App (not AuthGate) so it
+     survives while SIGNED IN to flip Sign out back to the gate.
+     Unconfigured ⇒ null immediately (notice card, not infinite spinner). */
+  onMount(() => {
+    if (!AUTH_CONFIGURED) {
+      setUser(null);
+      return;
+    }
+    const unsubscribe = onAuthStateChanged(firebaseAuth(), setUser);
+    onCleanup(unsubscribe);
+  });
+
+  const whoami = () => user()?.email || user()?.uid || "";
+  /* USER_SLOT(t17):end */
+
   const columns = createColumnStore();
   const [tab, setTab] = createSignal("short");
 
   return (
-    <div class="shell">
-      {/* ── AUTH_GATE_SLOT (ticket 17) — sign-in overlay mounts here ── */}
-
-      <header>
-        <h1>market_int · put-selling candidates</h1>
-        <Show when={!latest.loading && !latest.error}>
-          <CacheLine envelope={latest()} />
-        </Show>
-        {/* ── RUN_SLOT (ticket 18) part 1 — ▶ Run pipeline button + user
-               email / Sign out join this header line ── */}
-      </header>
-
-      <Show when={latest.error}>
-        <div class="error-banner">API error: {latest.error.message}</div>
-      </Show>
-
-      {/* ── RUN_SLOT (ticket 18) part 2 — live progress strip collapses to
-             the post-run summary right below the header ── */}
-
-      <Show
-        when={!latest.loading && latest()?.result}
-        fallback={
-          <Show when={!latest.loading}>
-            <div class="cache-line">
-              No results yet — the page serves whatever the result file holds.
-              Point <code>webapp_result_file</code> at{" "}
-              <code>crates/webapp/fixtures/sample_last_run.json</code> for demo
-              data.
-            </div>
+    <Show
+      when={user()}
+      fallback={
+        /* AUTH_GATE_SLOT:start — signed out: overlay card on an otherwise
+           empty page; NO app shell, NO api calls behind it. */
+        <AuthGate />
+        /* AUTH_GATE_SLOT:end */
+      }
+    >
+      <div class="shell">
+        <header>
+          {/* USER_SLOT(t17):start — header user chip + Sign out */}
+          <div class="user-box">
+            <Show when={user()}>
+              <span class="user-email">{whoami()}</span>
+              <button type="button" onClick={() => signOutUser()}>
+                Sign out
+              </button>
+            </Show>
+          </div>
+          {/* USER_SLOT(t17):end */}
+          <h1>market_int · put-selling candidates</h1>
+          <Show when={!latest.loading && !latest.error}>
+            <CacheLine envelope={latest()} />
           </Show>
-        }
-      >
-        {(res) => {
-          // Non-keyed <Show> hands us an accessor to the truthy `when`
-          // value — here that is envelope().result (the §4 document).
-          const result = () => res();
-          return (
-            <>
-              <TabsRow result={result} tab={tab} onTab={setTab} />
-              <ResultsPane
-                id="short"
-                active={() => tab() === "short"}
-                tf={result().timeframes?.short}
-                stageError={stageErrorOf(result(), "chains_short")}
-                thresholds={result().thresholds}
-                columns={columns}
-              />
-              <ResultsPane
-                id="medium"
-                active={() => tab() === "medium"}
-                tf={result().timeframes?.medium}
-                stageError={stageErrorOf(result(), "chains_medium")}
-                thresholds={result().thresholds}
-                columns={columns}
-              />
-            </>
-          );
-        }}
-      </Show>
-    </div>
+          {/* ── RUN_SLOT (ticket 18) part 1 — ▶ Run pipeline button joins
+                 this header line ── */}
+        </header>
+
+        <Show when={latest.error}>
+          <div class="error-banner">API error: {latest.error.message}</div>
+        </Show>
+
+        {/* ── RUN_SLOT (ticket 18) part 2 — live progress strip collapses to
+               the post-run summary right below the header ── */}
+
+        <Show
+          when={!latest.loading && latest()?.result}
+          fallback={
+            <Show when={!latest.loading}>
+              <div class="cache-line">
+                No results yet — press Run once the pipeline endpoints land
+                (ticket 18). Meanwhile this page serves whatever the result
+                file holds; point <code>webapp_result_file</code> (or{" "}
+                <code>--result-file</code>) at{" "}
+                <code>crates/webapp/fixtures/sample_last_run.json</code> for
+                demo data.
+              </div>
+            </Show>
+          }
+        >
+          {(res) => {
+            // Non-keyed <Show> hands us an accessor to the truthy `when`
+            // value — here that is envelope().result (the §4 document).
+            const result = () => res();
+            return (
+              <>
+                <TabsRow result={result} tab={tab} onTab={setTab} />
+                <ResultsPane
+                  id="short"
+                  active={() => tab() === "short"}
+                  tf={result().timeframes?.short}
+                  stageError={stageErrorOf(result(), "chains_short")}
+                  thresholds={result().thresholds}
+                  columns={columns}
+                />
+                <ResultsPane
+                  id="medium"
+                  active={() => tab() === "medium"}
+                  tf={result().timeframes?.medium}
+                  stageError={stageErrorOf(result(), "chains_medium")}
+                  thresholds={result().thresholds}
+                  columns={columns}
+                />
+              </>
+            );
+          }}
+        </Show>
+      </div>
+    </Show>
   );
 }
 
+// No render() here — index.jsx is the single render point.
 export default App;

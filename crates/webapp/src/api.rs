@@ -7,13 +7,14 @@
 
 use std::path::PathBuf;
 
-use axum::extract::State;
+use axum::extract::{Request, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::auth::VerifiedIdentity;
 use crate::result::{read_document, ResultDocument};
 
 #[derive(Debug, Clone, Serialize)]
@@ -85,6 +86,28 @@ async fn latest(State(state): State<AppState>) -> impl IntoResponse {
     // Always 200: one status code, one parse path; no-data branches on
     // `result === null` client-side (§3.2 rejects a 404 shape).
     (StatusCode::OK, Json(envelope_for(&state.result_path))).into_response()
+}
+
+/// Debug endpoint echoing the verified identity (ticket 06 recipe, §3.1).
+///
+/// The extension is only present when auth is armed and the token verified;
+/// the manual `Request` read (instead of an `Extension<…>` extractor) keeps
+/// disabled mode answering honestly with nulls instead of erroring.
+pub(crate) async fn me(req: Request) -> Response {
+    match req.extensions().get::<VerifiedIdentity>() {
+        Some(identity) => Json(serde_json::json!({
+            "auth_enabled": true,
+            "uid": identity.uid,
+            "email": identity.email,
+        }))
+        .into_response(),
+        None => Json(serde_json::json!({
+            "auth_enabled": false,
+            "uid": null,
+            "email": null,
+        }))
+        .into_response(),
+    }
 }
 
 #[cfg(test)]

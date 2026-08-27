@@ -5,23 +5,30 @@
 //! - t18 owns `run::{progress,run}` handlers replacing the stubs
 //! - t16 stays inside the frontend modules entirely
 
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Router;
 
 use crate::{api, assets, auth};
 
 /// Assembles the full application router from its parts.
-pub fn app_router(result_path: std::path::PathBuf) -> Router {
+///
+/// Signature note (t17): gained `auth_guard` — `None` (no project id
+/// configured) keeps `auth::protect` an identity passthrough; `Some(…)`
+/// arms Firebase ID-token verification over every /api route while static
+/// assets stay public.
+pub fn app_router(
+    result_path: std::path::PathBuf,
+    auth_guard: Option<auth::AuthGuard>,
+) -> Router {
     let api = api::build_router(api::AppState {
         result_path: result_path.clone(),
     })
+    .route("/api/me", get(api::me))
     // Ticket 18 replaces these two stubs with real handlers.
     .route("/api/progress", get(run::progress))
     .route("/api/run", post(run::run));
 
-    let api = auth::protect(api);
+    let api = auth::protect(api, auth_guard);
 
     assets::router_with_assets(api)
 }
