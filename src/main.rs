@@ -14,6 +14,8 @@ mod stats;
 mod maxdrop;
 /// Pull option chains from API based on ATR retrieved from database.
 mod option;
+/// Telegram publishing (retrieval composition + send/caption)
+mod publish;
 // Sharpe ratio calculation.
 mod sharpe;
 // Trend calculation.
@@ -231,7 +233,7 @@ async fn main() {
                 }
             };
             let sectors = sectors::load_sectors("data/symbols.csv").unwrap_or_default();
-            match option::retrieve_option_chains_with_expiry(
+            match publish::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
                 &model::OptionChainSide::Put,
                 &mut conn,
@@ -263,7 +265,7 @@ async fn main() {
                 }
             };
             let sectors = sectors::load_sectors("data/symbols.csv").unwrap_or_default();
-            match option::retrieve_option_chains_with_expiry(
+            match publish::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
                 &model::OptionChainSide::Put,
                 &mut conn,
@@ -299,7 +301,7 @@ async fn main() {
             // Set standard bull regime directly (bypasses dynamic SPY checks to save time/API calls)
             let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
             let sectors = sectors::load_sectors(&symbols_file_path).unwrap_or_default();
-            match option::retrieve_option_chains_with_expiry(
+            match publish::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
                 &model::OptionChainSide::Put,
                 &mut conn,
@@ -315,7 +317,7 @@ async fn main() {
             }
 
             // Pull option chains with 20-day expiry (medium timeframe) - reuse the same connection
-            match option::retrieve_option_chains_with_expiry(
+            match publish::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
                 &model::OptionChainSide::Put,
                 &mut conn,
@@ -334,7 +336,7 @@ async fn main() {
         Commands::PublishOptionChain { symbols_file_path } => {
             let sectors = sectors::load_sectors("data/symbols.csv").unwrap_or_default();
             let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
-            match option::publish_option_chains(&symbols_file_path, conn, 5, &regime, &sectors).await {
+            match publish::publish_option_chains(&symbols_file_path, conn, 5, &regime, &sectors).await {
                 Ok(_) => log::info!("Successfully published option chains"),
                 Err(err) => log::error!("Error publishing option chains: {}", err),
             }
