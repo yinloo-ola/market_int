@@ -2,9 +2,9 @@ use chrono::{DateTime, Datelike, Days, Local, NaiveDate, TimeZone, Timelike, Wee
 use chrono_tz::America::New_York;
 use csv::Writer;
 use rusqlite::Connection;
-use std::collections::HashMap;
 
-use std::collections::HashSet;
+
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     constants,
@@ -159,7 +159,7 @@ async fn fetch_option_chains_in_batches(
 ) -> model::Result<BatchedChains> {
     let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
     let mut failed_symbols: Vec<String> = Vec::new();
-    let total_batches = symbols.len().div_ceil(10);
+    let total_batches = symbols.len().div_ceil(constants::API_BATCH_SIZE);
     let stage = if expiry_timeframe == ExpiryTimeframe::Short {
         Stage::ChainsShort
     } else {
@@ -175,7 +175,7 @@ async fn fetch_option_chains_in_batches(
         });
     };
 
-    for (batch_no, chunk) in symbols.chunks(10).enumerate() {
+    for (batch_no, chunk) in symbols.chunks(constants::API_BATCH_SIZE).enumerate() {
         let symbols_for_expiry: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
 
         let expirations = match requester.option_expiration(&symbols_for_expiry).await {

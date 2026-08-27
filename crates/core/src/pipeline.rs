@@ -129,6 +129,8 @@ pub struct StageReport {
 /// `run.symbols_requested` / `run.symbols_succeeded`). Mutated through the
 /// quotes batch loop, so the numbers are exact even when a batch fails
 /// mid-run.
+/// Numbers live on [`PerformAllOutcome`]; the one path that has no outcome —
+/// a fatal requester-init abort — therefore reports nothing, by contract.
 #[derive(Debug, Clone, Default)]
 pub struct RunCoverage {
     pub symbols_requested: usize,
@@ -350,12 +352,12 @@ async fn run_chains_stage(
         StageStatus::Ok => {
             log::info!("Successfully pulled and saved {} option chains", day_label);
         }
-        _ => {
+        StageStatus::Partial | StageStatus::Failed => {
             // Historical wording; the structured report keeps the details.
             log::error!(
                 "Error pulling {} option chains: {}",
                 day_label,
-                error.clone().unwrap_or_default()
+                error.as_deref().unwrap_or("")
             );
         }
     }

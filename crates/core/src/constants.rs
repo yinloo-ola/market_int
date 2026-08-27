@@ -1,4 +1,8 @@
 // ── Candle / Option-chain data ────────────────────────────────
+/// Upstream API call batching — quotes and option chains both walk the
+/// universe in chunks of this size (batch totals in progress events derive
+/// from it too).
+pub const API_BATCH_SIZE: usize = 10;
 pub const CANDLE_COUNT: u32 = 850;
 pub const MIN_OPEN_INTEREST: u32 = 50;
 pub const SHARPE_MIN_CANDLES: usize = 14;

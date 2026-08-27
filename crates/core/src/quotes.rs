@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::{constants, model, symbols};
 use crate::{
     pipeline::{PipelineEvent, ProgressReporter, RequesterFactory, RunCoverage, Stage},
@@ -46,14 +48,15 @@ pub(crate) async fn pull_and_save_with(
     store::candle::create_table(conn)?;
 
     // Filter out empty symbols and collect them into a vector. Requested is
-    // counted before requester init so even an init failure reports coverage.
+    // counted before requester init so barrel-on runs still report it; only a
+    // whole-run fatal abort (which discards the outcome entirely) goes unseen.
     let valid_symbols: Vec<&str> = symbols
         .iter()
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.as_str())
         .collect();
     coverage.symbols_requested += valid_symbols.len();
-    let total_batches = valid_symbols.len().div_ceil(10);
+    let total_batches = valid_symbols.len().div_ceil(constants::API_BATCH_SIZE);
 
     // Initialize Tiger API requester
     let requester: Requester = match factory().await {
@@ -68,8 +71,8 @@ pub(crate) async fn pull_and_save_with(
         }
     };
 
-    // Process symbols in batches of 10
-    for (done, chunk) in valid_symbols.chunks(10).enumerate() {
+    // Process symbols in batches
+    for (done, chunk) in valid_symbols.chunks(constants::API_BATCH_SIZE).enumerate() {
         // Fetch candle data for the current batch of symbols.
         let candles = requester
             .query_stock_quotes(
@@ -92,7 +95,13 @@ pub(crate) async fn pull_and_save_with(
             Ok(candles) => {
                 // Save the fetched candles to the database.
                 store::candle::save_candles(conn, &candles)?;
-                coverage.symbols_succeeded += chunk.len();
+                // Count what actually came back: the API may return Ok with no
+                // rows for some or all of the batch.
+                coverage.symbols_succeeded += candles
+                    .iter()
+                    .map(|c| c.symbol.as_str())
+                    .collect::<HashSet<_>>()
+                    .len();
                 log::info!(
                     "Successfully fetched and saved candles for batch of {} symbols",
                     chunk.len()
