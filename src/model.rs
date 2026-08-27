@@ -15,7 +15,6 @@ use rusqlite::{
     types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef},
 };
 use serde::{Deserialize, Serialize};
-use telegram_bot_api::bot::APIResponseError;
 
 use crate::constants;
 use crate::http::client;
@@ -734,7 +733,10 @@ pub enum QuotesError {
     HttpError(client::RequestError),
     NotEnoughCandlesForStatistics(String),
     CsvError(csv::Error),
-    TelegramError(APIResponseError),
+    // Coarsened to a plain string (2026-08, workspace split): the domain crate
+    // must not reference the Telegram SDK, so the structured API error type is
+    // flattened at the publish boundary.
+    TelegramError(String),
     EnvVarNotSet(VarError),
     SharpeCalculationError(String),
     InsufficientReturnData(usize),
@@ -770,12 +772,6 @@ impl From<rusqlite::Error> for QuotesError {
 impl From<client::RequestError> for QuotesError {
     fn from(value: client::RequestError) -> Self {
         Self::HttpError(value)
-    }
-}
-
-impl From<APIResponseError> for QuotesError {
-    fn from(value: APIResponseError) -> Self {
-        Self::TelegramError(value)
     }
 }
 

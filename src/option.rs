@@ -632,7 +632,7 @@ fn collect_trend_data(conn: &Connection, symbols: &[String]) -> HashMap<String, 
 
 /// Collects per-symbol annualized realized volatility from the latest candles,
 /// using the same 20-day log-return stdev formula as the backtest
-/// (`backtest::estimate_historical_volatility`). Used by the high-vol
+/// (`stats::estimate_historical_volatility`). Used by the high-vol
 /// universe filter (D2) — backtest-validated 2026-07 under the capital-
 /// efficiency metric: restricting to high-vol names lifts avg rate_of_return
 /// while assignment stays flat or falls.
@@ -647,7 +647,7 @@ fn collect_realized_vols(conn: &Connection, symbols: &[String]) -> HashMap<Strin
             _ => continue,
         };
         let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
-        vols.insert(symbol.clone(), crate::backtest::estimate_historical_volatility(&closes, 20));
+        vols.insert(symbol.clone(), crate::stats::estimate_historical_volatility(&closes, 20));
     }
     vols
 }
@@ -726,7 +726,9 @@ pub async fn publish_to_telegram(
     let chat_id = env::var("telegram_chat_id")?
         .parse::<i64>()
         .map_err(|_| QuotesError::EnvVarNotSet(env::VarError::NotPresent))?;
-    let bot = bot::BotApi::new(token, None).await?;
+    let bot = bot::BotApi::new(token, None)
+        .await
+        .map_err(|e| QuotesError::TelegramError(e.to_string()))?;
 
     log::debug!("chat_id {chat_id}");
 
@@ -753,7 +755,7 @@ pub async fn publish_to_telegram(
         Ok(_) => log::info!("telegram send doc ok"),
         Err(err) => {
             log::error!("telegram send doc failed: {:?}", err);
-            return Err(model::QuotesError::TelegramError(err));
+            return Err(model::QuotesError::TelegramError(err.to_string()));
         }
     }
 
@@ -777,7 +779,7 @@ pub async fn publish_to_telegram(
         Ok(_) => log::info!("telegram send caption ok"),
         Err(err) => {
             log::error!("telegram send caption failed: {:?}", err);
-            return Err(model::QuotesError::TelegramError(err));
+            return Err(model::QuotesError::TelegramError(err.to_string()));
         }
     }
 

@@ -1,5 +1,23 @@
 use crate::model;
 
+/// Annualized volatility from daily close prices.
+/// Uses rolling window of daily log returns, annualized by sqrt(252).
+///
+/// Lives here (not in backtest) so the backtest and the option-chain
+/// realized-vol collector share one formula without an option↔backtest
+/// dependency cycle.
+pub fn estimate_historical_volatility(closes: &[f64], window: usize) -> f64 {
+    if closes.len() < window + 1 {
+        return 0.30; // Default 30% if insufficient data
+    }
+    let recent = &closes[closes.len() - window - 1..];
+    let returns: Vec<f64> = recent.windows(2).map(|w| (w[1] / w[0]).ln()).collect();
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let variance =
+        returns.iter().map(|r_val| (r_val - mean).powi(2)).sum::<f64>() / (returns.len() - 1) as f64;
+    variance.sqrt() * (252.0_f64).sqrt()
+}
+
 pub(crate) fn ema(prev: f64, current: f64, multiplier: f64) -> f64 {
     current * multiplier + prev * (1.0 - multiplier)
 }
