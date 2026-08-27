@@ -8,3 +8,6 @@
 # embedding frontend/dist into the release binary, so ignoring it here would
 # ship an EMPTY asset set (found the hard way, ticket 15).
 crates/webapp/frontend/node_modules/
+
+# local firebase envs (real values live here, never committed)
+crates/webapp/frontend/.env.local
