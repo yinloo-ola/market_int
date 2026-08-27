@@ -5,10 +5,12 @@
 
 mod api;
 mod assets;
+mod auth;
 // Builders are exercised by unit tests now and consumed by the run handler
 // in ticket 18 — keep them visible to rustdoc meanwhile.
 #[allow(dead_code)]
 mod result;
+mod router;
 
 use std::path::PathBuf;
 
@@ -48,10 +50,7 @@ fn result_path() -> PathBuf {
 async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let state = api::AppState {
-        result_path: result_path(),
-    };
-    let router = assets::router_with_assets(api::build_router(state));
+    let router = router::app_router(result_path());
 
     log::info!("market_int_webapp listening on http://{BIND_ADDR}");
     let listener = tokio::net::TcpListener::bind(BIND_ADDR)
