@@ -78,3 +78,114 @@ tr.pick td:first-child .star { color: #c08a00; font-weight: 700; }
   border-radius: 6px;
   margin-bottom: 12px;
 }
+
+/* ── ticket 17: auth gate (§6.2 region 1, S0) + header user chip ── */
+
+.gate-wrap {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.gate-card {
+  width: 340px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 22px 24px;
+}
+
+.gate-title {
+  font-size: 14px;
+  margin: 0 0 16px;
+  color: #1c2733;
+}
+
+.gate-label {
+  display: block;
+  font-size: 12px;
+  color: #51606f;
+  margin-bottom: 10px;
+}
+
+.gate-label input {
+  display: block;
+  width: 100%;
+  margin-top: 3px;
+  padding: 6px 8px;
+  font: inherit;
+  color: inherit;
+  background: var(--page);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.gate-label input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.btn {
+  font: inherit;
+  padding: 6px 12px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: #1c2733;
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) { border-color: var(--accent); }
+.btn:disabled { opacity: 0.55; cursor: default; }
+
+.btn-primary {
+  width: 100%;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.gate-toggle {
+  display: inline-block;
+  margin-top: 10px;
+  font: inherit;
+  font-size: 12px;
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+}
+
+.gate-or {
+  text-align: center;
+  color: #51606f;
+  font-size: 11px;
+  margin: 14px 0;
+}
+
+.gate-error {
+  margin-top: 12px;
+  padding: 7px 10px;
+  border: 1px solid #e4b7b7;
+  border-radius: 5px;
+  background: #fdf0f0;
+  color: #a02a1a;
+  font-size: 12px;
+}
+
+.gate-note { color: #51606f; }
+
+/* Header user chip — floats right so t16/t18 header regions stay untouched. */
+.user-box {
+  float: right;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  color: #51606f;
+}
+
+.user-box .user-email { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+

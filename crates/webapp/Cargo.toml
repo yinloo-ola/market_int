@@ -25,6 +25,11 @@ log.workspace = true
 dotenv.workspace = true
 env_logger.workspace = true
 axum = "0.8"
+# Firebase ID-token verification (ticket 06 resolution): RS256 + Google JWKS
+# with Cache-Control-driven auto-refresh; needs only the public project id.
+# default-features off drops actix-web; "openssl" = reqwest/default-tls, which
+# matches the workspace reqwest native-tls build (no openssl-sys on macOS).
+firebase-auth = { version = "0.5.1", default-features = false, features = ["axum", "openssl"] }
 
 [dev-dependencies]
 tempfile.workspace = true

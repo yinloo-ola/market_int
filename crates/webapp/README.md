@@ -44,8 +44,68 @@ other assets inlined), which lets the release build include them via
 | env | `webapp_result_file` |
 | default | `/data/webapp/last_run.json` |
 
+| auth (ticket 17) | value |
+|---|---|
+| CLI flag | `--firebase-project-id <id>` |
+| env | `FIREBASE_PROJECT_ID` |
+| default | *(none)* ⇒ **auth disabled** (one startup warn; every `/api` route is open) |
+
 Freshness window comes from `market_int_core::constants::WEBAPP_CACHE_SECS`
 (600s) and is reported to the client as `cache_secs` in `/api/latest`.
+
+## Firebase provisioning checklist (one-time, ~10 minutes)
+
+Live user provisioning happens out of band (repository owner). Code-side is
+done: this list records the console steps that make it work end to end.
+
+1. <https://console.firebase.google.com> → **Add project** (or "Add Firebase"
+   onto the GCP project hosting Cloud Run).
+2. **Build → Authentication → Get started** → enable **Email/Password**.
+3. Same screen → enable **Google** (pick a support email; the OAuth client is
+   auto-provisioned).
+4. **Authentication → Settings → Authorized domains** — confirm the default
+   `localhost` is present; later add the bare Cloud Run hostname
+   (`<name>-<hash>-uc.a.run.app`, no scheme/slash). Missing entry ⇒
+   `auth/unauthorized-domain` on Google sign-in.
+5. **Project settings → Your apps → Web (`</>`)** → register app and copy the
+   `firebaseConfig` values.
+6. Backend wiring (no secrets — the project id is public):
+
+   ```bash
+   # .env or environment
+   FIREBASE_PROJECT_ID=<PROJECT_ID>
+   # or: cargo run -p market_int_webapp -- --result-file ... --firebase-project-id <PROJECT_ID>
+   ```
+
+7. Frontend wiring — create `crates/webapp/frontend/.env.local`
+   (gitignored values are still public-by-design; keep them out of git
+   anyway so project switching stays easy):
+
+   ```bash
+   VITE_FIREBASE_API_KEY=<web API key>
+   VITE_FIREBASE_AUTH_DOMAIN=<PROJECT_ID>.firebaseapp.com
+   VITE_FIREBASE_PROJECT_ID=<PROJECT_ID>
+   VITE_FIREBASE_APP_ID=<web app id>
+   ```
+
+   then rebuild: `npm run build` (vite bakes envs at build time).
+
+Without step 7 the frontend shows an explicit "auth not configured" card and
+`npm run build`/`npm run dev` still succeed without any of these vars.
+
+Behavior when armed:
+
+- every `/api/*` request needs `Authorization: Bearer <Firebase ID token>`;
+  anything missing/garbage/unverifiable gets `401 application/json
+  {"error":"unauthorized"}` (identical body regardless of reason);
+- `GET /api/me` echoes the verified identity `{auth_enabled, uid, email}`;
+- static assets stay public so the shell loads before sign-in;
+- tokens live ~1 h; the client force-refreshes once per 401 and retries once;
+- the backend fetches Google's public JWKS eagerly at boot (network required
+  on startup when armed) and refreshes it on Google's Cache-Control schedule.
+
+Dev-only caution: the `firebase-auth` crate honors `FIREBASE_AUTH_EMULATOR_HOST`
+by accepting *unsigned* tokens. Never set it outside local emulator testing.
 
 ## Endpoints today (ticket 15 scope)
 
@@ -54,7 +114,8 @@ Freshness window comes from `market_int_core::constants::WEBAPP_CACHE_SECS`
   Always HTTP 200; no-data branches on `result === null`.
 - `GET /`, static fallback — embedded (release) or disk-read (debug) assets.
 
-Run triggering/streaming arrives with ticket 18; auth gate with 17.
+Ticket 17 added `GET /api/me` plus the bearer gate over `/api/*`; run
+triggering/streaming arrives with ticket 18.
 
 ## Why includes instead of rust-embed
 
