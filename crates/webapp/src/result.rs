@@ -318,7 +318,8 @@ fn rfc3339(t: DateTime<Utc>) -> String {
 }
 
 /// Document vocabulary uses underscores ("chains_short"), unlike log labels.
-fn doc_stage_name(stage: market_int_core::pipeline::Stage) -> String {
+/// Also feeds the SSE stream frames (spec §3.3 freezes these exact names).
+pub(crate) fn doc_stage_name(stage: market_int_core::pipeline::Stage) -> String {
     use market_int_core::pipeline::Stage::*;
     match stage {
         Quotes => "quotes".to_string(),
@@ -328,7 +329,7 @@ fn doc_stage_name(stage: market_int_core::pipeline::Stage) -> String {
     }
 }
 
-fn doc_status_name(status: market_int_core::pipeline::StageStatus) -> &'static str {
+pub(crate) fn doc_status_name(status: market_int_core::pipeline::StageStatus) -> &'static str {
     use market_int_core::pipeline::StageStatus::*;
     match status {
         Ok => "ok",

@@ -23,6 +23,7 @@ import { AUTH_CONFIGURED, firebaseAuth, signOutUser } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { AuthGate } from "./components/AuthGate";
 import ResultsPane from "./components/ResultsPane";
+import { RunButton, RunStrip, createRunController } from "./components/RunPanel";
 import { comma } from "./lib/format";
 import {
   DEFAULT_COLUMN_IDS,
@@ -128,11 +129,23 @@ function App() {
     onCleanup(unsubscribe);
   });
 
+  // ── RUN_SLOT (ticket 18) refresh seam: RunPanel asks for exactly ONE
+  //    post-run table refetch through this window event. ──
+  onMount(() => {
+    const refreshForRun = () => latest.refetch();
+    window.addEventListener("webapp:refresh-latest", refreshForRun);
+    onCleanup(() =>
+      window.removeEventListener("webapp:refresh-latest", refreshForRun)
+    );
+  });
+
   const whoami = () => user()?.email || user()?.uid || "";
   /* USER_SLOT(t17):end */
 
   const columns = createColumnStore();
   const [tab, setTab] = createSignal("short");
+  // Ticket 18 controller: three-outcome Run precedence + SSE progress state.
+  const run = createRunController(() => latest());
 
   return (
     <Show
@@ -162,6 +175,10 @@ function App() {
           </Show>
           {/* ── RUN_SLOT (ticket 18) part 1 — ▶ Run pipeline button joins
                  this header line ── */}
+          <div class="run-slot-head">
+            <RunButton run={run} />
+          </div>
+          {/* ── end RUN_SLOT part 1 ── */}
         </header>
 
         <Show when={latest.error}>
@@ -170,6 +187,8 @@ function App() {
 
         {/* ── RUN_SLOT (ticket 18) part 2 — live progress strip collapses to
                the post-run summary right below the header ── */}
+        <RunStrip run={run} />
+        {/* ── end RUN_SLOT part 2 ── */}
 
         <Show
           when={!latest.loading && latest()?.result}

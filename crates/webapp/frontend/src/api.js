@@ -43,8 +43,14 @@ export async function getLatest() {
   return res.json();
 }
 
-/// Ticket 18 replaces the stub backend for this route.
+/// Ticket 18: live backend for this route.
 export async function postRun() {
   const res = await authorizedFetch("/api/run", { method: "POST" });
   return res;
+}
+
+/// Ticket 18: attach to an in-flight run (SSE replay + live tail), or the
+/// `{ "status": "idle" }` JSON probe shape when nothing is running.
+export async function getProgress() {
+  return authorizedFetch("/api/progress");
 }

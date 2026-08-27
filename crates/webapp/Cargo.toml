@@ -30,7 +30,13 @@ axum = "0.8"
 # default-features off drops actix-web; "openssl" = reqwest/default-tls, which
 # matches the workspace reqwest native-tls build (no openssl-sys on macOS).
 firebase-auth = { version = "0.5.1", default-features = false, features = ["axum", "openssl"] }
+# SSE body streams (ticket 18): same futures-core version axum builds on.
+futures-core = "0.3"
+# Sync poll API over tokio's broadcast for hand-written SSE progress streams.
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 [dev-dependencies]
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }
+# Incremental SSE body reads in run.rs's disconnect test.
+http-body-util = "0.1"

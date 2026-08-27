@@ -27,20 +27,18 @@ pub struct LatestEnvelope {
     /// "none" means no clock (no file / unparseable), NOT "the run failed" —
     /// failed runs still serve their document as stale/fresh per §3.2.
     pub cache_state: &'static str,
-    /// Live single-flight state; idle until ticket 18 wires runs.
-    pub run_state: RunStateView,
+    /// Live single-flight state (§3.2): `{"status":"idle"}` or
+    /// `{"status":"running","since_utc":…,"elapsed_secs":…}`.
+    pub run_state: serde_json::Value,
     /// The §4 document exactly as on disk, enveloped — or `null`.
     pub result: Option<ResultDocument>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RunStateView {
-    pub status: &'static str,
 }
 
 #[derive(Clone)]
 pub struct AppState {
     pub result_path: PathBuf,
+    /// Live single-flight read for `run_state` (ticket 18).
+    pub shared: crate::run::SharedState,
 }
 
 pub fn build_router(state: AppState) -> axum::Router {
@@ -49,13 +47,14 @@ pub fn build_router(state: AppState) -> axum::Router {
         .with_state(state)
 }
 
-fn envelope_for(result_path: &std::path::Path) -> LatestEnvelope {
+fn envelope_for(state: &AppState) -> LatestEnvelope {
+    let result_path = &state.result_path;
     let no_clock = || LatestEnvelope {
         schema_version: crate::result::SCHEMA_VERSION,
         age_secs: None,
         cache_secs: market_int_core::constants::WEBAPP_CACHE_SECS,
         cache_state: "none",
-        run_state: RunStateView { status: "idle" },
+        run_state: state.shared.status_view(),
         result: None,
     };
 
@@ -77,7 +76,7 @@ fn envelope_for(result_path: &std::path::Path) -> LatestEnvelope {
         age_secs: Some(age_secs),
         cache_secs: market_int_core::constants::WEBAPP_CACHE_SECS,
         cache_state,
-        run_state: RunStateView { status: "idle" },
+        run_state: state.shared.status_view(),
         result: Some(doc),
     }
 }
@@ -85,7 +84,7 @@ fn envelope_for(result_path: &std::path::Path) -> LatestEnvelope {
 async fn latest(State(state): State<AppState>) -> impl IntoResponse {
     // Always 200: one status code, one parse path; no-data branches on
     // `result === null` client-side (§3.2 rejects a 404 shape).
-    (StatusCode::OK, Json(envelope_for(&state.result_path))).into_response()
+    (StatusCode::OK, Json(envelope_for(&state))).into_response()
 }
 
 /// Debug endpoint echoing the verified identity (ticket 06 recipe, §3.1).
@@ -115,14 +114,9 @@ mod tests {
     use super::*;
     use crate::result::{build_document, write_document};
     use axum::body::Body;
-    use chrono::TimeZone;
     use market_int_core::model::ScoredChainRow;
     use market_int_core::pipeline::{PerformAllOutcome, ScoredTimeframe};
     use tower::ServiceExt;
-
-    fn utc_at(t: i64) -> DateTime<Utc> {
-        chrono::TimeZone::timestamp_opt(&Utc, t, 0).unwrap()
-    }
 
     fn sample_outcome(finished: DateTime<Utc>) -> PerformAllOutcome {
         let row = ScoredChainRow {
@@ -199,7 +193,7 @@ mod tests {
         outcome.started_at = Utc::now() - chrono::Duration::seconds(335);
         write_document(&path, &build_document(&outcome)).unwrap();
 
-        let v = get_latest(AppState { result_path: path }).await;
+        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new() }).await;
         assert_eq!(v["cache_state"], "fresh");
         assert_eq!(v["cache_secs"], market_int_core::constants::WEBAPP_CACHE_SECS);
         assert!(v["age_secs"].as_u64().unwrap() < 10);
@@ -221,7 +215,7 @@ mod tests {
                 - chrono::Duration::seconds(market_int_core::constants::WEBAPP_CACHE_SECS as i64 + 5);
         write_document(&path, &build_document(&outcome)).unwrap();
 
-        let v = get_latest(AppState { result_path: path }).await;
+        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new() }).await;
         assert_eq!(v["cache_state"], "stale");
         assert!(v["age_secs"].as_u64().unwrap() >= market_int_core::constants::WEBAPP_CACHE_SECS);
         assert!(
@@ -236,7 +230,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("does-not-exist.json");
 
-        let v = get_latest(AppState { result_path: path }).await;
+        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new() }).await;
         assert_eq!(v["cache_state"], "none");
         assert!(v["age_secs"].is_null());
         assert!(v["result"].is_null());
@@ -249,7 +243,7 @@ mod tests {
         let path = dir.path().join("last_run.json");
         std::fs::write(&path, b"{ this is not json").unwrap();
 
-        let v = get_latest(AppState { result_path: path }).await;
+        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new() }).await;
         assert_eq!(v["cache_state"], "none");
         assert!(v["result"].is_null());
     }
@@ -269,8 +263,30 @@ mod tests {
         v["run"]["finished_at_utc"] = serde_json::json!("not-a-timestamp");
         std::fs::write(&path, v.to_string()).unwrap();
 
-        let v = get_latest(AppState { result_path: path }).await;
+        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new() }).await;
         assert_eq!(v["cache_state"], "none");
         assert!(v["result"].is_null());
+    }
+
+    /// Ticket 18: the envelope's run-state reports running live, so a fresh
+    /// page load mid-run attaches immediately (§3.2).
+    #[tokio::test]
+    async fn latest_envelope_reflects_live_running_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("last_run.json");
+        let shared = crate::run::SharedState::new();
+        shared.begin().expect("acquire");
+        let app = build_router(AppState { result_path: path, shared });
+
+        let response = app
+            .oneshot(axum::http::Request::builder().uri("/api/latest").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["run_state"]["status"], "running");
+        assert!(v["run_state"]["since_utc"].as_str().is_some());
+        assert!(v["run_state"]["elapsed_secs"].as_i64().is_some());
     }
 }

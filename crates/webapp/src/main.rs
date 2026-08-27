@@ -1,16 +1,15 @@
-//! market_int webapp server (ticket 15 tracer bullet).
+//! market_int webapp server.
 //!
-//! Boots an axum server that serves the embedded frontend and `GET /api/latest`
-//! over the result file. Run endpoints arrive with ticket 18; auth with 17.
+//! Boots an axum server serving the embedded frontend, `GET /api/latest` over
+//! the result file, and (ticket 18) the run endpoints `POST /api/run` +
+//! `GET /api/progress` with live SSE progress.
 
 mod api;
 mod assets;
 mod auth;
-// Builders are exercised by unit tests now and consumed by the run handler
-// in ticket 18 — keep them visible to rustdoc meanwhile.
-#[allow(dead_code)]
 mod result;
 mod router;
+mod run;
 
 use std::path::PathBuf;
 
