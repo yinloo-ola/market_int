@@ -380,7 +380,7 @@ pub fn calculate_put_chain_score_components(
     calculate_put_score_parts(sharpe, safety, rate_of_return, trend_short, regime, params)
 }
 
-/// Returns a momentum flag based on price percentile./// Returns a momentum flag based on price percentile.
+/// Returns a momentum flag based on price percentile.
 pub fn momentum_flag(price_percentile: f64) -> &'static str {
     if price_percentile > constants::MOMENTUM_EXTENDED_THRESHOLD {
         "EXTENDED"
@@ -526,8 +526,13 @@ pub struct ScoredChainRow {
     /// `None` exactly when [`ScoredChainRow::score`] is `None`.
     pub score_components: Option<ScoreComponents>,
     pub price_percentile: Option<f64>,
-    /// In-window report only; `report_time` already normalized.
+    /// In-window report only; `report_time` already normalized — the result
+    /// document serializes this view.
     pub earnings_before_expiry: Option<EarningsInfo>,
+    /// Same report WITHOUT normalization (raw Tiger labels like 盘前/盘后).
+    /// The Telegram caption has its own historical display mapping and must
+    /// stay byte-identical; the result document ignores this field.
+    pub raw_earnings_in_window: Option<EarningsInfo>,
     /// `None` when the trend map has no entry (CSV column blank). Scoring
     /// consumed a `0.0` default independently of these display values.
     pub trend_short: Option<f64>,
@@ -606,13 +611,14 @@ pub fn scored_chain_rows(
             let strike_percentile = price_ranges.get(&chain.underlying).map(|range| {
                 calculate_strike_percentile(chain.strike, range.min, range.max)
             });
-            let earnings_before_expiry = match earnings_map.get(&chain.underlying) {
-                Some(info) if in_earnings_window(&chain.underlying) => Some(EarningsInfo {
-                    report_time: normalized_report_time(&info.report_time).to_string(),
-                    ..info.clone()
-                }),
+            let raw_earnings_in_window = match earnings_map.get(&chain.underlying) {
+                Some(info) if in_earnings_window(&chain.underlying) => Some(info.clone()),
                 _ => None,
             };
+            let earnings_before_expiry = raw_earnings_in_window.as_ref().map(|info| EarningsInfo {
+                report_time: normalized_report_time(&info.report_time).to_string(),
+                ..info.clone()
+            });
 
             ScoredChainRow {
                 underlying: chain.underlying.clone(),
@@ -637,6 +643,7 @@ pub fn scored_chain_rows(
                 score_components,
                 price_percentile: price_percentiles.get(&chain.underlying).copied(),
                 earnings_before_expiry,
+                raw_earnings_in_window,
                 trend_short: trend_data_entry.map(|(s, _)| *s),
                 trend_long: trend_data_entry.map(|(_, l)| *l),
                 realized_vol: realized_vols.get(&chain.underlying).copied(),
@@ -793,7 +800,7 @@ pub fn top_picks_from_rows(rows: &[ScoredChainRow]) -> Vec<TopPick> {
             score: *row.score.as_ref().unwrap(),
             sharpe: row.sharpe_ratio,
             price_percentile: row.price_percentile,
-            earnings: row.earnings_before_expiry.clone(),
+            earnings: row.raw_earnings_in_window.clone(),
             trend_short: row.trend_short,
             trend_long: row.trend_long,
             realized_vol: row.realized_vol,

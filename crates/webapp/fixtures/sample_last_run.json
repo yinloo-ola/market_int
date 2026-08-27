@@ -13,7 +13,8 @@
     "market_date_ny": "2026-08-27",
     "triggered_by": "web",
     "symbols_requested": 232,
-    "symbols_succeeded": 229
+    "symbols_succeeded": 229,
+    "error": null
   },
   "stages": [
     {
@@ -25,17 +26,20 @@
     {
       "name": "metrics",
       "status": "ok",
-      "duration_secs": 3
+      "duration_secs": 3,
+      "error": null
     },
     {
       "name": "chains_short",
       "status": "ok",
-      "duration_secs": 118
+      "duration_secs": 118,
+      "error": null
     },
     {
       "name": "chains_medium",
       "status": "ok",
-      "duration_secs": 122
+      "duration_secs": 122,
+      "error": null
     }
   ],
   "timeframes": {
@@ -55,7 +59,7 @@
           "ask": 2.15,
           "bid_size": 10,
           "ask_size": 10,
-          "expiration": "2026-09-04",
+          "expiration": "2026-09-02",
           "volume": 352,
           "open_interest": 1204,
           "rate_of_return": 0.624,
@@ -93,7 +97,7 @@
           "ask": 4.62,
           "bid_size": 10,
           "ask_size": 10,
-          "expiration": "2026-09-04",
+          "expiration": "2026-09-02",
           "volume": 100,
           "open_interest": 500,
           "rate_of_return": 0.35,
@@ -108,6 +112,7 @@
             "return": 0.2048
           },
           "price_percentile": 0.81,
+          "earnings_before_expiry": null,
           "trend_short": 1.036,
           "trend_long": 1.089,
           "realized_vol": 0.452,
@@ -166,6 +171,7 @@
           "score": null,
           "score_components": null,
           "price_percentile": null,
+          "earnings_before_expiry": null,
           "trend_short": null,
           "trend_long": null,
           "realized_vol": null,

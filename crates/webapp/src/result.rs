@@ -51,12 +51,11 @@ pub struct Thresholds {
 pub struct RunBlock {
     pub started_at_utc: String,
     pub finished_at_utc: String,
-    pub duration_secs: i64,
+    pub duration_secs: u64,
     pub market_date_ny: String,
     pub triggered_by: String,
     pub symbols_requested: usize,
     pub symbols_succeeded: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -65,7 +64,7 @@ pub struct StageDoc {
     pub name: String,
     pub status: String,
     pub duration_secs: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Explicit `null` when none — field-complete frozen column.
     pub error: Option<String>,
 }
 
@@ -88,11 +87,11 @@ pub struct TimeframeDoc {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Components {
-    pub sharpe: f64,
-    pub safety: f64,
+    pub sharpe: Option<f64>,
+    pub safety: Option<f64>,
     /// JSON key is `return`; core names it `return_part`.
     #[serde(rename = "return")]
-    pub return_part: f64,
+    pub return_part: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,7 +125,7 @@ pub struct Row {
     pub score: Option<f64>,
     pub score_components: Option<Components>,
     pub price_percentile: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Explicit `null` when absent — one of the frozen 27 columns.
     pub earnings_before_expiry: Option<EarningsDoc>,
     pub trend_short: Option<f64>,
     pub trend_long: Option<f64>,
@@ -138,12 +137,17 @@ pub struct Row {
 
 impl From<&ScoredChainRow> for Row {
     fn from(r: &ScoredChainRow) -> Self {
+        debug_assert!(
+            matches!(r.side, market_int_core::model::OptionChainSide::Put),
+            "result document schema documents puts; got {:?}",
+            r.side
+        );
         Row {
             underlying: r.underlying.clone(),
             sector: r.sector.clone(),
             strike: finite(r.strike),
             underlying_price: finite(r.underlying_price),
-            side: "put".to_string(),
+            side: String::from(&r.side),
             bid: finite(r.bid),
             mid: finite(r.mid),
             ask: finite(r.ask),
@@ -158,10 +162,13 @@ impl From<&ScoredChainRow> for Row {
             sharpe_ratio: finite(r.sharpe_ratio),
             strike_percentile: r.strike_percentile.and_then(finite),
             score: r.score.and_then(finite),
+            // Sanitization is uniform across every float, components included
+            // (module doc): today the scorer cannot emit non-finite parts, but
+            // the contract if it ever did is null — never a fabricated 0.0.
             score_components: r.score_components.map(|c| Components {
-                sharpe: finite(c.sharpe).unwrap_or_default(),
-                safety: finite(c.safety).unwrap_or_default(),
-                return_part: finite(c.return_part).unwrap_or_default(),
+                sharpe: finite(c.sharpe),
+                safety: finite(c.safety),
+                return_part: finite(c.return_part),
             }),
             price_percentile: r.price_percentile.and_then(finite),
             earnings_before_expiry: r.earnings_before_expiry.as_ref().map(|e| EarningsDoc {
@@ -249,7 +256,9 @@ pub fn build_document(outcome: &PerformAllOutcome) -> ResultDocument {
         run: RunBlock {
             started_at_utc: rfc3339(outcome.started_at),
             finished_at_utc: rfc3339(outcome.finished_at),
-            duration_secs: (outcome.finished_at - outcome.started_at).num_seconds().max(0),
+            duration_secs: (outcome.finished_at - outcome.started_at)
+                .num_seconds()
+                .max(0) as u64,
             market_date_ny: finished_ny.format("%Y-%m-%d").to_string(),
             triggered_by: "web".to_string(),
             symbols_requested: outcome.symbols_requested,
@@ -273,7 +282,7 @@ pub fn failure_document(started_at: DateTime<Utc>, error: &str) -> ResultDocumen
         run: RunBlock {
             started_at_utc: rfc3339(started_at),
             finished_at_utc: rfc3339(finished_at),
-            duration_secs: (finished_at - started_at).num_seconds().max(0),
+            duration_secs: (finished_at - started_at).num_seconds().max(0) as u64,
             market_date_ny: finished_ny.format("%Y-%m-%d").to_string(),
             triggered_by: "web".to_string(),
             symbols_requested: 0,
@@ -371,13 +380,17 @@ pub fn write_document(path: &Path, document: &ResultDocument) -> io::Result<()> 
 /// still invalid → treated as "no valid run yet" (`None`). Reads happen once
 /// per cache window; the async server wraps this in `spawn_blocking` later.
 pub fn read_document(path: &Path) -> Option<ResultDocument> {
+    use std::io::ErrorKind;
     for attempt in 0..2 {
         match std::fs::read(path) {
             Ok(bytes) => match serde_json::from_slice::<ResultDocument>(&bytes) {
                 Ok(doc) => return Some(doc),
+                // Parse failure on an existing file → single retry (§4.3).
                 Err(_) if attempt == 0 => {}
                 Err(_) => return None,
             },
+            // A missing file is not a collision: no valid run yet, no retry.
+            Err(e) if e.kind() == ErrorKind::NotFound => return None,
             Err(_) if attempt == 0 => {}
             Err(_) => return None,
         }
@@ -428,6 +441,7 @@ mod tests {
             score_components: if score.is_some() { parts } else { None },
             price_percentile: Some(0.81),
             earnings_before_expiry: None,
+            raw_earnings_in_window: None,
             trend_short: Some(1.036),
             trend_long: Some(1.089),
             realized_vol: Some(0.452),
@@ -518,7 +532,9 @@ mod tests {
                         row.score_components = Some(comps);
                         let dto_row = Row::from(&row);
                         let c = dto_row.score_components.unwrap();
-                        let sum_dto = c.sharpe + c.safety + c.return_part;
+                        let parts = [c.sharpe, c.safety, c.return_part];
+                        let all_some: Option<Vec<f64>> = parts.into_iter().collect();
+                        let sum_dto: f64 = all_some.unwrap().iter().sum();
                         assert!((sum_dto - dto_row.score.unwrap()).abs() < 1e-9);
                         checked += 1;
                     }
@@ -636,6 +652,7 @@ mod tests {
         }
 
         let mut nvda = chain_row("NVDA", 175.0, Some(0.5941234567890123));
+        nvda.expiration = "2026-09-02".to_string();
         nvda.sector = "Technology".to_string();
         nvda.rate_of_return = 0.624;
         nvda.sharpe_ratio = 1.83;
@@ -683,6 +700,7 @@ mod tests {
         xom.iv_rv_ratio = None;
 
         let mut aapl = chain_row("AAPL", 210.0, Some(0.512));
+        aapl.expiration = "2026-09-02".to_string();
         aapl.sector = "Technology".to_string();
 
         let mut outcome = sample_outcome(vec![nvda.clone(), aapl]);
