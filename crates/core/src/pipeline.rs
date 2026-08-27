@@ -42,6 +42,16 @@ impl Stage {
             Stage::ChainsMedium => "chains-medium",
         }
     }
+
+    /// Historical day-label for chain stages ("5-day"/"20-day"), from which
+    /// both success and error log wordings derive — keeps them drift-proof.
+    pub fn day_label(&self) -> &'static str {
+        match self {
+            Stage::ChainsShort => "5-day",
+            Stage::ChainsMedium => "20-day",
+            other => other.as_str(),
+        }
+    }
 }
 
 /// Everything a publish hook may need for one timeframe: the retrieved data
@@ -104,7 +114,7 @@ pub struct PerformAllOutcome {
 /// regime ("bypasses dynamic SPY checks to save time/API calls"). Single
 /// source here so no other construction site can drift from the pipeline.
 fn inherited_regime() -> MarketRegime {
-    MarketRegime::from_spy_trend(1.05)
+    MarketRegime::from_spy_trend(crate::constants::PERFORM_ALL_SPY_TREND_RATIO)
 }
 
 /// Either hands the retrieved bundle to the injected hook, or scores it here
@@ -163,20 +173,23 @@ fn record_stage(
 /// scoring/publishing failures are equivalent from here down — both logged
 /// with the arm's historical wording and reported for the stage (the run
 /// continues into the next timeframe either way).
-#[allow(clippy::too_many_arguments)]
 async fn run_chains_stage(
     conn: &mut Connection,
     requester: &mut Requester,
     symbols_file_path: &str,
-    timeframe: ExpiryTimeframe,
     stage: Stage,
-    day_label: &str,
-    err_prefix: &str,
     hook: Option<&Arc<dyn PublishHook>>,
     regime: &MarketRegime,
     sectors_map: &HashMap<String, String>,
     stages: &mut Vec<StageReport>,
 ) -> Option<ScoredTimeframe> {
+    let timeframe = match stage {
+        Stage::ChainsShort => ExpiryTimeframe::Short,
+        Stage::ChainsMedium => ExpiryTimeframe::Medium,
+        other => unreachable!("run_chains_stage called with non-chain stage {:?}", other),
+    };
+    let day_label = stage.day_label();
+    let err_prefix = format!("Error pulling {} option chains", day_label);
     let retrieved = match option::retrieve_option_chains(
         symbols_file_path,
         &model::OptionChainSide::Put,
@@ -268,10 +281,7 @@ pub async fn perform_all(
         conn,
         &mut requester,
         symbols_file_path,
-        ExpiryTimeframe::Short,
         Stage::ChainsShort,
-        "5-day",
-        "Error pulling 5-day option chains",
         hook_ref,
         &regime,
         &sectors_map,
@@ -283,10 +293,7 @@ pub async fn perform_all(
         conn,
         &mut requester,
         symbols_file_path,
-        ExpiryTimeframe::Medium,
         Stage::ChainsMedium,
-        "20-day",
-        "Error pulling 20-day option chains",
         hook_ref,
         &regime,
         &sectors_map,

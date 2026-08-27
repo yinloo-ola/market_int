@@ -11,6 +11,10 @@ pub const EMA_LONG_PERIOD: u32 = 50;
 pub const TREND_THRESHOLD_BULL: f64 = 0.98;
 pub const TREND_THRESHOLD_RANGE: f64 = 0.06; // How far threshold can drop (0.98 → 0.92)
 pub const BEARNESS_MAX: f64 = 0.08; // SPY drop mapping to bearness = 1.0
+/// SPY trend ratio the PerformAll pipeline assumes (bull hardcode, spec §2.4a:
+/// "bypasses dynamic SPY checks to save time/API calls"). Single source for
+/// both `pipeline::perform_all` and any hook needing a matching regime.
+pub const PERFORM_ALL_SPY_TREND_RATIO: f64 = 1.05;
 pub const MOMENTUM_HIGH_THRESHOLD: f64 = 0.80;
 pub const MOMENTUM_EXTENDED_THRESHOLD: f64 = 0.90;
 
