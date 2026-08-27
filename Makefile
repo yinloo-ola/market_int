@@ -3,7 +3,7 @@
 
 # Pull quotes for specified symbols
 pull-quotes:
-	RUST_LOG=debug cargo run -- pull-quotes /Volumes/Ext/code/personal/market_int/data/symbols.csv
+	RUST_LOG=debug cargo run -p market_int -- pull-quotes /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
 # Calculate Average True Range (ATR) — now part of perform-all
 # calculate-atr:
@@ -25,27 +25,27 @@ pull-quotes:
 
 # Pull option chain data with 5-day expiry
 pull-option-chain-5day:
-	RUST_LOG=debug cargo run -- pull-option-chain5-day /Volumes/Ext/code/personal/market_int/data/symbols.csv
+	RUST_LOG=debug cargo run -p market_int -- pull-option-chain5-day /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
 # Pull option chain data with 20-day expiry
 pull-option-chain-20day:
-	RUST_LOG=debug cargo run -- pull-option-chain20-day /Volumes/Ext/code/personal/market_int/data/symbols.csv
+	RUST_LOG=debug cargo run -p market_int -- pull-option-chain20-day /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
 # Legacy target - maps to 5-day option chain
 pull-option-chain:
-	RUST_LOG=debug cargo run -- pull-option-chain5-day /Volumes/Ext/code/personal/market_int/data/symbols.csv
+	RUST_LOG=debug cargo run -p market_int -- pull-option-chain5-day /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
 # Publish option chain to telegram
 publish-option-chain:
-	RUST_LOG=debug cargo run -- publish-option-chain /Volumes/Ext/code/personal/market_int/data/symbols.csv
+	RUST_LOG=debug cargo run -p market_int -- publish-option-chain /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
 # Perform all operations (quotes, ATR, Sharpe, option chains)
 perform-all:
-	RUST_LOG=debug cargo run -- perform-all /Volumes/Ext/code/personal/market_int/data/symbols.csv
+	RUST_LOG=debug cargo run -p market_int -- perform-all /Volumes/Ext/code/personal/market_int/data/symbols.csv
 
 # Test Tiger API with comma-separated symbols (e.g., make test-tiger SYMBOLS="AAPL,MSFT,GOOGL")
 test-tiger:
-	RUST_LOG=debug cargo run -- test-tiger "$(SYMBOLS)"
+	RUST_LOG=debug cargo run -p market_int -- test-tiger "$(SYMBOLS)"
 
 # Build the project
 check:
@@ -55,7 +55,7 @@ build:
 	cargo build
 
 build-release:
-	cargo build --release
+	cargo build --release -p market_int
 
 # Run tests
 test:

@@ -2,11 +2,11 @@ use std::collections::HashMap;
 
 use chrono::{Datelike, Duration, NaiveDate, Weekday};
 
-use crate::{
+use market_int_core::{
     constants, greeks, maxdrop, model, sharpe, trend,
     store::candle,
 };
-use crate::stats::estimate_historical_volatility;
+use market_int_core::stats::estimate_historical_volatility;
 
 // ── Historical Volatility ──────────────────────────────────────
 // estimate_historical_volatility lives in `stats.rs` (shared with the
@@ -14,7 +14,7 @@ use crate::stats::estimate_historical_volatility;
 // remain in backtest because they are backtest-domain utilities
 // (Tiger-like return formula). The pure BS greeks (cumulative_normal,
 // black_scholes_put, put_delta, etc.) live in `greeks.rs` and are used via
-// `crate::greeks::*`.
+// `market_int_core::greeks::*`.
 
 /// Matches Tiger API's num_of_weeks calculation.
 pub fn num_of_weeks(dte: u32) -> f64 {
@@ -1097,11 +1097,11 @@ impl BacktestConfig {
 
     /// Build a MarketRegime for this config.
     /// If use_regime is false, always returns bull defaults.
-    pub fn build_regime(&self, spy_trend_long: f64) -> crate::regime::MarketRegime {
+    pub fn build_regime(&self, spy_trend_long: f64) -> market_int_core::regime::MarketRegime {
         if !self.use_regime {
-            return crate::regime::MarketRegime::from_spy_trend(1.05); // bull defaults
+            return market_int_core::regime::MarketRegime::from_spy_trend(1.05); // bull defaults
         }
-        crate::regime::MarketRegime::from_spy_trend(spy_trend_long)
+        market_int_core::regime::MarketRegime::from_spy_trend(spy_trend_long)
     }
 
     /// Score a put option candidate using config's weights and filters.
@@ -1113,7 +1113,7 @@ impl BacktestConfig {
         rate_of_return: f64,
         trend_ratio_short: f64,
         trend_ratio_long: f64,
-        regime: &crate::regime::MarketRegime,
+        regime: &market_int_core::regime::MarketRegime,
         max_drop_safety: f64,
     ) -> Option<f64> {
         // Pre-filters. The rate>max and strike_percentile>max caps belong to
@@ -1447,7 +1447,7 @@ pub fn run_safety_calibration(
 
             let dte = period as u32;
             let trend_factor = config.compute_trend_factor(trend_short);
-            let (min_strike, max_strike) = crate::option::calculate_adjusted_strike_range(
+            let (min_strike, max_strike) = market_int_core::option::calculate_adjusted_strike_range(
                 price,
                 percentile_drop,
                 ema_drop,
@@ -1491,7 +1491,7 @@ pub fn run_safety_calibration(
                     .min(price * (1.0 - CALIB_MIN_OTM_BUFFER))
                     .max(max_strike); // never shrink below the original ceiling
 
-            let sector = crate::sectors::sector_of(sectors, symbol).to_string();
+            let sector = market_int_core::sectors::sector_of(sectors, symbol).to_string();
 
             // Walk strikes at $0.50 intervals from min_strike to extended_ceiling.
             let mut strike = (min_strike / 0.5).ceil() * 0.5;
@@ -1845,7 +1845,7 @@ pub fn run_backtest(
             // Compute strike range
             let dte = period as u32;
             let trend_factor = config.compute_trend_factor(trend_short);
-            let (min_strike, max_strike) = crate::option::calculate_adjusted_strike_range(
+            let (min_strike, max_strike) = market_int_core::option::calculate_adjusted_strike_range(
                 price,
                 percentile_drop,
                 ema_drop,
@@ -1934,7 +1934,7 @@ pub fn run_backtest(
                 } else {
                     0.0 // unused by score_candidate under StrikePercentile
                 };
-                let sector = crate::sectors::sector_of(sectors, symbol);
+                let sector = market_int_core::sectors::sector_of(sectors, symbol);
 
                 let score = if config.apply_earnings_rule {
                     // Production mirror: delegate to the earnings-aware production
@@ -2010,11 +2010,11 @@ pub fn run_backtest(
             if seen_symbols.contains(symbol_idx) {
                 continue;
             }
-            if *sector != crate::sectors::UNKNOWN_SECTOR && seen_sectors.contains(*sector) {
+            if *sector != market_int_core::sectors::UNKNOWN_SECTOR && seen_sectors.contains(*sector) {
                 continue;
             }
             seen_symbols.insert(*symbol_idx);
-            if *sector != crate::sectors::UNKNOWN_SECTOR {
+            if *sector != market_int_core::sectors::UNKNOWN_SECTOR {
                 seen_sectors.insert(*sector);
             }
             top_picks.push(*candidate);

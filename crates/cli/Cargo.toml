@@ -1,0 +1,31 @@
+[package]
+name = "market_int"
+version.workspace = true
+edition.workspace = true
+
+# Keeps the CLI package (and thus binary) name identical to the pre-workspace
+# layout, so target/release/market_int, the Dockerfile entrypoint, and job.yaml
+# all survive unchanged. Telegram publishing and backtest live here — core
+# cannot link them.
+
+[[bin]]
+name = "market_int"
+path = "src/main.rs"
+
+[features]
+default = []
+bundled-sqlite = ["market_int_core/bundled-sqlite"]
+
+[dependencies]
+market_int_core = { path = "../core" }
+telegram-bot-api.workspace = true
+clap.workspace = true
+dotenv.workspace = true
+env_logger.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+rusqlite.workspace = true
+csv.workspace = true
+log.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "market_int_webapp"
+version.workspace = true
+edition.workspace = true
+
+# Empty-for-now member (ticket 11): the axum server lands in ticket 15.
+# Depends ONLY on core, so Telegram publishing code can never be linked in.
+
+[[bin]]
+name = "market_int_webapp"
+path = "src/main.rs"
+
+[features]
+default = []
+bundled-sqlite = ["market_int_core/bundled-sqlite"]
+
+[dependencies]
+market_int_core = { path = "../core" }

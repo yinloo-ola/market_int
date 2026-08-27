@@ -1,61 +1,7 @@
-// HTTP client module.
-mod http {
-    // HTTP client implementation.
-    pub mod client;
-}
-// Data models.
-mod model;
-mod regime;
-// Pull quotes from API.
-mod quotes;
-// Statistical helpers: EMA smoothing and percentile.
-mod stats;
-// Maximum drop calculation.
-mod maxdrop;
-/// Pull option chains from API based on ATR retrieved from database.
-mod option;
-/// Telegram publishing (retrieval composition + send/caption)
+// CLI entrypoint: argument parsing and dispatch. All domain work lives in
+// `market_int_core`; this crate owns only the Telegram publish half
+// (publish.rs) and the backtest simulation (backtest.rs).
 mod publish;
-// Sharpe ratio calculation.
-mod sharpe;
-// Trend calculation.
-mod trend;
-// Price percentile calculation.
-mod price_percentile;
-/// module to read symbols from symbol file
-mod symbols;
-/// module to load sector mappings
-mod sectors;
-// Tiger API client
-mod tiger {
-    pub mod api_caller;
-}
-// Data storage module.
-mod store {
-    /// Candle data storage.
-    pub mod candle;
-    /// Earnings calendar snapshot storage.
-    pub mod earnings;
-    /// max drop storage.
-    pub mod max_drop;
-    /// option range storage.
-    pub mod option_chain;
-    /// price percentile storage.
-    pub mod price_percentile;
-    /// Sharpe ratio storage.
-    pub mod sharpe_ratio;
-    /// SQLite database interaction.
-    pub mod sqlite;
-    /// Trend data storage.
-    pub mod trend;
-}
-// module storing defaults
-mod constants;
-// Consolidated metrics pipeline
-mod metrics;
-
-// Backtest simulation
-mod greeks;
 mod backtest;
 
 use chrono::{Datelike, Local};
@@ -64,9 +10,12 @@ use chrono_tz::America::New_York;
 use clap::{Parser, Subcommand};
 use dotenv::dotenv;
 
-use crate::model::OptionChainSide;
-use crate::option::ExpiryTimeframe;
-use crate::tiger::api_caller::Requester;
+use market_int_core::model::OptionChainSide;
+use market_int_core::option::ExpiryTimeframe;
+use market_int_core::tiger::api_caller::Requester;
+use market_int_core::{
+    constants, metrics, model, quotes, sectors, store, symbols, tiger,
+};
 
 // Helper function to calculate the target expiration date (next Friday + 7 days)
 fn calculate_target_expiration_date() -> chrono::DateTime<chrono_tz::Tz> {
@@ -225,11 +174,11 @@ async fn main() {
                     return;
                 }
             };
-            let regime = match crate::regime::compute_spy_trend(&mut requester).await {
-                Ok(spy_trend) => crate::regime::MarketRegime::from_spy_trend(spy_trend),
+            let regime = match market_int_core::regime::compute_spy_trend(&mut requester).await {
+                Ok(spy_trend) => market_int_core::regime::MarketRegime::from_spy_trend(spy_trend),
                 Err(e) => {
                     log::warn!("Failed to compute SPY regime, using bull defaults: {}", e);
-                    crate::regime::MarketRegime::from_spy_trend(1.05)
+                    market_int_core::regime::MarketRegime::from_spy_trend(1.05)
                 }
             };
             let sectors = sectors::load_sectors("data/symbols.csv").unwrap_or_default();
@@ -257,11 +206,11 @@ async fn main() {
                     return;
                 }
             };
-            let regime = match crate::regime::compute_spy_trend(&mut requester).await {
-                Ok(spy_trend) => crate::regime::MarketRegime::from_spy_trend(spy_trend),
+            let regime = match market_int_core::regime::compute_spy_trend(&mut requester).await {
+                Ok(spy_trend) => market_int_core::regime::MarketRegime::from_spy_trend(spy_trend),
                 Err(e) => {
                     log::warn!("Failed to compute SPY regime, using bull defaults: {}", e);
-                    crate::regime::MarketRegime::from_spy_trend(1.05)
+                    market_int_core::regime::MarketRegime::from_spy_trend(1.05)
                 }
             };
             let sectors = sectors::load_sectors("data/symbols.csv").unwrap_or_default();
@@ -299,7 +248,7 @@ async fn main() {
                 }
             };
             // Set standard bull regime directly (bypasses dynamic SPY checks to save time/API calls)
-            let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
+            let regime = market_int_core::regime::MarketRegime::from_spy_trend(1.05);
             let sectors = sectors::load_sectors(&symbols_file_path).unwrap_or_default();
             match publish::retrieve_option_chains_with_expiry(
                 &symbols_file_path,
@@ -335,7 +284,7 @@ async fn main() {
 
         Commands::PublishOptionChain { symbols_file_path } => {
             let sectors = sectors::load_sectors("data/symbols.csv").unwrap_or_default();
-            let regime = crate::regime::MarketRegime::from_spy_trend(1.05);
+            let regime = market_int_core::regime::MarketRegime::from_spy_trend(1.05);
             match publish::publish_option_chains(&symbols_file_path, conn, 5, &regime, &sectors).await {
                 Ok(_) => log::info!("Successfully published option chains"),
                 Err(err) => log::error!("Error publishing option chains: {}", err),
@@ -457,7 +406,7 @@ async fn main() {
                     return;
                 }
             };
-            let sectors = crate::sectors::load_sectors(&symbols_file_path).unwrap_or_default();
+            let sectors = market_int_core::sectors::load_sectors(&symbols_file_path).unwrap_or_default();
 
             let earnings_by_symbol = match &earnings {
                 Some(path) => match backtest::load_earnings(path) {
@@ -572,7 +521,7 @@ async fn main() {
                     return;
                 }
             };
-            match option::fetch_earnings_to_file(&mut requester, from_date, to_date, &output).await {
+            match market_int_core::option::fetch_earnings_to_file(&mut requester, from_date, to_date, &output).await {
                 Ok(n) => log::info!("Wrote {} earnings entries to {}", n, output),
                 Err(e) => log::error!("Failed to fetch earnings: {}", e),
             }

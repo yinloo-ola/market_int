@@ -17,20 +17,31 @@ RUN adduser \
 
 WORKDIR /market_int
 
-# 1. Cache dependencies: copy only manifests first
+# 1. Cache dependencies: copy only manifests first (virtual workspace:
+#    root manifest + one per member crate)
 COPY Cargo.toml Cargo.lock ./
+COPY crates/core/Cargo.toml crates/core/
+COPY crates/cli/Cargo.toml crates/cli/
+COPY crates/webapp/Cargo.toml crates/webapp/
 
-# Create a dummy main.rs so cargo can resolve and compile dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release --features bundled-sqlite && rm -rf src
+# Dummy sources so cargo can resolve and compile dependencies, then build
+# only those dependencies into its own cacheable layer
+RUN mkdir -p crates/core/src crates/cli/src crates/webapp/src \
+ && echo "" > crates/core/src/lib.rs \
+ && echo "fn main() {}" > crates/cli/src/main.rs \
+ && echo "fn main() {}" > crates/webapp/src/main.rs
 
-# 2. Now copy the real source — dependency layer is cached unless Cargo.toml/Cargo.lock change
-COPY src ./src
+RUN cargo build --release --features bundled-sqlite -p market_int
 
-# Touch main.rs so cargo sees a newer file than the cached one
-RUN touch src/main.rs
+RUN rm -rf crates
 
-RUN cargo build --release --features bundled-sqlite
+# 2. Now copy the real source — dependency layer is cached unless manifests change
+COPY crates ./crates
+
+# Touch sources so cargo sees newer files than the cached dummy ones
+RUN touch crates/cli/src/main.rs
+
+RUN cargo build --release --features bundled-sqlite -p market_int
 
 RUN strip -s /market_int/target/release/market_int
 

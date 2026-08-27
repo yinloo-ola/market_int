@@ -9,7 +9,7 @@ use telegram_bot_api::{
     types::{ChatId, InputFile},
 };
 
-use crate::{
+use market_int_core::{
     model::{self, QuotesError},
     option::{self, ExpiryTimeframe},
     regime::MarketRegime,
@@ -55,7 +55,7 @@ fn load_chains_from_db(
     conn: &mut Connection,
     symbols: &[String],
 ) -> Vec<model::OptionStrikeCandle> {
-    use crate::store::option_chain;
+    use market_int_core::store::option_chain;
 
     let mut all_chains: Vec<model::OptionStrikeCandle> = Vec::with_capacity(100);
     for symbol in symbols {
@@ -78,7 +78,7 @@ pub async fn publish_option_chains(
     regime: &MarketRegime,
     sectors: &HashMap<String, String>,
 ) -> model::Result<()> {
-    crate::store::option_chain::create_table(&conn)?;
+    market_int_core::store::option_chain::create_table(&conn)?;
     let symbols = symbols::read_symbols_from_file(symbols_file_path)?;
 
     let all_chains = load_chains_from_db(&mut conn, &symbols);
@@ -288,7 +288,7 @@ pub async fn publish_to_telegram(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{EarningsInfo, TopPick};
+    use market_int_core::model::{EarningsInfo, TopPick};
 
     fn make_pick(rank: usize, underlying: &str, sector: &str) -> TopPick {
         TopPick {

@@ -42,7 +42,7 @@ fn calculate_trading_days_to_expiry(from_date: NewYorkDateTime, to_date: NewYork
 /// Calculates adjusted strike range based on DTE, period, and trend factor.
 /// Trend tightening is applied only to the upper bound (strike_to),
 /// keeping the lower bound (strike_from) un-tightened so more lower strikes are available.
-pub(crate) fn calculate_adjusted_strike_range(
+pub fn calculate_adjusted_strike_range(
     underlying_price: f64,
     percentile_drop: f64,
     ema_drop: f64,
@@ -321,7 +321,7 @@ fn ny_at(d: NaiveDate, h: u32, m: u32, s: u32) -> NewYorkDateTime {
 /// and/or publishing: all retrieved chains plus the per-symbol metric maps
 /// and the earnings snapshot fetched mid-run (already persisted to the DB).
 /// The publish half (`publish.rs`) consumes this; so will the webapp.
-pub(crate) struct RetrievedData {
+pub struct RetrievedData {
     pub all_chains: Vec<model::OptionStrikeCandle>,
     pub sharpe_ratios: HashMap<String, f64>,
     pub price_ranges: HashMap<String, model::PutPriceRange>,
@@ -336,8 +336,8 @@ pub(crate) struct RetrievedData {
 /// Retrieves option chains with a configurable expiry timeframe and
 /// persists them (chains + earnings snapshot), returning everything the
 /// publishing/scoring layer needs. No publishing happens here — the CLI's
-/// pull arms compose this with `publish::publish_to_telegram`, while the
-/// webapp consumes the data directly.
+/// pull arms compose this with its publish module, while the webapp consumes
+/// the data directly.
 pub async fn retrieve_option_chains(
     symbols_file_path: &str,
     side: &model::OptionChainSide,
@@ -520,7 +520,7 @@ fn collect_realized_vols(conn: &Connection, symbols: &[String]) -> HashMap<Strin
 /// other `collect_*` loaders). On a fresh DB with no prior live run the table
 /// is empty → returns an empty map (earnings rule is a no-op), matching the
 /// previous behavior. [T-001]
-pub(crate) fn collect_earnings(conn: &Connection, symbols: &[String]) -> HashMap<String, model::EarningsInfo> {
+pub fn collect_earnings(conn: &Connection, symbols: &[String]) -> HashMap<String, model::EarningsInfo> {
     if let Err(e) = earnings::create_table(conn) {
         log::error!("Failed to ensure earnings table: {}", e);
         return HashMap::new();
@@ -538,7 +538,7 @@ pub(crate) fn collect_earnings(conn: &Connection, symbols: &[String]) -> HashMap
     map
 }
 
-pub(crate) fn collect_metrics_from_db(
+pub fn collect_metrics_from_db(
     conn: &Connection,
     symbols: &[String],
 ) -> (

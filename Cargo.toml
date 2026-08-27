@@ -1,32 +1,37 @@
-[package]
-name = "market_int"
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/cli",
+    "crates/webapp",
+]
+
+[workspace.package]
 version = "0.9.0"
 edition = "2024"
 
-[features]
-default = []
-bundled-sqlite = ["rusqlite/bundled"]
-
-[dependencies]
+[workspace.dependencies]
+# shared by core (+ members as needed)
 reqwest = { version = "0.11", features = ["json", "multipart"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.12.0", features = ["full"] }
-url = "1"
-dotenv = "0.15"
 lazy_static = "1.4"
 thiserror = "1"
 chrono = "0.4.38"
 chrono-tz = "0.4"
 rusqlite = { version = "0.32.1" }
-clap = { version = "4.5.20", features = ["derive"] }
 log = "0.4.22"
-env_logger = "0.11.5"
 csv = "1.3.0"
-telegram-bot-api = "0.1.0"
 rsa = "0.9"
 sha1 = { version = "0.10", features = ["oid"] }
 base64 = "0.21"
+tempfile = "3.27.0"
+# cli-only
+telegram-bot-api = "0.1.0"
+clap = { version = "4.5.20", features = ["derive"] }
+dotenv = "0.15"
+env_logger = "0.11.5"
 
 [profile.dev]
 debug = 2               # full debug info for debugger
@@ -40,6 +45,3 @@ opt-level = 3           # max optimization
 lto = "thin"            # fast LTO — most of the benefit, much quicker than "fat"
 strip = true            # strip debug symbols from release binary
 panic = "abort"         # smaller binary, no unwind tables
-
-[dev-dependencies]
-tempfile = "3.27.0"

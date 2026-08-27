@@ -103,8 +103,12 @@ mod tests {
 
     #[test]
     fn test_load_actual_sectors_file() {
-        // Integration test: verify data/symbols.csv has sector mappings
-        let sectors_map = load_sectors("data/symbols.csv").unwrap();
+        // Integration test: verify <repo>/data/symbols.csv has sector mappings.
+        // Anchored to the crate manifest because the test binary's CWD is the
+        // package root inside the three-crate workspace.
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let path = format!("{}/../../data/symbols.csv", manifest_dir);
+        let sectors_map = load_sectors(&path).unwrap();
         assert!(!sectors_map.is_empty(), "symbols.csv should have sector mappings");
 
         // Check that all known tickers are mapped
