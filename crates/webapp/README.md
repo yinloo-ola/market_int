@@ -77,18 +77,20 @@ done: this list records the console steps that make it work end to end.
    # or: cargo run -p market_int_webapp -- --result-file ... --firebase-project-id <PROJECT_ID>
    ```
 
-7. Frontend wiring — create `crates/webapp/frontend/.env.local`
-   (gitignored values are still public-by-design; keep them out of git
-   anyway so project switching stays easy):
+7. Frontend wiring — from `crates/webapp/frontend`, copy the template and
+   fill it (gitignored values are still public-by-design; keep them out of
+   git anyway so project switching stays easy):
 
    ```bash
-   VITE_FIREBASE_API_KEY=<web API key>
-   VITE_FIREBASE_AUTH_DOMAIN=<PROJECT_ID>.firebaseapp.com
-   VITE_FIREBASE_PROJECT_ID=<PROJECT_ID>
-   VITE_FIREBASE_APP_ID=<web app id>
+   cp .env.local.example .env.local
+   # then paste the four values from step 5 into .env.local:
+   #   VITE_FIREBASE_API_KEY / AUTH_DOMAIN / PROJECT_ID / APP_ID
    ```
 
-   then rebuild: `npm run build` (vite bakes envs at build time).
+8. Verify: restart backend (it logs whether auth is armed), rebuild the
+   frontend (`npm run build`; vite bakes envs at build time), reload the
+   page — you should land on the sign-in card; create an account and the
+   header shows your email with a working Sign out.
 
 Without step 7 the frontend shows an explicit "auth not configured" card and
 `npm run build`/`npm run dev` still succeed without any of these vars.
