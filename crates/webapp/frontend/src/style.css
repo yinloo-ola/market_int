@@ -33,11 +33,38 @@ body {
   max-width: 1280px;
   margin: 0 auto;
   padding: 16px;
+  /* t19 sticky chrome (§6.2): full-height flex column — header/tabs/toolbar/
+     pagination stay put, only .scroll-region scrolls. */
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 
-header h1 {
-  font-size: 15px;
+/* ── Brand header: wordmark + letterspaced descriptor ────────────── */
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
   margin: 0 0 4px;
+}
+
+.brand-mark {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.brand-accent { color: var(--accent); }
+
+.brand-sub {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .cache-line {
@@ -372,9 +399,11 @@ tr.prow td { opacity: 0.62; }
 }
 
 .gate-title {
-  font-size: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
   margin: 0 0 16px;
-  color: #1c2733;
 }
 
 .gate-label {
@@ -452,17 +481,85 @@ tr.prow td { opacity: 0.62; }
 
 .gate-note { color: #51606f; }
 
-/* Header user chip — floats right so t16/t18 header regions stay untouched. */
+/* Header account pill + menu — floats right so t16/t18 header regions stay
+   untouched. Identity shows on the pill; Sign out lives in the menu, so the
+   interaction is identical for mouse and touch (no hover dependency). */
 .user-box {
+  position: relative; /* anchors the dropdown */
   float: right;
   display: flex;
-  gap: 8px;
   align-items: center;
   font-size: 12px;
-  color: #51606f;
 }
 
-.user-box .user-email { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.user-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.user-box .user-email {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-caret {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.account-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 45; /* above .pop-backdrop (40), so the menu rides over it */
+  min-width: 230px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(28, 39, 51, 0.12);
+}
+
+.acct-label {
+  padding: 5px 10px 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.acct-email {
+  padding: 0 10px 4px;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.account-menu .btn-ghost {
+  display: flex;
+  width: 100%;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+/* ghost action button — matches the tool-btn hairline language */
+.btn-ghost {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+.btn-ghost:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 
 
 /* ── Ticket 18 — Run button + progress strip (spec §3.3, §6.2/§6.6) ── */
@@ -560,4 +657,353 @@ tr.prow td { opacity: 0.62; }
   margin-top: 8px;
   font-size: 12px;
   color: #a02a1a;
+}
+
+/* ── Ticket 19 — hover explainers, row expansion, sticky shell, S1/S6 (§6.2/§6.4–§6.6) ── */
+
+/* Sticky-shell regions: the active pane fills the leftover height and only
+   its .scroll-region scrolls; the pager sits below it, pinned by the shell. */
+.pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.pane[hidden] { display: none; }
+
+.scroll-region {
+  flex: 1 1 auto;
+  min-height: 140px;
+  overflow: auto;
+}
+
+/* Hover explainers (§6.5): dark pill rendered BELOW the label (pure CSS,
+   no portals) so the sticky table header never clips it. */
+.tip { position: relative; }
+
+.tip-target {
+  border-bottom: 1px dotted #9aa7b5;
+  cursor: help;
+}
+
+.tip::after {
+  content: attr(data-tip);
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  width: max-content;
+  max-width: 340px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: #1c2733;
+  color: #ffffff;
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 1.45;
+  white-space: normal;
+  text-align: left;
+  box-shadow: 0 2px 10px rgba(28, 39, 51, 0.28);
+  pointer-events: none;
+}
+
+.tip:hover::after,
+.tip:focus-within::after { display: block; }
+
+/* right-edge labels: Tip.jsx measures on entry and flips alignment so the
+   pill grows leftward and stays inside the viewport */
+.tip-flip::after {
+  left: auto;
+  right: 0;
+}
+
+/* Row expansion (§6.4): full-width sub-row with a light-blue left border,
+   four blocks on a 2×2 grid (chips row spans both columns). */
+tr.expandable { cursor: pointer; }
+tr.expandable.open td { background: #eef4fc; }
+
+th.exp-col,
+td.exp-col {
+  width: 26px;
+  min-width: 26px;
+  padding: 5px 2px;
+  text-align: center;
+  color: var(--muted);
+}
+
+tr.exp-row > td {
+  background: #fbfcfe;
+  white-space: normal;
+  padding: 0;
+  /* the details cell spans every column, so on a wider-than-screen table it
+     would sit far off to the right — pin it to the scroller's left edge and
+     cap the panel at the visible width instead */
+  position: sticky;
+  left: 0;
+}
+
+.expansion {
+  border-left: 3px solid #b9d2f2;
+  padding: 10px 12px;
+  max-width: calc(100vw - 24px);
+}
+
+.exp-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(300px, 1fr));
+  gap: 10px;
+}
+
+.exp-block {
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.exp-block h4 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.exp-chips { grid-column: 1 / -1; }
+
+/* label/value rows under the chart and in premium economics */
+.kv {
+  display: grid;
+  grid-template-columns: minmax(96px, max-content) 1fr;
+  gap: 1px 12px;
+  align-items: baseline;
+  margin-top: 3px;
+  font-size: 12.5px;
+}
+.kv-label { color: var(--muted); }
+.kv-value {
+  text-align: right;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.kv .muted-note { grid-column: 1 / -1; text-align: left; }
+
+/* band chart: shaded scored band + strike/break-even/spot markers */
+.band-chart {
+  position: relative;
+  height: 50px;
+  margin: 2px 0 10px;
+  background: #f2f5f8;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.band-shade {
+  position: absolute;
+  top: 0;
+  height: 30px;
+  background: rgba(13, 92, 215, 0.14);
+  border-left: 1px solid rgba(13, 92, 215, 0.35);
+  border-right: 1px solid rgba(13, 92, 215, 0.35);
+}
+
+.marker { position: absolute; top: 0; }
+
+.marker-tick {
+  position: absolute;
+  top: 0;
+  left: -1px;
+  width: 2px;
+  height: 20px;
+}
+
+.marker-cap {
+  position: absolute;
+  top: 32px;
+  left: 0;
+  transform: translateX(-50%);
+  font-size: 10px;
+  line-height: 1.25;
+  color: var(--muted);
+  white-space: nowrap;
+  text-align: center;
+}
+
+.mk-strike .marker-tick { height: 30px; background: var(--accent); }
+.mk-strike .marker-cap { color: var(--accent); font-weight: 600; }
+.mk-be .marker-tick { background: var(--ok); }
+.mk-spot .marker-tick { background: var(--ink); }
+
+/* score breakdown bars (weights 20/40/40) */
+.bar-row {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) 1fr 48px;
+  gap: 8px;
+  align-items: center;
+  margin-top: 5px;
+  font-size: 12px;
+}
+.bar-weight { color: var(--muted); font-size: 10.5px; }
+.bar-track {
+  display: block;
+  height: 8px;
+  background: #edf1f5;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 4px;
+}
+.bar-val {
+  text-align: right;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.bar-row.total {
+  margin-top: 9px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--border);
+}
+.bar-row.total .bar-label { font-weight: 600; }
+
+/* hidden-column chips (§6.4 block 4) */
+.chip-hidden {
+  display: inline-block;
+  margin: 0 6px 6px 0;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--page);
+  font-size: 11.5px;
+}
+.chip-hidden.is-null { opacity: 0.55; }
+
+/* amber earnings warning banner (§6.4) */
+.earnings-banner {
+  margin-bottom: 10px;
+  padding: 7px 10px;
+  border: 1px solid #eedfb8;
+  border-radius: 5px;
+  background: #fdf3df;
+  color: #8a5a00;
+  font-size: 12px;
+}
+
+/* S6 stage badges: ✗/△/✓ per stage, errors expandable (§6.6) */
+.stage-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.sbadge {
+  display: inline-block;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.sbadge summary { cursor: pointer; list-style: none; }
+.sbadge summary::-webkit-details-marker { display: none; }
+.sbadge.ok      { color: var(--ok);  border-color: #cfe5d6; background: #eef7f0; }
+.sbadge.partial { color: var(--warn); border-color: #ecd9ae; background: #fbf3dd; }
+.sbadge.failed  { color: var(--err); border-color: #e8c4bd; background: #fbeeec; }
+
+.errbox {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  max-height: 180px;
+  overflow: auto;
+  background: #fdf0f0;
+  border: 1px solid #e8c4bd;
+  border-radius: 5px;
+  color: var(--err);
+  font-size: 11.5px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.stage-failed-panel { border-color: #e8c4bd; background: #fbeeec; color: var(--err); }
+.stage-failed-panel .errbox { background: #ffffff; }
+
+/* S1 no-run-yet hero */
+.hero {
+  margin-top: 8px;
+  padding: 26px 30px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.hero h2 { margin: 0 0 8px; font-size: 15px; }
+.hero p { margin: 7px 0; max-width: 72ch; }
+
+.muted-note { color: var(--muted); font-size: 12px; }
+
+/* ── Narrow screens ─────────────────────────────────────────────────
+   §6 preface: desktop-first ≥1200px; smaller screens get horizontal
+   scrolling for the TABLE, but overlays must stay inside the viewport. */
+
+@media (max-width: 640px) {
+  /* The right-anchored 92vw panel overflows the LEFT viewport edge when the
+     button sits mid-row on a phone (negative x is unscrollable). Anchor math
+     (fixed + top:auto static position) proved flaky across browsers — panel
+     opened unseen while the backdrop ate every tap — so use a deterministic
+     bottom sheet instead: clamped to the viewport, no anchor at all. */
+  .picker-panel {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    top: auto;
+    bottom: 12px;
+    width: auto;
+    max-height: calc(100vh - 60px);
+    overflow: auto;
+  }
+
+  /* the 2×minmax(300px,1fr) expansion grid exceeds phone width */
+  .exp-grid { grid-template-columns: 1fr; }
+
+  /* touch has no real hover — the pill shows on tap, so it must never depend
+     on where the label sits: fixed bottom sheet, always fully visible and
+     unclipped by the scroll container */
+  .tip::after {
+    position: fixed;
+    top: auto;
+    bottom: 12px;
+    left: 12px;
+    right: 12px;
+    width: auto;
+    max-width: none;
+  }
+  .tip-flip::after { right: 12px; }
+
+  /* A tap on a header must SORT. :hover-revealed content inside the header
+     makes mobile browsers swallow the first tap as "hover" (pseudo-element
+     content is invisible to that heuristic — you get neither pill nor
+     click), so header-label tooltips are desktop-only. The same explainers
+     live on the expansion-panel labels, which have no competing tap
+     behavior and render as the bottom sheet above. */
+  th .tip::after { display: none !important; }
+  th .tip-target { border-bottom: 0; cursor: inherit; }
+
+  /* Z-ladder for the bottom-sheet pills: the sticky exp-row cell is its own
+     stacking context, so the pill's z-index is trapped inside it — the pager
+     (z 3) painted above the whole subtree. Order: rows < pager < details
+     cell (pill rides along) < sticky header. */
+  .pager { z-index: 1; }
+  tr.exp-row > td { z-index: 2; }
+  th { z-index: 3; }
+}
+
+@media (max-width: 480px) {
+  /* three label columns don't fit nowrap items below ~480px */
+  .picker-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

@@ -32,7 +32,7 @@ function row(over = {}) {
     sharpe_ratio: 1.83,
     strike_percentile: 0.412,
     score: 0.5941234567890123,
-    score_components: { sharpe: 0.183, safety: 0.261, return_part: 0.15 },
+    score_components: { sharpe: 0.183, safety: 0.261, return: 0.15 },
     price_percentile: 0.81,
     earnings_before_expiry: { report_date: "2026-08-31", report_time: "after_close", expected_eps: 1.24 },
     trend_short: 1.036,
@@ -131,7 +131,7 @@ await tick();
 
 ok("expansion panel opens", !!q(".expansion"));
 ok("four blocks render", qa(".exp-block").length >= 4);
-ok("band chart draws three markers", qa(".marker").length === 3);
+ok("band chart draws two markers (strike, spot — break-even overlaps strike)", qa(".marker").length === 2);
 
 const econText = qa(".exp-block")[1]?.textContent ?? "";
 ok("capital arithmetic (strike×100)", econText.includes("17,500"));

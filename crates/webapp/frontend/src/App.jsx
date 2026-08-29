@@ -144,6 +144,9 @@ function App() {
   });
 
   const whoami = () => user()?.email || user()?.uid || "";
+  // Account menu (USER_SLOT): identity on the pill, Sign out inside the menu —
+  // one interaction model for mouse and touch, no hover dependency.
+  const [accountOpen, setAccountOpen] = createSignal(false);
   /* USER_SLOT(t17):end */
 
   const columns = createColumnStore();
@@ -166,14 +169,58 @@ function App() {
           {/* USER_SLOT(t17):start — header user chip + Sign out */}
           <div class="user-box">
             <Show when={user()}>
-              <span class="user-email">{whoami()}</span>
-              <button type="button" onClick={() => signOutUser()}>
-                Sign out
+              <button
+                type="button"
+                class="btn-ghost user-pill"
+                aria-haspopup="menu"
+                aria-expanded={accountOpen()}
+                onClick={() => setAccountOpen(!accountOpen())}
+              >
+                <svg
+                  width="13"
+                  height="13"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                  <circle cx="12" cy="7" r="4" />
+                </svg>
+                <span class="user-email">{whoami()}</span>
+                <span class="user-caret" aria-hidden="true">▾</span>
               </button>
+              <Show when={accountOpen()}>
+                {/* invisible backdrop closes on any outside click */}
+                <div class="pop-backdrop" onClick={() => setAccountOpen(false)} />
+                <div class="account-menu" role="menu" aria-label="account">
+                  <div class="acct-label">Signed in as</div>
+                  <div class="acct-email">{whoami()}</div>
+                  <button
+                    type="button"
+                    class="btn-ghost"
+                    role="menuitem"
+                    onClick={() => {
+                      setAccountOpen(false);
+                      signOutUser();
+                    }}
+                  >
+                    Sign out
+                  </button>
+                </div>
+              </Show>
             </Show>
           </div>
           {/* USER_SLOT(t17):end */}
-          <h1>market_int · put-selling candidates</h1>
+          <h1 class="brand">
+            <span class="brand-mark">
+              Market<span class="brand-accent">Int</span>
+            </span>
+            <span class="brand-sub">Put-Selling Candidates</span>
+          </h1>
           <Show when={!latest.loading && !latest.error}>
             <CacheLine envelope={latest()} />
           </Show>

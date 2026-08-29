@@ -97,7 +97,12 @@ export function AuthGate() {
   return (
     <div class="gate-wrap">
       <div class="gate-card">
-        <h1 class="gate-title">market_int · put-selling candidates</h1>
+        <h1 class="gate-title">
+          <span class="brand-mark">
+            Market<span class="brand-accent">Int</span>
+          </span>
+          <span class="brand-sub">Put-Selling Candidates</span>
+        </h1>
 
         <Show
           when={AUTH_CONFIGURED}

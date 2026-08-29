@@ -60,8 +60,9 @@ function BandChart(props) {
   };
   const markers = usable
     ? [
+        // No break-even marker: it sits ~one premium away from the strike and
+        // the two captions overlap at chart scale — cushion_be below carries it.
         { cls: "mk-strike", label: "strike", v: r.strike },
-        { cls: "mk-be", label: "break-even", v: breakEven },
         { cls: "mk-spot", label: "spot", v: r.underlying_price },
       ].filter((m) => posOf(m.v) != null)
     : [];
@@ -145,7 +146,7 @@ function ScoreBreakdown(props) {
   const bars = [
     { key: "sb_sharpe", label: "Sharpe", weight: WEIGHTS.sharpe, v: c?.sharpe },
     { key: "sb_safety", label: "Band safety", weight: WEIGHTS.safety, v: c?.safety },
-    { key: "sb_ret", label: "Return vs ideal", weight: WEIGHTS.return_part, v: c?.return_part },
+    { key: "sb_ret", label: "Return vs ideal", weight: WEIGHTS.return_part, v: c?.return },
   ];
 
   return (
