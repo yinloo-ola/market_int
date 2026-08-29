@@ -7,7 +7,7 @@
 //! `null` via [`finite`], applied to every float at build time.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use chrono_tz::America::New_York;
@@ -395,7 +395,9 @@ pub fn write_document(path: &Path, document: &ResultDocument) -> io::Result<()> 
 
 /// Cache loader per spec §4.3: on parse failure re-read once after ~500 ms;
 /// still invalid → treated as "no valid run yet" (`None`). Reads happen once
-/// per cache window; the async server wraps this in `spawn_blocking` later.
+/// per cache window. Blocking by design — async callers must go through
+/// [`read_document_off_thread`], which parks it on tokio's blocking pool so
+/// the retry sleep + multi-MB parse never stall an async worker.
 pub fn read_document(path: &Path) -> Option<ResultDocument> {
     use std::io::ErrorKind;
     for attempt in 0..2 {
@@ -414,6 +416,17 @@ pub fn read_document(path: &Path) -> Option<ResultDocument> {
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
     None
+}
+
+/// The async adapter the note above promised: [`read_document`] runs on
+/// tokio's blocking pool. A panic inside the read surfaces here, loudly,
+/// instead of poisoning a shared worker.
+pub(crate) async fn read_document_off_thread(
+    path: PathBuf,
+) -> Option<ResultDocument> {
+    tokio::task::spawn_blocking(move || read_document(&path))
+        .await
+        .expect("spawn_blocking read_document")
 }
 
 #[cfg(test)]
@@ -581,6 +594,28 @@ mod tests {
         assert!(
             began.elapsed() >= std::time::Duration::from_millis(450),
             "expected one ~500ms retry before giving up"
+        );
+    }
+
+    // ── scenario: the async adapter (blocking pool) reads identically ──
+
+    #[tokio::test]
+    async fn off_thread_read_matches_sync_semantics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("last_run.json");
+        write_document(
+            &path,
+            &build_document(&sample_outcome(vec![chain_row("NVDA", 175.0, Some(0.59))])),
+        )
+        .unwrap();
+
+        let off = read_document_off_thread(path).await.expect("parse");
+        assert_eq!(off.schema_version, SCHEMA_VERSION);
+        // Absent file: no valid run yet — same as the sync loader.
+        assert!(
+            read_document_off_thread(dir.path().join("absent.json"))
+                .await
+                .is_none()
         );
     }
 

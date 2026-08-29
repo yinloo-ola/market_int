@@ -15,7 +15,7 @@ use chrono::Utc;
 use serde::Serialize;
 
 use crate::auth::VerifiedIdentity;
-use crate::result::{cache_is_fresh, document_age_secs, read_document, ResultDocument};
+use crate::result::{cache_is_fresh, document_age_secs, read_document_off_thread, ResultDocument};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LatestEnvelope {
@@ -53,8 +53,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .with_state(state)
 }
 
-fn envelope_for(state: &AppState) -> LatestEnvelope {
-    let result_path = &state.result_path;
+fn envelope_for(state: &AppState, doc: Option<ResultDocument>) -> LatestEnvelope {
     let no_clock = || LatestEnvelope {
         schema_version: crate::result::SCHEMA_VERSION,
         age_secs: None,
@@ -67,7 +66,7 @@ fn envelope_for(state: &AppState) -> LatestEnvelope {
         result: None,
     };
 
-    let Some(doc) = read_document(result_path) else {
+    let Some(doc) = doc else {
         return no_clock(); // missing or unparseable file
     };
     // Present but clockless also counts as nothing usable (spec §5).
@@ -94,7 +93,10 @@ fn envelope_for(state: &AppState) -> LatestEnvelope {
 async fn latest(State(state): State<AppState>) -> impl IntoResponse {
     // Always 200: one status code, one parse path; no-data branches on
     // `result === null` client-side (§3.2 rejects a 404 shape).
-    (StatusCode::OK, Json(envelope_for(&state))).into_response()
+    // The §4.3 read (retry sleep + multi-MB parse) runs on the blocking
+    // pool — an async worker never stalls on it.
+    let doc = read_document_off_thread(state.result_path.clone()).await;
+    (StatusCode::OK, Json(envelope_for(&state, doc))).into_response()
 }
 
 /// Debug endpoint echoing the verified identity (ticket 06 recipe, §3.1).

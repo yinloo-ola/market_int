@@ -19,7 +19,7 @@
 //! still emits `run_finished ok:false` with empty stages.
 
 use std::convert::Infallible;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -340,8 +340,8 @@ fn outcome_armed(outcome: &PerformAllOutcome) -> bool {
 /// The cached-hit branch of the precedence: idle + fresh + armed → 200 JSON
 /// without rows. Missing / unparseable / clockless / stale / unarmed files all
 /// fall through to a fresh run (None here).
-fn cached_hit(result_path: &Path) -> Option<Response> {
-    let doc = result::read_document(result_path)?;
+async fn cached_hit(result_path: PathBuf) -> Option<Response> {
+    let doc = result::read_document_off_thread(result_path).await?;
     let age_secs = result::document_age_secs(&doc)?;
     if !result::cache_is_fresh(age_secs) {
         return None;
@@ -402,14 +402,14 @@ pub(crate) async fn run(State(st): State<RunAppState>) -> Response {
         return already_running_response(since_utc);
     }
     // (2) Idle + fresh + armed file → cached JSON, zero upstream calls.
-    if let Some(cached) = cached_hit(&st.result_path) {
+    if let Some(cached) = cached_hit(st.result_path.clone()).await {
         return cached;
     }
     // (2b) Off-hours one-run gate (ticket 22): outside market hours, one armed
     //      run per window; the next unlocks at the following market open.
     //      Checked after the cache gate (a fresh hit already answers without
     //      upstream calls) and before the lock (a refusal acquires nothing).
-    if let Some(doc) = result::read_document(&st.result_path) {
+    if let Some(doc) = result::read_document_off_thread(st.result_path.clone()).await {
         if let Some(blocked) = off_hours_block(market::session((st.clock)()), &doc) {
             return (
                 StatusCode::FORBIDDEN,

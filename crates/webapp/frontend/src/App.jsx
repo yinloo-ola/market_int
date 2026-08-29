@@ -63,8 +63,55 @@ function rowCountOf(result, tabId) {
 }
 
 function CacheLine(props) {
+  // §6.2 cache pill: "Cached · 6m left · run 09:07 ET", ticking every 30 s.
+  // The countdown anchors to the server-computed age_secs at refetch time;
+  // between refetches the client clock fills the gap.
+  const [tick, setTick] = createSignal(0);
+  onMount(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 30_000);
+    onCleanup(() => clearInterval(id));
+  });
+  let anchoredAtMs = Date.now();
+  let ageAtAnchor = 0;
+  createEffect(
+    on(
+      () => props.envelope,
+      (env) => {
+        anchoredAtMs = Date.now();
+        ageAtAnchor = env?.age_secs ?? 0;
+      }
+    )
+  );
+  const ageNow = () => {
+    tick(); // 30 s heartbeat
+    return ageAtAnchor + Math.floor((Date.now() - anchoredAtMs) / 1000);
+  };
   const state = () => props.envelope.cache_state;
-  const mins = () => Math.floor((props.envelope.age_secs ?? 0) / 60);
+  const mins = () => Math.floor(ageNow() / 60);
+  // "6m left" per §6.2; the final minute counts down in seconds.
+  const left = () => {
+    const s = Math.max(0, (props.envelope.cache_secs ?? 0) - ageNow());
+    return s >= 60 ? `${Math.floor(s / 60)}m` : `${s}s`;
+  };
+  // RFC3339 stamp → "09:07 ET" in the market's timezone.
+  const runAtEt = () => {
+    const stamp = props.envelope.result?.run?.finished_at_utc;
+    if (!stamp) return undefined;
+    try {
+      const t = new Date(stamp);
+      if (Number.isNaN(t.getTime())) return undefined;
+      return (
+        new Intl.DateTimeFormat("en-US", {
+          timeZone: "America/New_York",
+          hour: "2-digit",
+          minute: "2-digit",
+          hourCycle: "h23",
+        }).format(t) + " ET"
+      );
+    } catch {
+      return undefined;
+    }
+  };
   return (
     <div class="cache-line">
       <Show
@@ -72,15 +119,22 @@ function CacheLine(props) {
         fallback={
           <Show when={state() === "stale"}>
             <span>
-              Last run <b>{mins()}</b> min ago
+              Stale · last run <b>{mins()}</b> min ago
+              <Show when={runAtEt()}>
+                {" "}
+                · run <b>{runAtEt()}</b>
+              </Show>
             </span>
           </Show>
         }
       >
         {/* Window comes from the server (cache_secs) — never hardcode it. */}
         <span>
-          Cached · <b>{props.envelope.cache_secs - (props.envelope.age_secs ?? 0)}s</b> left · age{" "}
-          <b>{mins()}</b> min
+          Cached · <b>{left()}</b> left
+          <Show when={runAtEt()}>
+            {" "}
+            · run <b>{runAtEt()}</b>
+          </Show>
         </span>
       </Show>
       <span class={"pill " + state()}>{state()}</span>
