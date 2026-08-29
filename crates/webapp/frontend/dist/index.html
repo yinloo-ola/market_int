@@ -3,6 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- PNG first (Safari has no SVG-favicon support); SVG last so
+         Chrome/Firefox/Edge prefer it. -->
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>MarketInt · Put-Selling Candidates</title>
     <script type="module" crossorigin src="/assets/app.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/app.css">

@@ -10,8 +10,9 @@
 //!
 //! Why includes instead of rust-embed: its directory walker honors
 //! `.gitignore`, which silently emptied the embed set (ticket 15 find). The
-//! vite config pins unhashed names (`assets/app.js|css`) + inlines all other
-//! assets into them, honoring §6.1's ≤10-file embedded budget.
+//! vite config pins unhashed names (`assets/app.js|css`, the three favicon
+//! files) + inlines all other assets into them, honoring §6.1's ≤10-file
+//! embedded budget.
 
 use axum::extract::Request;
 use axum::http::{header, StatusCode};
@@ -25,6 +26,10 @@ mod embedded {
     pub const INDEX_HTML: &str = include_str!("../frontend/dist/index.html");
     pub const APP_JS: &[u8] = include_bytes!("../frontend/dist/assets/app.js");
     pub const APP_CSS: &[u8] = include_bytes!("../frontend/dist/assets/app.css");
+    pub const FAVICON_SVG: &[u8] = include_bytes!("../frontend/dist/favicon.svg");
+    pub const FAVICON_PNG_32: &[u8] = include_bytes!("../frontend/dist/favicon-32.png");
+    pub const APPLE_TOUCH_ICON_PNG: &[u8] =
+        include_bytes!("../frontend/dist/apple-touch-icon.png");
 }
 
 /// Debug: read from dist on disk (manifest-relative) for live-reload.
@@ -41,6 +46,9 @@ fn lookup(key: &str) -> Option<Vec<u8>> {
         "index.html" => Some(embedded::INDEX_HTML.as_bytes().to_vec()),
         "assets/app.js" => Some(embedded::APP_JS.to_vec()),
         "assets/app.css" => Some(embedded::APP_CSS.to_vec()),
+        "favicon.svg" => Some(embedded::FAVICON_SVG.to_vec()),
+        "favicon-32.png" => Some(embedded::FAVICON_PNG_32.to_vec()),
+        "apple-touch-icon.png" => Some(embedded::APPLE_TOUCH_ICON_PNG.to_vec()),
         _ => None,
     }
 }

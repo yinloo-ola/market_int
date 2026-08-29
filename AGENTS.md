@@ -89,7 +89,8 @@ reads it anymore).
   `npm --prefix crates/webapp/frontend ci && npm --prefix crates/webapp/frontend run build`)
   — **required before any release build**: the webapp embeds
   `frontend/dist` via `include_str!`/`include_bytes!` at compile time
-  (stable names `assets/app.js|css`; no hashing).
+  (stable names `assets/app.js|css` + favicon.svg, favicon-32.png,
+  apple-touch-icon.png; no hashing).
 - DOM smoke (frontend, ticket 19): `npm --prefix crates/webapp/frontend run smoke`
 - `make test-tiger SYMBOLS="AAPL,MSFT"` probes the Tiger API.
 - Makefile targets cover the usual flows (`make help`); deploy flow:
