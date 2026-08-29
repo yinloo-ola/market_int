@@ -7,10 +7,29 @@
 
 use std::path::PathBuf;
 
+use axum::extract::Request;
+use axum::http::{header::HeaderName, header::HeaderValue};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 
 use crate::{api, assets, auth, run};
+
+/// Google's OAuth pages and the `firebaseapp.com` auth handler send their own
+/// `Cross-Origin-Opener-Policy: same-origin`, which cuts the sign-in popup off
+/// from this page — `window.close` is refused and `signInWithPopup` never
+/// settles ("stuck at Working…"). Serving our side with
+/// `same-origin-allow-popups` keeps the popup↔opener channel open while
+/// retaining the rest of COOP's isolation.
+async fn coop_header(req: Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    res.headers_mut().insert(
+        HeaderName::from_static("cross-origin-opener-policy"),
+        HeaderValue::from_static("same-origin-allow-popups"),
+    );
+    res
+}
 
 /// Assembles the full application router from its parts.
 ///
@@ -39,5 +58,5 @@ pub fn app_router(result_path: PathBuf, auth_guard: Option<auth::AuthGuard>) -> 
 
     let api = auth::protect(api, auth_guard);
 
-    assets::router_with_assets(api)
+    assets::router_with_assets(api).layer(middleware::from_fn(coop_header))
 }

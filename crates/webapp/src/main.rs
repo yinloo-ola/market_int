@@ -7,6 +7,7 @@
 mod api;
 mod assets;
 mod auth;
+mod market;
 mod result;
 mod router;
 mod run;
@@ -18,11 +19,31 @@ use std::path::PathBuf;
 const RESULT_FILE_ENV: &str = "webapp_result_file";
 /// Public Firebase project id; arming auth is exactly "this is set".
 const FIREBASE_PROJECT_ID_ENV: &str = "FIREBASE_PROJECT_ID";
+/// Comma-separated email allowlist; set = only these identities may use the
+/// API (owner-controlled access, ticket 22). Unset = any verified identity.
+const ALLOWED_EMAILS_ENV: &str = "WEBAPP_ALLOWED_EMAILS";
+/// Live grant file (one email per line, `#` comments): re-read per request,
+/// so grants/revoke take effect without a restart or redeploy. In production
+/// point it at the GCS FUSE volume (e.g. /data/allowed_emails.txt).
+const ALLOWED_EMAILS_FILE_ENV: &str = "WEBAPP_ALLOWED_EMAILS_FILE";
 const DEFAULT_RESULT_PATH: &str = "/data/webapp/last_run.json";
 /// Cloud Run (spec §7/§8) requires binding 0.0.0.0 so the platform port
 /// mapping reaches the server; local dev narrows back via `webapp_bind`.
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
 const BIND_ENV: &str = "webapp_bind";
+
+/// Lowercased, trimmed allowlist; `None` when unset or empty (fail-open to
+/// "any verified identity", mirroring the auth-optional precedent — set the
+/// env in production to fail closed).
+fn parse_allowed_emails(raw: &str) -> Option<Vec<String>> {
+    let list: Vec<String> = raw
+        .split([',', ';', ' '])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    (!list.is_empty()).then_some(list)
+}
 
 /// Value following `flag` in argv, if present.
 fn first_flag_value(flag: &str) -> Option<String> {
@@ -93,10 +114,33 @@ async fn main() {
 
     // Auth arms ONLY with a project id; otherwise passthrough so parallel
     // tickets (16/18) and offline dev keep working.
+    let allowed = std::env::var(ALLOWED_EMAILS_ENV)
+        .ok()
+        .and_then(|v| parse_allowed_emails(&v));
+    let allowlist_file = std::env::var(ALLOWED_EMAILS_FILE_ENV)
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty());
+    match &allowed {
+        Some(list) => log::info!(
+            "auth: allowlist active — {} static address(es) may use the API",
+            list.len()
+        ),
+        None => log::warn!(
+            "auth: no static allowlist (${ALLOWED_EMAILS_ENV} unset) — any verified \
+             identity may use the API"
+        ),
+    }
+    if let Some(path) = &allowlist_file {
+        log::info!(
+            "auth: live grant file ${ALLOWED_EMAILS_FILE_ENV} = {} (re-read per request)",
+            path.display()
+        );
+    }
     let auth_guard = match firebase_project_id() {
         Some(project_id) => {
             log::info!("auth: ARMED — /api routes require a Firebase Bearer token");
-            Some(auth::AuthGuard::from_project_id(&project_id).await)
+            Some(auth::AuthGuard::from_project_id(&project_id, allowed, allowlist_file).await)
         }
         None => {
             log::warn!(
@@ -115,4 +159,21 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("bind {bind_addr}: {e}"));
     axum::serve(listener, router).await.expect("server");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allowlist_parsing_trims_splits_lowercases() {
+        let parsed = parse_allowed_emails(" A@B.com , c@d.com;;  e@f.com ").unwrap();
+        assert_eq!(parsed, vec!["a@b.com", "c@d.com", "e@f.com"]);
+    }
+
+    #[test]
+    fn allowlist_parsing_empty_or_blank_is_none() {
+        assert!(parse_allowed_emails("").is_none());
+        assert!(parse_allowed_emails("  ,  ,, ").is_none());
+    }
 }

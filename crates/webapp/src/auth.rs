@@ -27,6 +27,8 @@
 //! It also honors `FIREBASE_AUTH_EMULATOR_HOST` by accepting unsigned tokens —
 //! a dev-only convenience that MUST NOT be set in production.
 
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
@@ -71,18 +73,45 @@ impl IdTokenVerifier for FirebaseVerifier {
 #[derive(Clone)]
 pub struct AuthGuard {
     verifier: Arc<dyn IdTokenVerifier>,
+    /// Email allowlist (lowercase), `None` ⇒ any verified identity may pass.
+    /// A valid token from an unlisted account is still a valid *identity* —
+    /// it just isn't one this deployment serves (owner-controlled access).
+    allowed: Option<Arc<HashSet<String>>>,
+    /// Live grant file (ticket 22): re-read PER REQUEST so the owner can
+    /// grant/revoke access by editing one text file — in production it lives
+    /// on the GCS FUSE volume, no redeploy, no restart. `None` ⇒ file off.
+    allowlist_file: Option<PathBuf>,
 }
 
 impl AuthGuard {
     /// Fetches Google's public JWKS (network!) and arms the crate's refresh
-    /// loop — call once at startup, from main.
-    pub async fn from_project_id(project_id: &str) -> Self {
+    /// loop — call once at startup, from main. `allowed` (already lowercased,
+    /// from `${WEBAPP_ALLOWED_EMAILS}`) is the static part of the list;
+    /// `allowlist_file` (from `${WEBAPP_ALLOWED_EMAILS_FILE}`) is the live
+    /// part. Both sources are unioned; both empty ⇒ any verified identity.
+    pub async fn from_project_id(
+        project_id: &str,
+        allowed: Option<Vec<String>>,
+        allowlist_file: Option<PathBuf>,
+    ) -> Self {
         Self {
             verifier: Arc::new(FirebaseVerifier {
                 auth: FirebaseAuth::new(project_id).await,
             }),
+            allowed: allowed.map(|list| Arc::new(list.into_iter().collect())),
+            allowlist_file,
         }
     }
+}
+
+/// One email per line; `#` comments and blank lines ignored; lowercased.
+fn parse_allowlist_file(content: &str) -> HashSet<String> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_lowercase)
+        .collect()
 }
 
 /// Wraps every /api route. `None` keeps the identity passthrough (auth
@@ -98,13 +127,29 @@ pub fn protect(router: Router, guard: Option<AuthGuard>) -> Router {
     }
 }
 
+/// Outcome of one request's access check. `Denied` is distinct from
+/// `Unauthorized` on purpose: a valid token from a non-allowlisted account is
+/// not a leakable auth failure, so it gets its own body and status (403) —
+/// which also keeps the client's force-refresh-once-on-401 logic from
+/// churning on a denial that no refresh can fix.
+enum Access {
+    Allowed(VerifiedIdentity),
+    Denied,
+    Unauthorized,
+}
+
 async fn enforce(State(guard): State<AuthGuard>, mut req: Request, next: Next) -> Response {
-    match authorize(&guard, &req) {
-        Some(identity) => {
+    match access(&guard, &req) {
+        Access::Allowed(identity) => {
             req.extensions_mut().insert(identity);
             next.run(req).await
         }
-        None => unauthorized(),
+        Access::Denied => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "not_authorized" })),
+        )
+            .into_response(),
+        Access::Unauthorized => unauthorized(),
     }
 }
 
@@ -118,16 +163,48 @@ fn unauthorized() -> Response {
         .into_response()
 }
 
-fn authorize(guard: &AuthGuard, req: &Request) -> Option<VerifiedIdentity> {
-    let header = req.headers().get(AUTHORIZATION)?.to_str().ok()?;
-    let token = header.strip_prefix("Bearer ")?.trim();
+fn access(guard: &AuthGuard, req: &Request) -> Access {
+    let Some(header) = req.headers().get(AUTHORIZATION).and_then(|h| h.to_str().ok()) else {
+        return Access::Unauthorized;
+    };
+    let Some(token) = header.strip_prefix("Bearer ").map(str::trim) else {
+        return Access::Unauthorized;
+    };
     // Structural pre-checks run BEFORE the verifier: they cost nothing, never
     // touch the network, and keep malformed input away from the crate (whose
     // emulator path would panic on non-base64 payload segments).
     if !plausible_jwt(token) {
-        return None;
+        return Access::Unauthorized;
     }
-    guard.verifier.verify(token)
+    let Some(identity) = guard.verifier.verify(token) else {
+        return Access::Unauthorized;
+    };
+    // Owner-controlled access: a verified identity still has to be on the
+    // deployment's allowlist (when one is configured). The list is the union
+    // of the static env set and the live grant file, re-read per request so
+    // edits take effect without a restart or redeploy.
+    if guard.allowed.is_some() || guard.allowlist_file.is_some() {
+        let mut allowed = guard.allowed.as_ref().map(|a| (**a).clone()).unwrap_or_default();
+        if let Some(path) = &guard.allowlist_file {
+            match std::fs::read_to_string(path) {
+                Ok(content) => allowed.extend(parse_allowlist_file(&content)),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    // Uncreated grant file: the static list alone applies.
+                }
+                Err(err) => {
+                    log::warn!("allowlist file {} unreadable: {err}", path.display());
+                }
+            }
+        }
+        let member = identity
+            .email
+            .as_deref()
+            .is_some_and(|email| allowed.contains(&email.to_lowercase()));
+        if !member {
+            return Access::Denied;
+        }
+    }
+    Access::Allowed(identity)
 }
 
 /// Cheap JWT-shape check: exactly three dot-separated, non-empty base64url
@@ -158,10 +235,10 @@ mod tests {
     use axum::routing::get;
     use tower::ServiceExt;
 
+    #[derive(Clone)]
     struct AcceptAll {
         email: Option<String>,
     }
-
     impl IdTokenVerifier for AcceptAll {
         fn verify(&self, _token: &str) -> Option<VerifiedIdentity> {
             Some(VerifiedIdentity {
@@ -183,6 +260,23 @@ mod tests {
     fn guard_of(v: impl IdTokenVerifier + 'static) -> Option<AuthGuard> {
         Some(AuthGuard {
             verifier: Arc::new(v),
+            allowed: None,
+            allowlist_file: None,
+        })
+    }
+
+    /// Guard with an email allowlist (already lowercased), mirroring
+    /// `${WEBAPP_ALLOWED_EMAILS}` parsing.
+    fn guard_with_allowlist(
+        v: impl IdTokenVerifier + 'static,
+        allowed: &[&str],
+    ) -> Option<AuthGuard> {
+        Some(AuthGuard {
+            verifier: Arc::new(v),
+            allowed: Some(Arc::new(
+                allowed.iter().map(|s| s.to_string()).collect(),
+            )),
+            allowlist_file: None,
         })
     }
 
@@ -300,5 +394,122 @@ mod tests {
         assert!(!plausible_jwt("a.b.c.d"));
         assert!(!plausible_jwt("@.@.@"));
         assert!(!plausible_jwt("a+.b.c")); // '+' not base64url
+    }
+
+    // ── owner allowlist (ticket 22: controlled access) ──────────
+
+    /// Allowlisted email ⇒ 200 with the identity; unlisted / emailless ⇒ 403
+    /// `not_authorized` (distinct from the frozen 401 unauthorized shape).
+    #[tokio::test]
+    async fn allowlist_passes_member_and_denies_stranger() {
+        let member = probe_router(guard_with_allowlist(
+            AcceptAll { email: Some("TianHai@gmail.com".into()) },
+            &["tianhai@gmail.com"],
+        ));
+        let resp = send(member, "/api/me", Some(PLAUSIBLE_TOKEN)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let stranger = probe_router(guard_with_allowlist(
+            AcceptAll { email: Some("stranger@example.com".into()) },
+            &["tianhai@gmail.com"],
+        ));
+        let resp = send(stranger, "/api/me", Some(PLAUSIBLE_TOKEN)).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(std::str::from_utf8(&bytes).unwrap(), r#"{"error":"not_authorized"}"#);
+    }
+
+    #[tokio::test]
+    async fn allowlist_denies_identity_without_email() {
+        let app = probe_router(guard_with_allowlist(AcceptAll { email: None }, &["x@y.z"]));
+        let resp = send(app, "/api/me", Some(PLAUSIBLE_TOKEN)).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn no_allowlist_keeps_any_verified_identity_allowed() {
+        let app = probe_router(guard_of(AcceptAll { email: Some("anyone@example.com".into()) }));
+        let resp = send(app, "/api/me", Some(PLAUSIBLE_TOKEN)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ── live grant file (ticket 22: no-redeploy grants) ─────────
+
+    fn guard_with_file(
+        v: impl IdTokenVerifier + 'static,
+        static_allowed: Option<Vec<String>>,
+        file: &std::path::Path,
+    ) -> Option<AuthGuard> {
+        Some(AuthGuard {
+            verifier: Arc::new(v),
+            allowed: static_allowed.map(|list| Arc::new(list.into_iter().collect())),
+            allowlist_file: Some(file.to_path_buf()),
+        })
+    }
+
+    /// The point of the grant file: append an address → allowed; remove it →
+    /// denied again. SAME guard instance — access re-reads the file per
+    /// request, so grants take effect without a restart or redeploy.
+    #[tokio::test]
+    async fn grant_file_grants_and_revokes_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("allowed.txt");
+        std::fs::write(&path, "# grants — one email per line\ntianhai@gmail.com\n").unwrap();
+
+        let stranger = AcceptAll { email: Some("stranger@example.com".into()) };
+        let guard = guard_with_file(stranger.clone(), None, &path);
+
+        let app = probe_router(guard.clone());
+        let resp = send(app, "/api/me", Some(PLAUSIBLE_TOKEN)).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "not in file yet");
+
+        // Grant: append → SAME guard instance, new decision.
+        std::fs::write(&path, "# grants — one email per line\ntianhai@gmail.com\nstranger@example.com\n").unwrap();
+        let app = probe_router(guard.clone());
+        let resp = send(app, "/api/me", Some(PLAUSIBLE_TOKEN)).await;
+        assert_eq!(resp.status(), StatusCode::OK, "granted via file, no restart");
+
+        // Revoke: rewrite without the address.
+        std::fs::write(&path, "# grants — one email per line\ntianhai@gmail.com\n").unwrap();
+        let app = probe_router(guard);
+        let resp = send(app, "/api/me", Some(PLAUSIBLE_TOKEN)).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "revoked via file");
+    }
+
+    #[tokio::test]
+    async fn static_list_and_grant_file_are_unioned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("allowed.txt");
+        std::fs::write(&path, "stranger@example.com\n").unwrap();
+
+        let guard = guard_with_file(
+            AcceptAll { email: Some("STRANGER@example.com".into()) },
+            Some(vec!["tianhai@gmail.com".into()]),
+            &path,
+        );
+        // Case-insensitive on both sources; either grants access.
+        let app = probe_router(guard);
+        let resp = send(app, "/api/me", Some(PLAUSIBLE_TOKEN)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn grant_file_parsing_ignores_comments_blanks_and_case() {
+        let parsed = parse_allowlist_file("# comment\n\n A@B.com \n# another\nc@d.com\n");
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed.contains("a@b.com") && parsed.contains("c@d.com"));
+    }
+
+    #[tokio::test]
+    async fn missing_grant_file_falls_back_to_static_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = guard_with_file(
+            AcceptAll { email: Some("tianhai@gmail.com".into()) },
+            Some(vec!["tianhai@gmail.com".into()]),
+            &dir.path().join("never-created.txt"),
+        );
+        let app = probe_router(guard);
+        let resp = send(app, "/api/me", Some(PLAUSIBLE_TOKEN)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

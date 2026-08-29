@@ -26,8 +26,12 @@ spec:
               value: /data/symbols.csv
             - name: webapp_result_file
               value: /data/webapp/last_run.json
-            - name: FIREBASE_PROJECT_ID   # public value (t06) — not a secret; set to your project id
-              value: <PROJECT_ID>
+            - name: FIREBASE_PROJECT_ID   # public value (t06) — not a secret
+              value: market-int-1e5e4
+            - name: WEBAPP_ALLOWED_EMAILS  # static allowlist (optional)
+              value: "tianhai@gmail.com"
+            - name: WEBAPP_ALLOWED_EMAILS_FILE  # live grants: edit /data/allowed_emails.txt on the GCS volume — no redeploy
+              value: /data/allowed_emails.txt
             - name: RUST_LOG
               value: info
             - name: marketdata_token

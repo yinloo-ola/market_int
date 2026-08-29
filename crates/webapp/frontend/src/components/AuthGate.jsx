@@ -23,6 +23,7 @@ import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signInWithPopup,
+  signInWithRedirect,
 } from "firebase/auth";
 import { setAuthTokenProvider } from "../api";
 
@@ -54,6 +55,42 @@ function friendlyError(err) {
   return (
     FRIENDLY_ERRORS[code] ??
     `Sign-in failed${code ? ` (${code})` : ""} — check your details and try again.`
+  );
+}
+
+/**
+ * Signed in, but not on this deployment's allow list (server said 403
+ * `not_authorized` on /api/me). Own UX so a stranger sees a clear door,
+ * not a wall of API errors.
+ */
+export function DeniedCard(props) {
+  return (
+    <div class="gate-wrap">
+      <div class="gate-card">
+        <h1 class="gate-title">
+          <span class="brand-mark">
+            Market<span class="brand-accent">Int</span>
+          </span>
+          <span class="brand-sub">Put-Selling Candidates</span>
+        </h1>
+        <p>
+          Signed in as <b>{props.email}</b> — this account isn't authorized
+          for this deployment.
+        </p>
+        <p class="gate-note">
+          Ask the owner to add your address to the allow list, or sign out to
+          use a different account.
+        </p>
+        <button
+          type="button"
+          class="btn btn-primary"
+          style={{ "margin-top": "12px" }}
+          onClick={props.onSignOut}
+        >
+          Sign out
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -101,6 +138,18 @@ export function AuthGate() {
     try {
       await signInWithPopup(firebaseAuth(), newGoogleProvider());
     } catch (err) {
+      // Popup-hostile environments (embedded browsers, COOP-strict Chrome,
+      // blocked popups): retry as a full-page redirect — onAuthStateChanged
+      // picks the user up when Google returns.
+      const fallbackCodes = new Set([
+        "auth/popup-blocked",
+        "auth/cancelled-popup-request",
+        "auth/operation-not-supported-in-this-environment",
+      ]);
+      if (fallbackCodes.has(err?.code)) {
+        await signInWithRedirect(firebaseAuth(), newGoogleProvider());
+        return; // page navigates away
+      }
       setError(friendlyError(err));
     } finally {
       setBusy(false);

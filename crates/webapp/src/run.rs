@@ -39,6 +39,7 @@ use market_int_core::pipeline::{
     PerformAllOptions, PerformAllOutcome, PipelineEvent, ProgressFn, Stage,
 };
 
+use crate::market;
 use crate::result::{self, ResultDocument};
 
 /// Broadcast buffer: a full run is ~81 events; §5 pins capacity 1024.
@@ -273,6 +274,26 @@ pub(crate) struct RunAppState {
     symbols_file: String,
     shared: SharedState,
     runner: Runner,
+    /// Clock seam: production UTC now; tests freeze an OPEN-session instant so
+    /// scenarios exercise run mechanics, never the off-hours gate (which has
+    /// its own unit tests on `off_hours_block` + `market::session`).
+    clock: fn() -> DateTime<Utc>,
+}
+
+/// Production clock.
+fn real_now() -> DateTime<Utc> {
+    Utc::now()
+}
+
+/// Frozen Wednesday 2026-09-02 19:00 UTC = 15:00 ET — mid-session, so the
+/// off-hours gate is inert under the frozen clock.
+#[cfg(test)]
+fn frozen_open_clock() -> DateTime<Utc> {
+    chrono::NaiveDate::from_ymd_opt(2026, 9, 2)
+        .unwrap()
+        .and_hms_opt(19, 0, 0)
+        .unwrap()
+        .and_utc()
 }
 
 impl RunAppState {
@@ -282,6 +303,7 @@ impl RunAppState {
             symbols_file: resolve_symbols_file(),
             shared,
             runner: live_runner,
+            clock: real_now,
         }
     }
 
@@ -293,6 +315,7 @@ impl RunAppState {
             symbols_file: symbols_file.to_string(),
             shared: SharedState::new(),
             runner,
+            clock: frozen_open_clock,
         }
     }
 }
@@ -307,6 +330,22 @@ fn doc_armed(doc: &ResultDocument) -> bool {
         matches!(s.name.as_str(), "chains_short" | "chains_medium")
             && matches!(s.status.as_str(), "ok" | "partial")
     })
+}
+
+/// Off-hours one-run gate (ticket 22): outside market hours, an ARMED result
+/// finished inside the current off-hours window blocks a new run until
+/// `window.next_open_utc`. Failed (unarmed) documents never block — a failed
+/// run stays immediately retryable — and open sessions never reach here.
+/// Returns the blocking window, `None` when the run may proceed.
+pub(crate) fn off_hours_block(
+    window: market::MarketWindow,
+    doc: &ResultDocument,
+) -> Option<market::MarketWindow> {
+    if window.open || !doc_armed(doc) {
+        return None;
+    }
+    let finished = doc.run.finished_at_utc.parse::<DateTime<Utc>>().ok()?;
+    (finished >= window.window_started_at_utc).then_some(window)
 }
 
 fn outcome_armed(outcome: &PerformAllOutcome) -> bool {
@@ -382,6 +421,25 @@ pub(crate) async fn run(State(st): State<RunAppState>) -> Response {
     // (2) Idle + fresh + armed file → cached JSON, zero upstream calls.
     if let Some(cached) = cached_hit(&st.result_path) {
         return cached;
+    }
+    // (2b) Off-hours one-run gate (ticket 22): outside market hours, one armed
+    //      run per window; the next unlocks at the following market open.
+    //      Checked after the cache gate (a fresh hit already answers without
+    //      upstream calls) and before the lock (a refusal acquires nothing).
+    if let Some(doc) = result::read_document(&st.result_path) {
+        if let Some(blocked) = off_hours_block(market::session((st.clock)()), &doc) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "status": "off_hours_already_ran",
+                    "finished_at_utc": doc.run.finished_at_utc,
+                    "next_open_utc": blocked
+                        .next_open_utc
+                        .to_rfc3339_opts(SecondsFormat::Secs, true),
+                })),
+            )
+                .into_response();
+        }
     }
     // (3) Win the lock (re-checked inside — checks race freely) and return the
     //     SSE whose body future drives perform_all. Subscribe before anything
@@ -712,6 +770,70 @@ mod tests {
             symbols_requested: 3,
             symbols_succeeded: 3,
         }
+    }
+
+    // ── off-hours one-run gate (ticket 22) ──────────────────────
+
+    fn doc_with_finish(finished: chrono::DateTime<Utc>) -> ResultDocument {
+        let mut outcome = armed_outcome();
+        outcome.finished_at = finished;
+        outcome.started_at = finished - chrono::Duration::seconds(30);
+        result::build_document(&outcome)
+    }
+
+    #[test]
+    fn off_hours_blocks_armed_doc_finished_inside_window() {
+        // Wed 2026-09-02 20:00 ET (closed; window started Wed 16:00 ET).
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 9, 2)
+            .unwrap()
+            .and_hms_opt(20, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono_tz::America::New_York)
+            .unwrap()
+            .with_timezone(&Utc);
+        let window = crate::market::session(now);
+        assert!(!window.open);
+        let started_before_window = doc_with_finish(window.window_started_at_utc - chrono::Duration::hours(1));
+        let started_inside = doc_with_finish(now - chrono::Duration::hours(1));
+        let unfinished = doc_with_finish(now + chrono::Duration::hours(1));
+
+        assert!(off_hours_block(window, &started_inside).is_some(), "in-window armed run blocks");
+        assert!(
+            off_hours_block(window, &started_before_window).is_none(),
+            "a run finished before this window does not block"
+        );
+        assert!(
+            off_hours_block(window, &unfinished).is_some(),
+            "edge: finish later than window start still blocks"
+        );
+    }
+
+    #[test]
+    fn off_hours_never_blocks_open_sessions_or_unarmed_docs() {
+        // Open session: Wed 2026-09-02 15:00 ET.
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 9, 2)
+            .unwrap()
+            .and_hms_opt(15, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono_tz::America::New_York)
+            .unwrap()
+            .with_timezone(&Utc);
+        let window = crate::market::session(now);
+        assert!(window.open);
+        assert!(off_hours_block(window, &doc_with_finish(now)).is_none());
+
+        // Closed, but the last document is an unarmed failure → retry stays free.
+        let closed = crate::market::session(
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 2)
+                .unwrap()
+                .and_hms_opt(20, 0, 0)
+                .unwrap()
+                .and_local_timezone(chrono_tz::America::New_York)
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        let failed = result::build_document(&total_failure_outcome());
+        assert!(off_hours_block(closed, &failed).is_none());
     }
 
     /// Both chain stages failed → cache stays unarmed (immediate retry).

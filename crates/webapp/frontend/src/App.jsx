@@ -12,16 +12,18 @@
 
 import {
   Show,
+  createEffect,
   createResource,
   createSignal,
+  on,
   onCleanup,
   onMount,
 } from "solid-js";
 
-import { getLatest } from "./api";
+import { getLatest, getMe } from "./api";
 import { AUTH_CONFIGURED, firebaseAuth, signOutUser } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
-import { AuthGate } from "./components/AuthGate";
+import { AuthGate, DeniedCard } from "./components/AuthGate";
 import ResultsPane from "./components/ResultsPane";
 import { RunButton, RunStrip, createRunController } from "./components/RunPanel";
 import { comma } from "./lib/format";
@@ -133,6 +135,20 @@ function App() {
     onCleanup(unsubscribe);
   });
 
+  // Owner-allowlist check (ticket 22): signed in ≠ authorized. One /api/me
+  // probe per identity; 403 `not_authorized` swaps the shell for a denial
+  // card instead of surfacing a wall of API errors.
+  const [denied, setDenied] = createSignal(false);
+  createEffect(
+    on(user, (u) => {
+      setDenied(false);
+      if (!u || !AUTH_CONFIGURED) return;
+      getMe()
+        .then((res) => setDenied(res.status === 403))
+        .catch(() => {}); // transient network errors keep the shell up
+    })
+  );
+
   // ── RUN_SLOT (ticket 18) refresh seam: RunPanel asks for exactly ONE
   //    post-run table refetch through this window event. ──
   onMount(() => {
@@ -164,6 +180,12 @@ function App() {
         /* AUTH_GATE_SLOT:end */
       }
     >
+      <Show
+        when={!denied()}
+        fallback={
+          <DeniedCard email={whoami()} onSignOut={() => signOutUser()} />
+        }
+      >
       <div class="shell">
         <header>
           {/* USER_SLOT(t17):start — header user chip + Sign out */}
@@ -293,6 +315,7 @@ function App() {
           }}
         </Show>
       </div>
+      </Show>
     </Show>
   );
 }

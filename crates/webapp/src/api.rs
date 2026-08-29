@@ -30,6 +30,12 @@ pub struct LatestEnvelope {
     /// Live single-flight state (§3.2): `{"status":"idle"}` or
     /// `{"status":"running","since_utc":…,"elapsed_secs":…}`.
     pub run_state: serde_json::Value,
+    /// Off-hours run gate (ticket 22; additive §3.2 field): `false` ⇒ a
+    /// same-window armed run already exists and POST /api/run refuses until
+    /// `next_open_utc`. Always `true` while the market is open.
+    pub run_allowed: bool,
+    /// RFC3339 open time that lifts the gate; `None` while allowed.
+    pub next_open_utc: Option<String>,
     /// The §4 document exactly as on disk, enveloped — or `null`.
     pub result: Option<ResultDocument>,
 }
@@ -55,6 +61,9 @@ fn envelope_for(state: &AppState) -> LatestEnvelope {
         cache_secs: market_int_core::constants::WEBAPP_CACHE_SECS,
         cache_state: "none",
         run_state: state.shared.status_view(),
+        // No usable document ⇒ no same-window run to point at ⇒ allowed.
+        run_allowed: true,
+        next_open_utc: None,
         result: None,
     };
 
@@ -71,12 +80,18 @@ fn envelope_for(state: &AppState) -> LatestEnvelope {
     } else {
         "stale"
     };
+    // Off-hours gate mirrors POST /api/run's precedence (2b) so the button
+    // disables BEFORE the press, not just after a refused one.
+    let blocked = crate::run::off_hours_block(crate::market::session(Utc::now()), &doc);
     LatestEnvelope {
         schema_version: crate::result::SCHEMA_VERSION,
         age_secs: Some(age_secs),
         cache_secs: market_int_core::constants::WEBAPP_CACHE_SECS,
         cache_state,
         run_state: state.shared.status_view(),
+        run_allowed: blocked.is_none(),
+        next_open_utc: blocked
+            .map(|w| w.next_open_utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
         result: Some(doc),
     }
 }

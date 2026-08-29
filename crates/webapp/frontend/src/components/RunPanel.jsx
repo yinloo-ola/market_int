@@ -174,6 +174,20 @@ export function createRunController(latest) {
       }
     }
 
+    // Outcome 2b: off-hours one-run gate — the server refuses politely.
+    if (res.status === 403 && ct.includes("application/json")) {
+      const v = await res.json().catch(() => null);
+      stopTimers();
+      setPhase("idle");
+      const when = v?.next_open_utc
+        ? new Date(v.next_open_utc).toLocaleString()
+        : "the next market open";
+      setNotice(
+        `One off-hours run already completed — the next unlocks at market open (${when}).`
+      );
+      return;
+    }
+
     // Outcome 1b: already running → attach via /api/progress replay.
     if (res.status === 202) {
       const p = await getProgress();
@@ -197,11 +211,16 @@ export function createRunController(latest) {
     stopTimers();
     setPhase("idle");
     setNotice(`Unexpected /api/run response (${res.status}, ${ct || "no type"}).`);
-  }
+  };
 
   onCleanup(stopTimers);
 
   const isBusy = () => ["starting", "running", "detached"].includes(phase());
+
+  // Off-hours gate (server-authoritative): the envelope says whether a press
+  // would be refused. Absent field (older envelope) ⇒ allowed.
+  const runAllowed = () => latest()?.run_allowed !== false;
+  const nextOpenUtc = () => latest()?.next_open_utc ?? null;
 
   return {
     phase,
@@ -213,22 +232,34 @@ export function createRunController(latest) {
     notice,
     triggerRun,
     isBusy,
+    runAllowed,
+    nextOpenUtc,
   };
 }
 
 /** Header button (RUN_SLOT part 1). */
 export function RunButton(props) {
+  const blocked = () => !props.run.runAllowed();
   const label = () =>
     props.run.phase() === "running"
       ? "Run…"
       : props.run.phase() === "detached"
         ? "Run in progress"
-        : "▶ Run pipeline";
+        : blocked()
+          ? "Run at next open"
+          : "▶ Run pipeline";
   return (
     <button
       type="button"
       class="run-btn"
-      disabled={props.run.isBusy()}
+      disabled={props.run.isBusy() || blocked()}
+      title={
+        blocked() && props.run.nextOpenUtc()
+          ? `Unlocks at market open: ${new Date(
+              props.run.nextOpenUtc()
+            ).toLocaleString()}`
+          : undefined
+      }
       onClick={() => props.run.triggerRun()}
     >
       {label()}

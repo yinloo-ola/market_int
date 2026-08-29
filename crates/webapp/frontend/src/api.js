@@ -43,6 +43,13 @@ export async function getLatest() {
   return res.json();
 }
 
+/// Owner-allowlist probe (ticket 22): 200 = this identity may use the API;
+/// 403 `not_authorized` = valid sign-in, but not on this deployment's list.
+/// Callers MUST branch on status, not throw — the 403 is a state, not an error.
+export async function getMe() {
+  return authorizedFetch("/api/me");
+}
+
 /// Ticket 18: live backend for this route.
 export async function postRun() {
   const res = await authorizedFetch("/api/run", { method: "POST" });
