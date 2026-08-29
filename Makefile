@@ -82,7 +82,7 @@ webapp-run:
 
 # Google Cloud operations
 gcloud-job:
-	gcloud run jobs replace job.yaml
+	gcloud run jobs replace job.yaml --region asia-northeast2
 
 # Deploy/update the webapp Service (ticket 20); the Job keeps its own revision
 gcloud-service:
