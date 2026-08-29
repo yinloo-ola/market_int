@@ -29,9 +29,10 @@ spec:
           # Service overrides command; the Job keeps the CLI binary
           command: ["/market_int/market_int_webapp"]
           ports:
-            # h2c: HTTP/2 end-to-end; browser disconnects propagate to axum (cancel-on-close)
-            - name: h2c
-              containerPort: 8080
+            # plain HTTP/1.1: axum::serve currently speaks HTTP/1.1 only — a
+            # named h2c port makes Cloud Run speak h2c and every request 503s.
+            # (Revisit with axum http2 enabled to restore SSE cancel-on-close.)
+            - containerPort: 8080
           env:
             - name: sqlite_file
               value: /data/data.db
