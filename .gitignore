@@ -14,3 +14,6 @@ crates/webapp/frontend/.env.local
 
 # DOM-smoke build output
 crates/webapp/frontend/dist-smoke/
+
+# effort notes / scratch
+.scratch/
