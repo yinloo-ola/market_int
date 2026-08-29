@@ -115,12 +115,13 @@ export default function ResultsPane(props) {
   const chainStage = () =>
     (props.stages ?? []).find((s) => s.name === STAGE_BY_TAB[props.id].id);
 
-  const filteredRows = createMemo(() => {
+  // Text-only pass, kept separate from the scored gate so the empty panel can
+  // attribute an empty table to the right cause (filter miss vs. scored-only
+  // excluding the whole timeframe — different remedies, different copy).
+  const textFilteredRows = createMemo(() => {
     const needle = filter();
-    const scoredGate = scoredOnly();
+    if (!needle) return allRows();
     return allRows().filter((r) => {
-      if (scoredGate && isNullValue(r.score)) return false;
-      if (!needle) return true;
       const u = r.underlying;
       const s = r.sector;
       return (
@@ -128,6 +129,11 @@ export default function ResultsPane(props) {
         (s != null && String(s).toLowerCase().includes(needle))
       );
     });
+  });
+
+  const filteredRows = createMemo(() => {
+    const rows = textFilteredRows();
+    return scoredOnly() ? rows.filter((r) => !isNullValue(r.score)) : rows;
   });
 
   const sortedRows = createMemo(() =>
@@ -195,7 +201,21 @@ export default function ResultsPane(props) {
                 chainStage()?.status === "partial"
               }
               fallback={
-                <div class="empty-panel">No rows match the current filter.</div>
+                <Show
+                  when={scoredOnly() && textFilteredRows().length > 0}
+                  fallback={
+                    <div class="empty-panel">
+                      No rows match the current filter.
+                    </div>
+                  }
+                >
+                  <div class="empty-panel">
+                    <b>No scored candidates on this timeframe.</b> Untick{" "}
+                    <b>scored only</b> to browse the{" "}
+                    {comma(textFilteredRows().length)} raw rows — none cleared
+                    the scoring gates (annualized return ≥ 30%, Sharpe &gt; 0).
+                  </div>
+                </Show>
               }
             >
               {(stg) => (

@@ -26,7 +26,14 @@ body {
   margin: 0;
   background: var(--page);
   color: var(--ink);
-  font: 13px/1.45 -apple-system, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  /* system-ui first: resolves to the real OS UI font on every engine.
+     (-apple-system is WebKit-only, and named faces like "SF Pro Text" are
+     frequently absent — when the whole named list missed, engines fell back
+     to their serif default.) */
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .shell {
@@ -736,17 +743,18 @@ tr.exp-row > td {
   background: #fbfcfe;
   white-space: normal;
   padding: 0;
-  /* the details cell spans every column, so on a wider-than-screen table it
-     would sit far off to the right — pin it to the scroller's left edge and
-     cap the panel at the visible width instead */
-  position: sticky;
-  left: 0;
 }
 
 .expansion {
   border-left: 3px solid #b9d2f2;
   padding: 10px 12px;
   max-width: calc(100vw - 24px);
+  /* Sticky lives HERE, not on the colspan td: the td is exactly as wide as
+     its row (a sticky element can only shift within its containing block, so
+     it had zero slack and never pinned), while this div is narrower than the
+     row and can stay glued to the scroller's left edge. */
+  position: sticky;
+  left: 0;
 }
 
 .exp-grid {
@@ -994,12 +1002,12 @@ tr.exp-row > td {
   th .tip::after { display: none !important; }
   th .tip-target { border-bottom: 0; cursor: inherit; }
 
-  /* Z-ladder for the bottom-sheet pills: the sticky exp-row cell is its own
+  /* Z-ladder for the bottom-sheet pills: the sticky expansion div is its own
      stacking context, so the pill's z-index is trapped inside it — the pager
-     (z 3) painted above the whole subtree. Order: rows < pager < details
-     cell (pill rides along) < sticky header. */
+     (z 3) painted above the whole subtree. Order: rows < pager < expansion
+     (pill rides along) < sticky header. */
   .pager { z-index: 1; }
-  tr.exp-row > td { z-index: 2; }
+  .expansion { z-index: 2; }
   th { z-index: 3; }
 }
 

@@ -6,7 +6,8 @@
 // recipe per t06: createUserWithEmailAndPassword / signInWithEmailAndPassword
 // / signInWithPopup; onAuthStateChanged is wired in App.jsx (observers must
 // outlive this component so header Sign-out flips back to the gate). Known
-// error codes get friendly one-liners; unknown codes render raw.
+// error codes get friendly one-liners; anything unmapped gets a plain
+// sentence with the code in parentheses (updated 2026-08-29).
 //
 // Also registers api.js's token provider (the single fetch seam): an async
 // getIdToken closure that outlives this component's lifetime by design.
@@ -25,22 +26,34 @@ import {
 } from "firebase/auth";
 import { setAuthTokenProvider } from "../api";
 
-/// §6.2 friendly one-liners; any other code renders raw (`code: message`).
+/// §6.2 friendly one-liners; anything unmapped falls through to a plain
+/// sentence (code kept in parentheses for support) — never a raw dump as the
+/// whole message.
 const FRIENDLY_ERRORS = {
   "auth/invalid-credential": "Wrong email or password.",
+  "auth/user-not-found": "Wrong email or password.",
+  "auth/wrong-password": "Wrong email or password.",
   "auth/email-already-in-use":
     "That email already has an account — switch to Sign in.",
   "auth/weak-password": "Password is too weak — use at least 6 characters.",
   "auth/unauthorized-domain":
     "This domain isn't authorized in the Firebase console yet.",
   "auth/popup-closed-by-user": "Google sign-in cancelled — popup closed.",
+  "auth/popup-blocked":
+    "The browser blocked the sign-in popup — allow popups for this site, or use email sign-in.",
+  "auth/operation-not-allowed":
+    "Email/password sign-in isn't enabled for this app yet.",
+  "auth/too-many-requests":
+    "Too many attempts — wait a moment and try again.",
+  "auth/network-request-failed":
+    "Network problem — check your connection and try again.",
 };
 
 function friendlyError(err) {
   const code = err?.code ?? "";
   return (
     FRIENDLY_ERRORS[code] ??
-    `${code || "error"}: ${err?.message ?? "sign-in failed"}`
+    `Sign-in failed${code ? ` (${code})` : ""} — check your details and try again.`
   );
 }
 
