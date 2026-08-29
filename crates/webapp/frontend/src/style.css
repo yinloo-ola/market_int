@@ -568,10 +568,22 @@ tr.prow td { opacity: 0.62; }
   color: var(--accent);
 }
 
-/* access panel (ticket 22): grant management card, styled like the gate card */
+/* access panel (ticket 22): true modal — dims the page, floats centered
+   above everything, scrolls internally when taller than the viewport */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60; /* above pop-backdrop (40), picker panel (41), account menu (45) */
+  background: rgba(28, 39, 51, 0.45);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+
 .access-card {
-  width: 360px;
-  max-width: 92vw;
+  width: min(420px, 100%);
+  max-height: min(85dvh, 720px);
+  overflow-y: auto;
 }
 
 .access-row {
@@ -606,18 +618,25 @@ tr.prow td { opacity: 0.62; }
 
 .access-add {
   display: flex;
-  gap: 6px;
+  flex-direction: column;
+  gap: 8px;
   margin-top: 10px;
 }
 .access-add input {
-  flex: 1;
-  min-width: 0;
-  padding: 6px 8px;
+  width: 100%;
+  padding: 7px 9px;
   font: inherit;
   color: inherit;
   background: var(--page);
   border: 1px solid var(--border);
   border-radius: 5px;
+}
+.access-add input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.access-add .btn {
+  width: 100%;
 }
 .access-add input:focus {
   outline: none;

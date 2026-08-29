@@ -1,12 +1,13 @@
 // Access panel (ticket 22): owner-controlled grant management in the app —
 // add or remove an allowed email from the phone, no GCS file editing. The
 // server rewrites the live grant file, so changes apply immediately.
+// Modal dialog: backdrop click, Escape, or Close all dismiss it.
 
-import { For, Show, createSignal, onMount } from "solid-js";
+import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { addGrant, getGrants, removeGrant } from "../api";
 
 export default function AccessPanel(props) {
-  // props.onClose — dismiss handler (backdrop / Close button).
+  // props.onClose — dismiss handler (backdrop / Escape / Close button).
   const [fileGrants, setFileGrants] = createSignal([]);
   const [staticEmails, setStaticEmails] = createSignal([]);
   const [draft, setDraft] = createSignal("");
@@ -26,6 +27,16 @@ export default function AccessPanel(props) {
     }
   };
   onMount(refresh);
+
+  const onKey = (e) => {
+    if (e.key === "Escape") props.onClose();
+  };
+  onMount(() => {
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+    const input = document.querySelector(".access-add input");
+    input?.focus();
+  });
 
   const add = async (e) => {
     e.preventDefault();
@@ -54,8 +65,14 @@ export default function AccessPanel(props) {
   };
 
   return (
-    <div class="gate-wrap">
-      <div class="gate-card access-card">
+    <div class="modal-backdrop" onClick={props.onClose}>
+      <div
+        class="gate-card access-card"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Access control"
+        onClick={(e) => e.stopPropagation()}
+      >
         <h1 class="gate-title">Access control</h1>
         <p class="gate-note">
           Emails allowed to use this webapp. Changes apply immediately.
@@ -104,7 +121,7 @@ export default function AccessPanel(props) {
 
         <Show when={staticEmails().length > 0}>
           <p class="gate-note">
-            Also allowed via WEBAPP_ALLOWED_EMAILS: {staticEmails().join(", ")}
+            Also allowed via WEBAPP_OWNER_EMAILS: {staticEmails().join(", ")}
           </p>
         </Show>
 
