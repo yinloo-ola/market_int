@@ -50,6 +50,37 @@ export async function getMe() {
   return authorizedFetch("/api/me");
 }
 
+/// Grant management (ticket 22): read the allowlist, add or remove an email.
+/// Mutations rewrite the server-side grant file, so they apply immediately
+/// (no restart/redeploy). Server errors arrive as `{error: "…"}` JSON.
+export async function getGrants() {
+  const res = await authorizedFetch("/api/grants");
+  if (!res.ok) throw new Error(`GET /api/grants -> ${res.status}`);
+  return res.json();
+}
+
+export async function addGrant(email) {
+  const res = await authorizedFetch("/api/grants/add", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  const v = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(v?.error ?? `POST /api/grants/add -> ${res.status}`);
+  return v;
+}
+
+export async function removeGrant(email) {
+  const res = await authorizedFetch("/api/grants/remove", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  const v = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(v?.error ?? `POST /api/grants/remove -> ${res.status}`);
+  return v;
+}
+
 /// Ticket 18: live backend for this route.
 export async function postRun() {
   const res = await authorizedFetch("/api/run", { method: "POST" });

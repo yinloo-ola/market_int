@@ -45,11 +45,18 @@ pub struct AppState {
     pub result_path: PathBuf,
     /// Live single-flight read for `run_state` (ticket 18).
     pub shared: crate::run::SharedState,
+    /// Owner-controlled access sources (ticket 22): owners may manage the
+    /// live grant file via the /api/grants endpoints.
+    pub access: crate::auth::AccessConfig,
 }
 
 pub fn build_router(state: AppState) -> axum::Router {
     axum::Router::new()
         .route("/api/latest", axum::routing::get(latest))
+        .route("/api/grants", axum::routing::get(grants_list))
+        .route("/api/grants/add", axum::routing::post(grants_add))
+        .route("/api/grants/remove", axum::routing::post(grants_remove))
+        .route("/api/me", axum::routing::get(me))
         .with_state(state)
 }
 
@@ -104,20 +111,151 @@ async fn latest(State(state): State<AppState>) -> impl IntoResponse {
 /// The extension is only present when auth is armed and the token verified;
 /// the manual `Request` read (instead of an `Extension<…>` extractor) keeps
 /// disabled mode answering honestly with nulls instead of erroring.
-pub(crate) async fn me(req: Request) -> Response {
+pub(crate) async fn me(State(st): State<AppState>, req: Request) -> Response {
     match req.extensions().get::<VerifiedIdentity>() {
         Some(identity) => Json(serde_json::json!({
             "auth_enabled": true,
             "uid": identity.uid,
             "email": identity.email,
+            // owners see the Manage-access entry; members don't
+            "is_owner": st.access.is_owner(identity.email.as_deref()),
         }))
         .into_response(),
         None => Json(serde_json::json!({
             "auth_enabled": false,
             "uid": null,
             "email": null,
+            "is_owner": true,
         }))
         .into_response(),
+    }
+}
+
+// ── Owner-access management (ticket 22 follow-up) ──────────────────
+// The allowlist file lives on the GCS volume; these endpoints rewrite it so
+// grants work from the phone. All three sit behind the same bearer+allowlist
+// gate as every other /api route — only members can mutate membership (any
+// member, acceptable in this single-owner tool; a caller can never remove
+// their own address, so an accidental tap can't strand them).
+
+fn normalize_email(raw: &str) -> Option<String> {
+    let email = raw.trim().to_lowercase();
+    (!email.is_empty()
+        && email.contains('@')
+        && !email.contains([' ', ',', ';', '#'])
+        && email.ends_with(|c: char| c.is_ascii_alphanumeric()))
+    .then_some(email)
+}
+
+async fn body_email(req: Request) -> Option<String> {
+    let bytes = axum::body::to_bytes(req.into_body(), 4096)
+        .await
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    normalize_email(v.get("email")?.as_str()?)
+}
+
+fn grants_response(st: &AppState) -> Response {
+    let file_grants = st
+        .access
+        .file
+        .as_deref()
+        .and_then(|p| crate::auth::read_grant_emails(p).ok())
+        .unwrap_or_default();
+    Json(serde_json::json!({
+        "file_grants": file_grants,
+        "static_emails": st.access.static_emails.clone().unwrap_or_default(),
+        "file_configured": st.access.file.is_some(),
+    }))
+    .into_response()
+}
+
+fn error_response(status: StatusCode, message: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+/// `GET /api/grants` — the live grant file plus the immutable static env list.
+async fn grants_list(State(st): State<AppState>) -> Response {
+    grants_response(&st)
+}
+
+/// `POST /api/grants/add` `{"email": "…"}` — appends to the grant file.
+async fn grants_add(State(st): State<AppState>, req: Request) -> Response {
+    let caller = req
+        .extensions()
+        .get::<VerifiedIdentity>()
+        .and_then(|i| i.email.clone());
+    if !caller_is_owner(&st, caller.as_deref()) {
+        return error_response(StatusCode::FORBIDDEN, "owners only");
+    }
+    let Some(path) = st.access.file.clone() else {
+        return error_response(
+            StatusCode::NOT_IMPLEMENTED,
+            "no grant file configured (set WEBAPP_ALLOWED_EMAILS_FILE)",
+        );
+    };
+    let Some(email) = body_email(req).await else {
+        return error_response(StatusCode::BAD_REQUEST, "missing or invalid email");
+    };
+    let mut emails = crate::auth::read_grant_emails(&path).unwrap_or_default();
+    if !emails.contains(&email) {
+        emails.push(email);
+        emails.sort();
+        if let Err(err) = crate::auth::write_grant_emails(&path, &emails) {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("grant file write failed: {err}"),
+            );
+        }
+    }
+    grants_response(&st)
+}
+
+/// `POST /api/grants/remove` `{"email": "…"}` — drops from the grant file.
+/// A caller can never remove their own address (that takes a file edit, so a
+/// mis-tap can't strand the only member).
+async fn grants_remove(State(st): State<AppState>, req: Request) -> Response {
+    let caller = req
+        .extensions()
+        .get::<VerifiedIdentity>()
+        .and_then(|i| i.email.clone());
+    if !caller_is_owner(&st, caller.as_deref()) {
+        return error_response(StatusCode::FORBIDDEN, "owners only");
+    }
+    let Some(path) = st.access.file.clone() else {
+        return error_response(
+            StatusCode::NOT_IMPLEMENTED,
+            "no grant file configured (set WEBAPP_ALLOWED_EMAILS_FILE)",
+        );
+    };
+    let Some(email) = body_email(req).await else {
+        return error_response(StatusCode::BAD_REQUEST, "missing or invalid email");
+    };
+    if caller.as_deref() == Some(email.as_str()) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "cannot remove your own account — ask another member, or edit the grant file",
+        );
+    }
+    let mut emails = crate::auth::read_grant_emails(&path).unwrap_or_default();
+    emails.retain(|e| e != &email);
+    if let Err(err) = crate::auth::write_grant_emails(&path, &emails) {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("grant file write failed: {err}"),
+        );
+    }
+    grants_response(&st)
+}
+
+/// Owner check for grant mutations. No verified identity ⇒ auth is DISABLED
+/// (local dev parity: the whole API is open), so mutations stay allowed.
+fn caller_is_owner(st: &AppState, email: Option<&str>) -> bool {
+    match email {
+        // verified member: only static-env owners may manage grants
+        Some(e) => st.access.is_owner(Some(e)),
+        // no identity ⇒ auth DISABLED (local dev parity: the API is open)
+        None => true,
     }
 }
 
@@ -206,7 +344,7 @@ mod tests {
         outcome.started_at = Utc::now() - chrono::Duration::seconds(335);
         write_document(&path, &build_document(&outcome)).unwrap();
 
-        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new() }).await;
+        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new(), access: Default::default() }).await;
         assert_eq!(v["cache_state"], "fresh");
         assert_eq!(v["cache_secs"], market_int_core::constants::WEBAPP_CACHE_SECS);
         assert!(v["age_secs"].as_u64().unwrap() < 10);
@@ -228,7 +366,7 @@ mod tests {
                 - chrono::Duration::seconds(market_int_core::constants::WEBAPP_CACHE_SECS as i64 + 5);
         write_document(&path, &build_document(&outcome)).unwrap();
 
-        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new() }).await;
+        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new(), access: Default::default() }).await;
         assert_eq!(v["cache_state"], "stale");
         assert!(v["age_secs"].as_u64().unwrap() >= market_int_core::constants::WEBAPP_CACHE_SECS);
         assert!(
@@ -243,7 +381,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("does-not-exist.json");
 
-        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new() }).await;
+        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new(), access: Default::default() }).await;
         assert_eq!(v["cache_state"], "none");
         assert!(v["age_secs"].is_null());
         assert!(v["result"].is_null());
@@ -256,7 +394,7 @@ mod tests {
         let path = dir.path().join("last_run.json");
         std::fs::write(&path, b"{ this is not json").unwrap();
 
-        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new() }).await;
+        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new(), access: Default::default() }).await;
         assert_eq!(v["cache_state"], "none");
         assert!(v["result"].is_null());
     }
@@ -276,7 +414,7 @@ mod tests {
         v["run"]["finished_at_utc"] = serde_json::json!("not-a-timestamp");
         std::fs::write(&path, v.to_string()).unwrap();
 
-        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new() }).await;
+        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new(), access: Default::default() }).await;
         assert_eq!(v["cache_state"], "none");
         assert!(v["result"].is_null());
     }
@@ -289,7 +427,7 @@ mod tests {
         let path = dir.path().join("last_run.json");
         let shared = crate::run::SharedState::new();
         shared.begin().expect("acquire");
-        let app = build_router(AppState { result_path: path, shared });
+        let app = build_router(AppState { result_path: path, shared, access: Default::default() });
 
         let response = app
             .oneshot(axum::http::Request::builder().uri("/api/latest").body(Body::empty()).unwrap())

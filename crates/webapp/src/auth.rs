@@ -89,29 +89,97 @@ impl AuthGuard {
     /// from `${WEBAPP_ALLOWED_EMAILS}`) is the static part of the list;
     /// `allowlist_file` (from `${WEBAPP_ALLOWED_EMAILS_FILE}`) is the live
     /// part. Both sources are unioned; both empty ⇒ any verified identity.
-    pub async fn from_project_id(
-        project_id: &str,
-        allowed: Option<Vec<String>>,
-        allowlist_file: Option<PathBuf>,
-    ) -> Self {
+    pub async fn from_project_id(project_id: &str, access: AccessConfig) -> Self {
         Self {
             verifier: Arc::new(FirebaseVerifier {
                 auth: FirebaseAuth::new(project_id).await,
             }),
-            allowed: allowed.map(|list| Arc::new(list.into_iter().collect())),
-            allowlist_file,
+            allowed: access
+                .static_emails
+                .map(|list| Arc::new(list.into_iter().collect())),
+            allowlist_file: access.file,
+        }
+    }
+}
+
+/// Owner-controlled access configuration (ticket 22).
+///
+/// Two allowlist sources, unioned for *app access*: the static env list
+/// (`WEBAPP_ALLOWED_EMAILS`) and the live grant file. Only the static list
+/// confers **ownership**: owners see the access-management UI and may rewrite
+/// the grant file; file-granted members get app access only. `static_emails`
+/// unset ⇒ no ownership concept (everything open, local-dev parity).
+#[derive(Debug, Clone, Default)]
+pub struct AccessConfig {
+    pub static_emails: Option<Vec<String>>,
+    pub file: Option<std::path::PathBuf>,
+}
+
+impl AccessConfig {
+    /// The union of both sources; sorted for stable display.
+    pub fn all_emails(&self) -> Vec<String> {
+        let mut emails = self.static_emails.clone().unwrap_or_default();
+        if let Some(path) = &self.file {
+            if let Ok(list) = read_grant_emails(path) {
+                emails.extend(list);
+            }
+        }
+        emails.sort();
+        emails.dedup();
+        emails
+    }
+
+    /// Ownership: the static env list is the owner list. No static list ⇒
+    /// no ownership concept ⇒ everyone is treated as owner (local parity).
+    pub fn is_owner(&self, email: Option<&str>) -> bool {
+        match &self.static_emails {
+            Some(list) => email.is_some_and(|e| list.contains(&e.to_lowercase())),
+            None => true,
         }
     }
 }
 
 /// One email per line; `#` comments and blank lines ignored; lowercased.
+/// Commas/semicolons/spaces within a line also work (hand-edited files get
+/// both shapes).
 fn parse_allowlist_file(content: &str) -> HashSet<String> {
     content
         .lines()
+        // strip comments FIRST (everything from '#' on), so a "# note" line
+        // can never leak its words in as phantom grants
+        .map(|l| l.split('#').next().unwrap_or(""))
+        .flat_map(|l| l.split([',', ';', ' ', '\t']))
         .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter(|l| !l.is_empty())
         .map(str::to_lowercase)
         .collect()
+}
+
+/// Current grant-file emails, sorted for stable display.
+pub(crate) fn read_grant_emails(path: &std::path::Path) -> std::io::Result<Vec<String>> {
+    let mut emails: Vec<String> = parse_allowlist_file(&std::fs::read_to_string(path)?)
+        .into_iter()
+        .collect();
+    emails.sort();
+    Ok(emails)
+}
+
+/// Rewrites the grant file (one email per line). Tmp-file + rename first;
+/// falls back to an in-place write when rename is unsupported (some FUSE
+/// mounts) — a partial write here fails closed (denials), never open.
+pub(crate) fn write_grant_emails(
+    path: &std::path::Path,
+    emails: &[String],
+) -> std::io::Result<()> {
+    let mut body = String::from("# who may use the webapp API — one email per line\n");
+    body.push_str(&emails.join("\n"));
+    body.push('\n');
+    let tmp = path.with_extension("txt.tmp");
+    if std::fs::write(&tmp, &body).and_then(|()| std::fs::rename(&tmp, path)).is_ok() {
+        Ok(())
+    } else {
+        std::fs::write(path, body)
+    }
 }
 
 /// Wraps every /api route. `None` keeps the identity passthrough (auth
@@ -293,7 +361,12 @@ mod tests {
         protect(
             Router::new()
                 .route("/api/ping", get(|| async { "ok" }))
-                .route("/api/me", get(api::me)),
+                .route("/api/me", get(api::me))
+                .with_state(crate::api::AppState {
+                    result_path: std::path::PathBuf::from("/tmp/none.json"),
+                    shared: crate::run::SharedState::new(),
+                    access: AccessConfig::default(),
+                }),
             guard,
         )
     }
@@ -504,6 +577,13 @@ mod tests {
         let parsed = parse_allowlist_file("# comment\n\n A@B.com \n# another\nc@d.com\n");
         assert_eq!(parsed.len(), 2);
         assert!(parsed.contains("a@b.com") && parsed.contains("c@d.com"));
+    }
+
+    #[test]
+    fn grant_file_parsing_accepts_comma_separated_lines() {
+        let parsed = parse_allowlist_file("a@b.com, c@d.com\n# note\ne@f.com;\n");
+        assert_eq!(parsed.len(), 3);
+        assert!(parsed.contains("a@b.com") && parsed.contains("c@d.com") && parsed.contains("e@f.com"));
     }
 
     #[tokio::test]

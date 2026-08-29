@@ -24,6 +24,7 @@ import { getLatest, getMe } from "./api";
 import { AUTH_CONFIGURED, firebaseAuth, signOutUser } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { AuthGate, DeniedCard } from "./components/AuthGate";
+import AccessPanel from "./components/AccessPanel";
 import ResultsPane from "./components/ResultsPane";
 import { RunButton, RunStrip, createRunController } from "./components/RunPanel";
 import { comma } from "./lib/format";
@@ -217,6 +218,9 @@ function App() {
   // Account menu (USER_SLOT): identity on the pill, Sign out inside the menu —
   // one interaction model for mouse and touch, no hover dependency.
   const [accountOpen, setAccountOpen] = createSignal(false);
+  // Access panel (ticket 22): grant management reachable from the menu, so it
+  // works from the phone.
+  const [accessOpen, setAccessOpen] = createSignal(false);
   /* USER_SLOT(t17):end */
 
   const columns = createColumnStore();
@@ -275,6 +279,17 @@ function App() {
                 <div class="account-menu" role="menu" aria-label="account">
                   <div class="acct-label">Signed in as</div>
                   <div class="acct-email">{whoami()}</div>
+                  <button
+                    type="button"
+                    class="btn-ghost"
+                    role="menuitem"
+                    onClick={() => {
+                      setAccountOpen(false);
+                      setAccessOpen(true);
+                    }}
+                  >
+                    Manage access
+                  </button>
                   <button
                     type="button"
                     class="btn-ghost"
@@ -369,6 +384,9 @@ function App() {
           }}
         </Show>
       </div>
+      </Show>
+      <Show when={accessOpen()}>
+        <AccessPanel onClose={() => setAccessOpen(false)} />
       </Show>
     </Show>
   );

@@ -55,11 +55,13 @@ other assets inlined), which lets the release build include them via
 | env | `FIREBASE_PROJECT_ID` |
 | default | *(none)* ⇒ **auth disabled** (one startup warn; every `/api` route is open) |
 
-| access allowlist (ticket 22) | value |
+| access control (ticket 22) | value |
 |---|---|
-| env | `WEBAPP_ALLOWED_EMAILS` (comma-separated, case-insensitive) |
+| env | `WEBAPP_OWNER_EMAILS` (comma-separated, case-insensitive) |
 | default | *(unset)* ⇒ **any verified identity** may use the API — set it in production to control who has access |
 | effect | verified sign-ins from unlisted accounts get `403 {"error":"not_authorized"}` on every `/api` route; the app shows a "not authorized" card |
+| ownership | addresses on this list are **owners**: they see the Manage-access panel and may rewrite the grant file (`WEBAPP_ALLOWED_EMAILS_FILE`, default `/data/allowed_emails.txt`) |
+| live grants | members added via the Manage-access panel are stored in the grant file — takes effect immediately, no redeploy |
 
 Freshness window comes from `market_int_core::constants::WEBAPP_CACHE_SECS`
 (600s) and is reported to the client as `cache_secs` in `/api/latest`.

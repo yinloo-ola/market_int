@@ -19,9 +19,11 @@ use std::path::PathBuf;
 const RESULT_FILE_ENV: &str = "webapp_result_file";
 /// Public Firebase project id; arming auth is exactly "this is set".
 const FIREBASE_PROJECT_ID_ENV: &str = "FIREBASE_PROJECT_ID";
-/// Comma-separated email allowlist; set = only these identities may use the
-/// API (owner-controlled access, ticket 22). Unset = any verified identity.
-const ALLOWED_EMAILS_ENV: &str = "WEBAPP_ALLOWED_EMAILS";
+/// Comma-separated owner emails; set = only these identities may use the
+/// API *and* manage the grant list (owner-controlled access, ticket 22).
+/// Unset = any verified identity. File-granted members (via
+/// WEBAPP_ALLOWED_EMAILS_FILE) get app access but cannot manage grants.
+const OWNER_EMAILS_ENV: &str = "WEBAPP_OWNER_EMAILS";
 /// Live grant file (one email per line, `#` comments): re-read per request,
 /// so grants/revoke take effect without a restart or redeploy. In production
 /// point it at the GCS FUSE volume (e.g. /data/allowed_emails.txt).
@@ -114,24 +116,28 @@ async fn main() {
 
     // Auth arms ONLY with a project id; otherwise passthrough so parallel
     // tickets (16/18) and offline dev keep working.
-    let allowed = std::env::var(ALLOWED_EMAILS_ENV)
-        .ok()
-        .and_then(|v| parse_allowed_emails(&v));
-    let allowlist_file = std::env::var(ALLOWED_EMAILS_FILE_ENV)
-        .ok()
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty());
-    match &allowed {
+    // Owners (static env) + the live grant file union into app access; only
+    // owners may manage grants (see the /api/grants handlers).
+    let access = auth::AccessConfig {
+        static_emails: std::env::var(OWNER_EMAILS_ENV)
+            .ok()
+            .and_then(|v| parse_allowed_emails(&v)),
+        file: std::env::var(ALLOWED_EMAILS_FILE_ENV)
+            .ok()
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty()),
+    };
+    match &access.static_emails {
         Some(list) => log::info!(
-            "auth: allowlist active — {} static address(es) may use the API",
+            "auth: {} owner(s) via ${OWNER_EMAILS_ENV} may use the API and manage access",
             list.len()
         ),
         None => log::warn!(
-            "auth: no static allowlist (${ALLOWED_EMAILS_ENV} unset) — any verified \
+            "auth: no owners (${OWNER_EMAILS_ENV} unset) — any verified \
              identity may use the API"
         ),
     }
-    if let Some(path) = &allowlist_file {
+    if let Some(path) = &access.file {
         log::info!(
             "auth: live grant file ${ALLOWED_EMAILS_FILE_ENV} = {} (re-read per request)",
             path.display()
@@ -140,7 +146,7 @@ async fn main() {
     let auth_guard = match firebase_project_id() {
         Some(project_id) => {
             log::info!("auth: ARMED — /api routes require a Firebase Bearer token");
-            Some(auth::AuthGuard::from_project_id(&project_id, allowed, allowlist_file).await)
+            Some(auth::AuthGuard::from_project_id(&project_id, access.clone()).await)
         }
         None => {
             log::warn!(
@@ -151,7 +157,7 @@ async fn main() {
         }
     };
 
-    let router = router::app_router(result_path(), auth_guard);
+    let router = router::app_router(result_path(), auth_guard, access);
 
     let bind_addr = bind_addr();
     log::info!("market_int_webapp listening on http://{bind_addr}");

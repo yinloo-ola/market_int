@@ -43,8 +43,8 @@ spec:
             # public value (t06) — not a secret
             - name: FIREBASE_PROJECT_ID
               value: market-int-1e5e4
-            # static allowlist (optional)
-            - name: WEBAPP_ALLOWED_EMAILS
+            # owners: may use the API and manage the grant list
+            - name: WEBAPP_OWNER_EMAILS
               value: "tianhai@gmail.com"
             # live grants: edit /data/allowed_emails.txt on the GCS volume — no redeploy
             - name: WEBAPP_ALLOWED_EMAILS_FILE

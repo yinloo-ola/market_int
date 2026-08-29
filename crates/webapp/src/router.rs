@@ -41,7 +41,14 @@ async fn coop_header(req: Request, next: Next) -> Response {
 /// Ticket 18: the run endpoints carry their own state (`RunAppState`, which
 /// wraps the single-flight `SharedState`); that router merges onto the
 /// `/api/latest` router BEFORE the auth wrapper so the middleware covers both.
-pub fn app_router(result_path: PathBuf, auth_guard: Option<auth::AuthGuard>) -> Router {
+///
+/// Ticket 22: the allowlist sources (static env list + live grant file) ride
+/// along so the /api/grants endpoints can surface and rewrite the grant file.
+pub fn app_router(
+    result_path: PathBuf,
+    auth_guard: Option<auth::AuthGuard>,
+    access: auth::AccessConfig,
+) -> Router {
     let shared = run::SharedState::new();
 
     let run_router: Router<()> = Router::new()
@@ -52,8 +59,8 @@ pub fn app_router(result_path: PathBuf, auth_guard: Option<auth::AuthGuard>) -> 
     let api = api::build_router(api::AppState {
         result_path: result_path.clone(),
         shared,
+        access: access.clone(),
     })
-    .route("/api/me", get(api::me))
     .merge(run_router);
 
     let api = auth::protect(api, auth_guard);
