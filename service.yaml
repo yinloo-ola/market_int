@@ -1,24 +1,37 @@
+# market-int-web Service manifest.
+# NOTE: keep comments on their OWN lines — gcloud's yaml→proto converter
+# glues trailing comments onto numeric values (timeoutSeconds: 900 # ... is
+# a parse error).
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
-  name: market-int-web            # second artifact; Job market-int stays untouched
+  name: market-int-web
+  # second artifact; the scheduled Job (market-int) stays untouched
 spec:
   template:
     metadata:
       annotations:
-        autoscaling.knative.dev/maxScale: "1"           # single writer for the SQLite-on-GCS db (no file locking)
-        run.googleapis.com/execution-environment: gen2  # required by the GCS FUSE CSI volume
+        # single writer for the SQLite-on-GCS db (no file locking)
+        autoscaling.knative.dev/maxScale: "1"
+        # required by the GCS FUSE CSI volume
+        run.googleapis.com/execution-environment: gen2
     spec:
       serviceAccountName: 628240778300-compute@developer.gserviceaccount.com
-      containerConcurrency: 80   # keep >1: view endpoints share the instance with the minutes-long trigger request
+      # keep >1: view endpoints share the instance with the minutes-long run request
+      containerConcurrency: 80
+      # default 300 would 504 a slow run; max 3600 — NOTE: spec-level field
+      # (container-level timeoutSeconds breaks `gcloud run services replace`)
+      timeoutSeconds: 900
       containers:
         - name: webapp
-          image: us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:0.13.0  # bumped by make docker-build
-          command: ["/market_int/market_int_webapp"]   # Service overrides command; Job keeps the CLI binary
+          # bumped by make docker-build
+          image: us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:0.14.1
+          # Service overrides command; the Job keeps the CLI binary
+          command: ["/market_int/market_int_webapp"]
           ports:
-            - name: h2c          # HTTP/2 end-to-end: browser disconnects propagate to axum (cancel-on-close)
+            # h2c: HTTP/2 end-to-end; browser disconnects propagate to axum (cancel-on-close)
+            - name: h2c
               containerPort: 8080
-          timeoutSeconds: 900    # default 300 would 504 a slow run; max 3600
           env:
             - name: sqlite_file
               value: /data/data.db
@@ -26,11 +39,14 @@ spec:
               value: /data/symbols.csv
             - name: webapp_result_file
               value: /data/webapp/last_run.json
-            - name: FIREBASE_PROJECT_ID   # public value (t06) — not a secret
+            # public value (t06) — not a secret
+            - name: FIREBASE_PROJECT_ID
               value: market-int-1e5e4
-            - name: WEBAPP_ALLOWED_EMAILS  # static allowlist (optional)
+            # static allowlist (optional)
+            - name: WEBAPP_ALLOWED_EMAILS
               value: "tianhai@gmail.com"
-            - name: WEBAPP_ALLOWED_EMAILS_FILE  # live grants: edit /data/allowed_emails.txt on the GCS volume — no redeploy
+            # live grants: edit /data/allowed_emails.txt on the GCS volume — no redeploy
+            - name: WEBAPP_ALLOWED_EMAILS_FILE
               value: /data/allowed_emails.txt
             - name: RUST_LOG
               value: info
@@ -49,13 +65,15 @@ spec:
           resources:
             limits:
               cpu: 1000m
-              memory: 512Mi    # matches the Job; bump to 1Gi if view traffic during runs shows pressure
+              # matches the Job; bump to 1Gi if view traffic during runs shows pressure
+              memory: 512Mi
           volumeMounts:
             - name: gcs-1
               mountPath: /data
       volumes:
         - name: gcs-1
           csi:
-            driver: gcsfuse.run.googleapis.com   # same CSI driver as the Job
+            # same CSI driver as the Job
+            driver: gcsfuse.run.googleapis.com
             volumeAttributes:
               bucketName: opt-intel
