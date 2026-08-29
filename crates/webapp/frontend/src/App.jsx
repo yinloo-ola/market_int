@@ -115,7 +115,11 @@ function App() {
   // The results resource sources off it, so /api traffic starts only after a
   // user exists — never before auth state resolves.
   const [user, setUser] = createSignal(undefined);
-  const [latest] = createResource(user, (u) => (u ? getLatest() : undefined));
+  // refetch lives on the ACTIONS tuple element, not the resource — grabbing it
+  // here so the RUN_SLOT refresh seam below can trigger exactly one refetch.
+  const [latest, { refetch: refetchLatest }] = createResource(user, (u) =>
+    u ? getLatest() : undefined
+  );
 
   /* USER_SLOT(t17):start — observer lives in App (not AuthGate) so it
      survives while SIGNED IN to flip Sign out back to the gate.
@@ -132,7 +136,7 @@ function App() {
   // ── RUN_SLOT (ticket 18) refresh seam: RunPanel asks for exactly ONE
   //    post-run table refetch through this window event. ──
   onMount(() => {
-    const refreshForRun = () => latest.refetch();
+    const refreshForRun = () => refetchLatest();
     window.addEventListener("webapp:refresh-latest", refreshForRun);
     onCleanup(() =>
       window.removeEventListener("webapp:refresh-latest", refreshForRun)
