@@ -12,7 +12,9 @@ use std::path::Path;
 use chrono::{DateTime, SecondsFormat, Utc};
 use chrono_tz::America::New_York;
 use market_int_core::model::{ScoredChainRow, TopPick};
-use market_int_core::pipeline::{PerformAllOutcome, ScoredTimeframe};
+use market_int_core::pipeline::{
+    PerformAllOutcome, ScoredTimeframe, Stage, StageStatus,
+};
 use serde::{Deserialize, Serialize};
 
 pub const SCHEMA_VERSION: u64 = 1;
@@ -313,28 +315,42 @@ fn thresholds_block() -> Thresholds {
     }
 }
 
-fn rfc3339(t: DateTime<Utc>) -> String {
+/// Shared stamp format (RFC3339, second precision, `Z`) for the document
+/// clock fields and the SSE `since_utc` payloads.
+pub(crate) fn rfc3339(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// Age of a written document in seconds, from its `finished_at_utc` stamp.
+/// `None` = unparseable clock — the §5 "no usable clock" case.
+pub(crate) fn document_age_secs(doc: &ResultDocument) -> Option<u64> {
+    let finished = doc.run.finished_at_utc.parse::<DateTime<Utc>>().ok()?;
+    Some((Utc::now() - finished).num_seconds().max(0) as u64)
+}
+
+/// The §5 cache window is strict `<`: exactly `WEBAPP_CACHE_SECS` old is
+/// already expired. Single home for both readers (`/api/latest`'s
+/// cache_state and the `POST /api/run` gate).
+pub(crate) fn cache_is_fresh(age_secs: u64) -> bool {
+    age_secs < market_int_core::constants::WEBAPP_CACHE_SECS
 }
 
 /// Document vocabulary uses underscores ("chains_short"), unlike log labels.
 /// Also feeds the SSE stream frames (spec §3.3 freezes these exact names).
-pub(crate) fn doc_stage_name(stage: market_int_core::pipeline::Stage) -> String {
-    use market_int_core::pipeline::Stage::*;
+pub(crate) fn doc_stage_name(stage: Stage) -> String {
     match stage {
-        Quotes => "quotes".to_string(),
-        Metrics => "metrics".to_string(),
-        ChainsShort => "chains_short".to_string(),
-        ChainsMedium => "chains_medium".to_string(),
+        Stage::Quotes => "quotes".to_string(),
+        Stage::Metrics => "metrics".to_string(),
+        Stage::ChainsShort => "chains_short".to_string(),
+        Stage::ChainsMedium => "chains_medium".to_string(),
     }
 }
 
-pub(crate) fn doc_status_name(status: market_int_core::pipeline::StageStatus) -> &'static str {
-    use market_int_core::pipeline::StageStatus::*;
+pub(crate) fn doc_status_name(status: StageStatus) -> &'static str {
     match status {
-        Ok => "ok",
-        Partial => "partial",
-        Failed => "failed",
+        StageStatus::Ok => "ok",
+        StageStatus::Partial => "partial",
+        StageStatus::Failed => "failed",
     }
 }
 

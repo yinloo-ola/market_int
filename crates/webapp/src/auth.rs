@@ -180,26 +180,32 @@ fn access(guard: &AuthGuard, req: &Request) -> Access {
         return Access::Unauthorized;
     };
     // Owner-controlled access: a verified identity still has to be on the
-    // deployment's allowlist (when one is configured). The list is the union
-    // of the static env set and the live grant file, re-read per request so
-    // edits take effect without a restart or redeploy.
+    // deployment's allowlist (when one is configured). Checked against the
+    // static env set first, then the live grant file — re-read per request so
+    // edits take effect without a restart or redeploy. Membership is tested
+    // in place; neither source is copied per request.
     if guard.allowed.is_some() || guard.allowlist_file.is_some() {
-        let mut allowed = guard.allowed.as_ref().map(|a| (**a).clone()).unwrap_or_default();
-        if let Some(path) = &guard.allowlist_file {
-            match std::fs::read_to_string(path) {
-                Ok(content) => allowed.extend(parse_allowlist_file(&content)),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    // Uncreated grant file: the static list alone applies.
-                }
-                Err(err) => {
-                    log::warn!("allowlist file {} unreadable: {err}", path.display());
+        let email = identity.email.as_deref().map(str::to_lowercase);
+        let mut member = email
+            .as_deref()
+            .is_some_and(|e| guard.allowed.as_deref().is_some_and(|set| set.contains(e)));
+        if !member {
+            if let Some(path) = &guard.allowlist_file {
+                match std::fs::read_to_string(path) {
+                    Ok(content) => {
+                        member = email
+                            .as_deref()
+                            .is_some_and(|e| parse_allowlist_file(&content).contains(e));
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        // Uncreated grant file: the static list alone applies.
+                    }
+                    Err(err) => {
+                        log::warn!("allowlist file {} unreadable: {err}", path.display());
+                    }
                 }
             }
         }
-        let member = identity
-            .email
-            .as_deref()
-            .is_some_and(|email| allowed.contains(&email.to_lowercase()));
         if !member {
             return Access::Denied;
         }

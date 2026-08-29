@@ -36,7 +36,7 @@ use tokio::sync::broadcast;
 
 use market_int_core::model;
 use market_int_core::pipeline::{
-    PerformAllOptions, PerformAllOutcome, PipelineEvent, ProgressFn, Stage,
+    PerformAllOptions, PerformAllOutcome, PipelineEvent, ProgressFn,
 };
 
 use crate::market;
@@ -55,10 +55,6 @@ static NEXT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn next_seq() -> u64 {
     NEXT_SEQ.fetch_add(1, Ordering::Relaxed)
-}
-
-fn rfc3339(t: DateTime<Utc>) -> String {
-    t.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 // ── Frames ─────────────────────────────────────────────────────
@@ -88,28 +84,17 @@ impl Frame {
     }
 }
 
-/// Document-vocabulary stage name for the four frozen stages (§3.3:
-/// `chains_short` / `chains_medium`, not the hyphenated log labels).
-fn stage_name(stage: Stage) -> &'static str {
-    match stage {
-        Stage::Quotes => "quotes",
-        Stage::Metrics => "metrics",
-        Stage::ChainsShort => "chains_short",
-        Stage::ChainsMedium => "chains_medium",
-    }
-}
-
 /// Maps a pipeline progress event onto the frozen §3.3 payload shape.
 fn map_event(event: PipelineEvent) -> Value {
     match event {
         PipelineEvent::StageStarted(stage) => {
-            json!({ "type": "stage_started", "stage": stage_name(stage) })
+            json!({ "type": "stage_started", "stage": result::doc_stage_name(stage) })
         }
         PipelineEvent::BatchDone { stage, done, total } => {
-            json!({ "type": "batch_done", "stage": stage_name(stage), "done": done, "total": total })
+            json!({ "type": "batch_done", "stage": result::doc_stage_name(stage), "done": done, "total": total })
         }
         PipelineEvent::StageFinished { stage, ok, error } => {
-            json!({ "type": "stage_finished", "stage": stage_name(stage), "ok": ok, "error": error })
+            json!({ "type": "stage_finished", "stage": result::doc_stage_name(stage), "ok": ok, "error": error })
         }
     }
 }
@@ -181,7 +166,7 @@ impl SharedState {
                 let elapsed_secs = (Utc::now() - since_utc).num_seconds().max(0);
                 json!({
                     "status": "running",
-                    "since_utc": rfc3339(since_utc),
+                    "since_utc": result::rfc3339(since_utc),
                     "elapsed_secs": elapsed_secs,
                 })
             }
@@ -357,10 +342,8 @@ fn outcome_armed(outcome: &PerformAllOutcome) -> bool {
 /// fall through to a fresh run (None here).
 fn cached_hit(result_path: &Path) -> Option<Response> {
     let doc = result::read_document(result_path)?;
-    let finished = doc.run.finished_at_utc.parse::<DateTime<Utc>>().ok()?;
-    let age_secs = (Utc::now() - finished).num_seconds().max(0) as u64;
-    // Strict `<`: exactly WEBAPP_CACHE_SECS old counts as expired (§5).
-    if age_secs >= market_int_core::constants::WEBAPP_CACHE_SECS {
+    let age_secs = result::document_age_secs(&doc)?;
+    if !result::cache_is_fresh(age_secs) {
         return None;
     }
     if !doc_armed(&doc) {
@@ -387,7 +370,7 @@ fn already_running_response(since_utc: DateTime<Utc>) -> Response {
         StatusCode::ACCEPTED,
         Json(json!({
             "status": "already_running",
-            "since_utc": rfc3339(since_utc),
+            "since_utc": result::rfc3339(since_utc),
             "elapsed_secs": elapsed_secs,
         })),
     )
@@ -668,7 +651,7 @@ mod tests {
     use axum::http::Request;
     use axum::routing::{get, post};
     use market_int_core::model::{ScoreComponents, ScoredChainRow};
-    use market_int_core::pipeline::{StageReport, ScoredTimeframe, StageStatus};
+    use market_int_core::pipeline::{Stage, StageReport, ScoredTimeframe, StageStatus};
     use tower::ServiceExt;
 
     use super::*;
@@ -1151,7 +1134,7 @@ mod tests {
         // no stream exists to disconnect.
         let mut seed: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        seed["run"]["finished_at_utc"] = serde_json::json!(rfc3339(
+        seed["run"]["finished_at_utc"] = serde_json::json!(result::rfc3339(
             Utc::now()
                 - chrono::Duration::seconds(market_int_core::constants::WEBAPP_CACHE_SECS as i64 + 5)
         ));

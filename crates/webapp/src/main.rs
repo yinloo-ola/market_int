@@ -58,7 +58,7 @@ fn first_flag_value(flag: &str) -> Option<String> {
     None
 }
 
-/// Precedence: `--result-file <path>` arg → `${RESULT_FILE_ENV}` → default.
+/// Bind address: `${webapp_bind}` env override → `${DEFAULT_BIND_ADDR}`.
 fn bind_addr() -> String {
     match std::env::var(BIND_ENV) {
         Ok(v) if !v.trim().is_empty() => {

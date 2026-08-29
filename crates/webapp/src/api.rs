@@ -11,11 +11,11 @@ use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::Serialize;
 
 use crate::auth::VerifiedIdentity;
-use crate::result::{read_document, ResultDocument};
+use crate::result::{cache_is_fresh, document_age_secs, read_document, ResultDocument};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LatestEnvelope {
@@ -71,15 +71,10 @@ fn envelope_for(state: &AppState) -> LatestEnvelope {
         return no_clock(); // missing or unparseable file
     };
     // Present but clockless also counts as nothing usable (spec §5).
-    let Ok(finished) = doc.run.finished_at_utc.parse::<DateTime<Utc>>() else {
+    let Some(age_secs) = document_age_secs(&doc) else {
         return no_clock();
     };
-    let age_secs = (Utc::now() - finished).num_seconds().max(0) as u64;
-    let cache_state = if age_secs < market_int_core::constants::WEBAPP_CACHE_SECS {
-        "fresh"
-    } else {
-        "stale"
-    };
+    let cache_state = if cache_is_fresh(age_secs) { "fresh" } else { "stale" };
     // Off-hours gate mirrors POST /api/run's precedence (2b) so the button
     // disables BEFORE the press, not just after a refused one.
     let blocked = crate::run::off_hours_block(crate::market::session(Utc::now()), &doc);
@@ -129,6 +124,7 @@ mod tests {
     use super::*;
     use crate::result::{build_document, write_document};
     use axum::body::Body;
+    use chrono::{DateTime, Utc};
     use market_int_core::model::ScoredChainRow;
     use market_int_core::pipeline::{PerformAllOutcome, ScoredTimeframe};
     use tower::ServiceExt;

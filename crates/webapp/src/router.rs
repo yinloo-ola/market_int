@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use axum::extract::Request;
 use axum::http::{header::HeaderName, header::HeaderValue};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
 

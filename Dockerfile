@@ -48,7 +48,7 @@ RUN mkdir -p crates/core/src crates/cli/src crates/webapp/src \
 COPY crates ./crates
 
 # Touch sources so cargo sees newer files than the cached dummy ones
-RUN touch crates/cli/src/main.rs crates/core/src/lib.rs
+RUN touch crates/cli/src/main.rs crates/core/src/lib.rs crates/webapp/src/main.rs
 
 # Bring in the built frontend so the webapp's include_str! embeds resolve
 COPY --from=frontend /build/dist crates/webapp/frontend/dist
