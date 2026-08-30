@@ -60,6 +60,7 @@ pub fn app_router(
         result_path: result_path.clone(),
         shared,
         access: access.clone(),
+        clock: run::real_now,
     })
     .merge(run_router);
 

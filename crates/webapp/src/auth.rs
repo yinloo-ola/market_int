@@ -366,6 +366,7 @@ mod tests {
                     result_path: std::path::PathBuf::from("/tmp/none.json"),
                     shared: crate::run::SharedState::new(),
                     access: AccessConfig::default(),
+                    clock: crate::run::real_now,
                 }),
             guard,
         )

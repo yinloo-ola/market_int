@@ -126,7 +126,8 @@ reads it anymore).
   shared pipeline mirror the historical CLI wording verbatim.
 - Tunables belong in `crates/core/src/constants.rs`
   (`MIN_RATE_OF_RETURN` 0.30, `API_BATCH_SIZE` 10, `PERFORM_ALL_SPY_TREND_RATIO`
-  1.05, `WEBAPP_CACHE_SECS` 600, `VOL_TIER_HIGH/MID` 0.38/0.28, scoring
+  1.05, `WEBAPP_CACHE_SECS` 600, `WEBAPP_OFF_HOURS_CACHE_SECS` 3600,
+  `VOL_TIER_HIGH/MID` 0.38/0.28, scoring
   weights, `TOP_PICKS_COUNT` 3, momentum thresholds 0.80/0.90).
 - Frontend follows the same import-grouping spirit; Solid JSX (1.9),
   stable unhashed asset names, and one HTTP seam (`src/api.js`).
@@ -178,7 +179,9 @@ make docker-build tag=x.y.z   # builds linux/amd64, pushes, stamps job.yaml + se
 - The webapp runs the SAME pipeline with `publish: None` — results go to
   `/data/webapp/last_run.json` (frozen §4 schema, atomic write, retry-once
   read) instead of Telegram; the 10-minute completion-anchored cache gates
-  the Run button (not HTTP caching).
+  the Run button (not HTTP caching), and outside market hours the run gate
+  is hourly (`WEBAPP_OFF_HOURS_CACHE_SECS`, one armed run per hour;
+  cache-line times render in the browser's local timezone).
 - Pipeline failures barrel on (chains run over a stale DB after a failed
   quotes stage); requester-init failure is the only fatal outer error.
 - Effort records: `.scratch/webapp/spec.md` (authoritative design) and

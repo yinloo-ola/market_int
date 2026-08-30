@@ -91,6 +91,8 @@ body {
 .pill.fresh { border-color: var(--ok); color: var(--ok); }
 .pill.stale { border-color: var(--warn); color: var(--warn); }
 .pill.none  { color: var(--muted); }
+/* Stale while the market is closed is expected, not a warning. */
+.pill.closed { color: var(--muted); }
 
 .error-banner {
   border: 1px solid #e4b7b7;

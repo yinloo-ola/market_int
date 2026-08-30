@@ -11,7 +11,7 @@ use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::auth::VerifiedIdentity;
@@ -30,11 +30,17 @@ pub struct LatestEnvelope {
     /// Live single-flight state (§3.2): `{"status":"idle"}` or
     /// `{"status":"running","since_utc":…,"elapsed_secs":…}`.
     pub run_state: serde_json::Value,
-    /// Off-hours run gate (ticket 22; additive §3.2 field): `false` ⇒ a
-    /// same-window armed run already exists and POST /api/run refuses until
-    /// `next_open_utc`. Always `true` while the market is open.
+    /// Whether the US market session is open right now (09:30–16:00 ET
+    /// Mon–Fri, holidays not modeled). Drives the off-hours cache-line
+    /// wording; absent ⇒ unknown (older backend).
+    pub market_open: bool,
+    /// Off-hours run gate (ticket 22, relaxed to hourly; additive §3.2
+    /// field): `false` ⇒ an armed run completed less than an hour ago and
+    /// POST /api/run refuses until `next_open_utc`. Always `true` while the
+    /// market is open (the regular 10-min cache gate covers that case).
     pub run_allowed: bool,
-    /// RFC3339 open time that lifts the gate; `None` while allowed.
+    /// RFC3339 instant that lifts the off-hours gate (armed completion + 1 h);
+    /// `None` while allowed. Field name is frozen (§3.2).
     pub next_open_utc: Option<String>,
     /// The §4 document exactly as on disk, enveloped — or `null`.
     pub result: Option<ResultDocument>,
@@ -48,6 +54,9 @@ pub struct AppState {
     /// Owner-controlled access sources (ticket 22): owners may manage the
     /// live grant file via the /api/grants endpoints.
     pub access: crate::auth::AccessConfig,
+    /// Clock seam (RunAppState precedent): production UTC now; tests freeze
+    /// it so market-session-dependent envelope fields stay hermetic.
+    pub clock: fn() -> DateTime<Utc>,
 }
 
 pub fn build_router(state: AppState) -> axum::Router {
@@ -61,13 +70,16 @@ pub fn build_router(state: AppState) -> axum::Router {
 }
 
 fn envelope_for(state: &AppState, doc: Option<ResultDocument>) -> LatestEnvelope {
+    let now = (state.clock)();
+    let market_open = crate::market::is_open(now);
     let no_clock = || LatestEnvelope {
         schema_version: crate::result::SCHEMA_VERSION,
         age_secs: None,
         cache_secs: market_int_core::constants::WEBAPP_CACHE_SECS,
         cache_state: "none",
         run_state: state.shared.status_view(),
-        // No usable document ⇒ no same-window run to point at ⇒ allowed.
+        market_open,
+        // No usable document ⇒ no hourly-cooldown run to point at ⇒ allowed.
         run_allowed: true,
         next_open_utc: None,
         result: None,
@@ -83,16 +95,17 @@ fn envelope_for(state: &AppState, doc: Option<ResultDocument>) -> LatestEnvelope
     let cache_state = if cache_is_fresh(age_secs) { "fresh" } else { "stale" };
     // Off-hours gate mirrors POST /api/run's precedence (2b) so the button
     // disables BEFORE the press, not just after a refused one.
-    let blocked = crate::run::off_hours_block(crate::market::session(Utc::now()), &doc);
+    let blocked = crate::run::off_hours_block(now, &doc);
     LatestEnvelope {
         schema_version: crate::result::SCHEMA_VERSION,
         age_secs: Some(age_secs),
         cache_secs: market_int_core::constants::WEBAPP_CACHE_SECS,
         cache_state,
         run_state: state.shared.status_view(),
+        market_open,
         run_allowed: blocked.is_none(),
         next_open_utc: blocked
-            .map(|w| w.next_open_utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
         result: Some(doc),
     }
 }
@@ -334,6 +347,32 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    fn test_state(path: PathBuf, clock: fn() -> DateTime<Utc>) -> AppState {
+        AppState {
+            result_path: path,
+            shared: crate::run::SharedState::new(),
+            access: Default::default(),
+            clock,
+        }
+    }
+
+    /// Frozen Wednesday 2026-08-26 ET — permanently past, so the document's
+    /// age only ever grows (cache_state stays deterministically "stale").
+    /// 20:00 ET is a closed session; 15:00 ET the same day is open.
+    fn frozen_closed_now() -> DateTime<Utc> {
+        chrono::NaiveDate::from_ymd_opt(2026, 8, 26)
+            .unwrap()
+            .and_hms_opt(20, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono_tz::America::New_York)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn frozen_open_now() -> DateTime<Utc> {
+        frozen_closed_now() - chrono::Duration::hours(5)
+    }
+
     /// Present-fresh: age < WEBAPP_CACHE_SECS ⇒ fresh state and enveloped doc.
     #[tokio::test]
     async fn latest_present_fresh() {
@@ -344,7 +383,7 @@ mod tests {
         outcome.started_at = Utc::now() - chrono::Duration::seconds(335);
         write_document(&path, &build_document(&outcome)).unwrap();
 
-        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new(), access: Default::default() }).await;
+        let v = get_latest(test_state(path, crate::run::real_now)).await;
         assert_eq!(v["cache_state"], "fresh");
         assert_eq!(v["cache_secs"], market_int_core::constants::WEBAPP_CACHE_SECS);
         assert!(v["age_secs"].as_u64().unwrap() < 10);
@@ -354,25 +393,54 @@ mod tests {
         assert_eq!(rows[0]["underlying"], "NVDA");
     }
 
-    /// Present-stale: an old completion stamp keeps the document but flips state.
+    /// Present-stale: an old completion stamp keeps the document but flips
+    /// state. Frozen clocks pin BOTH market regimes so the hourly off-market
+    /// gate mirror is asserted deterministically, never time-of-day.
     #[tokio::test]
     async fn latest_present_stale() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("last_run.json");
-        let mut outcome = sample_outcome(Utc::now());
-        outcome.started_at = Utc::now() - chrono::Duration::seconds(335);
+        let now = frozen_closed_now();
+        let mut outcome = sample_outcome(now);
+        outcome.started_at = now - chrono::Duration::seconds(335);
         outcome.finished_at =
-            Utc::now()
-                - chrono::Duration::seconds(market_int_core::constants::WEBAPP_CACHE_SECS as i64 + 5);
+            now - chrono::Duration::seconds(market_int_core::constants::WEBAPP_CACHE_SECS as i64 + 5);
+        // Armed (a chains stage succeeded) so the off-hours gate can engage.
+        outcome.stages = vec![market_int_core::pipeline::StageReport {
+            stage: market_int_core::pipeline::Stage::ChainsShort,
+            status: market_int_core::pipeline::StageStatus::Ok,
+            error: None,
+            duration_secs: 118,
+        }];
         write_document(&path, &build_document(&outcome)).unwrap();
 
-        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new(), access: Default::default() }).await;
+        // Closed session (Wed 20:00 ET): blocked, unlock = completion + 1 h.
+        let v = get_latest(test_state(path.clone(), frozen_closed_now)).await;
         assert_eq!(v["cache_state"], "stale");
         assert!(v["age_secs"].as_u64().unwrap() >= market_int_core::constants::WEBAPP_CACHE_SECS);
         assert!(
             !v["result"].is_null(),
             "failed/stale runs still serve their document"
         );
+        assert_eq!(v["market_open"], false);
+        assert_eq!(v["run_allowed"], false);
+        let finished =
+            DateTime::parse_from_rfc3339(v["result"]["run"]["finished_at_utc"].as_str().unwrap())
+                .unwrap();
+        let unlock = DateTime::parse_from_rfc3339(v["next_open_utc"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            unlock,
+            finished
+                + chrono::Duration::seconds(
+                    market_int_core::constants::WEBAPP_OFF_HOURS_CACHE_SECS as i64
+                )
+        );
+
+        // Open session (same Wednesday 15:00 ET): the gate never engages.
+        let v = get_latest(test_state(path, frozen_open_now)).await;
+        assert_eq!(v["market_open"], true);
+        assert_eq!(v["run_allowed"], true);
+        assert!(v["next_open_utc"].is_null());
     }
 
     /// Absent file ⇒ result null, age null, state none — still HTTP 200.
@@ -381,7 +449,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("does-not-exist.json");
 
-        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new(), access: Default::default() }).await;
+        let v = get_latest(test_state(path, crate::run::real_now)).await;
         assert_eq!(v["cache_state"], "none");
         assert!(v["age_secs"].is_null());
         assert!(v["result"].is_null());
@@ -394,7 +462,7 @@ mod tests {
         let path = dir.path().join("last_run.json");
         std::fs::write(&path, b"{ this is not json").unwrap();
 
-        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new(), access: Default::default() }).await;
+        let v = get_latest(test_state(path, crate::run::real_now)).await;
         assert_eq!(v["cache_state"], "none");
         assert!(v["result"].is_null());
     }
@@ -414,7 +482,7 @@ mod tests {
         v["run"]["finished_at_utc"] = serde_json::json!("not-a-timestamp");
         std::fs::write(&path, v.to_string()).unwrap();
 
-        let v = get_latest(AppState { result_path: path, shared: crate::run::SharedState::new(), access: Default::default() }).await;
+        let v = get_latest(test_state(path, crate::run::real_now)).await;
         assert_eq!(v["cache_state"], "none");
         assert!(v["result"].is_null());
     }
@@ -427,7 +495,7 @@ mod tests {
         let path = dir.path().join("last_run.json");
         let shared = crate::run::SharedState::new();
         shared.begin().expect("acquire");
-        let app = build_router(AppState { result_path: path, shared, access: Default::default() });
+        let app = build_router(AppState { result_path: path, shared, access: Default::default(), clock: crate::run::real_now });
 
         let response = app
             .oneshot(axum::http::Request::builder().uri("/api/latest").body(Body::empty()).unwrap())

@@ -7,9 +7,10 @@
 // fallback spotting a newer completion) it asks for exactly one refresh via
 // the window event `webapp:refresh-latest`; App owns the refetch.
 
-import { Show, createSignal, onCleanup } from "solid-js";
+import { Show, createEffect, createSignal, onCleanup } from "solid-js";
 import { getLatest, getProgress, postRun } from "../api";
 import { consumeSse } from "../sse";
+import { localHM, stampMs } from "../lib/format";
 
 const STAGE_ORDER = ["quotes", "metrics", "chains_short", "chains_medium"];
 const STAGE_LABEL = {
@@ -19,6 +20,11 @@ const STAGE_LABEL = {
   chains_medium: "Chains · 20-day",
 };
 const POLL_MS = 15_000; // S5 detached re-check cadence
+
+// True once an unlock instant (epoch ms from stampMs) has passed on the
+// local clock — shared by the button's optimistic re-enable and the cache
+// line's "next run" segment.
+export const gateLifted = (atMs) => atMs !== null && Date.now() >= atMs;
 
 function fmtClock(secs) {
   const m = Math.floor(secs / 60);
@@ -42,6 +48,28 @@ export function createRunController(latest) {
 
   let timer = null;
   let poller = null;
+  // Off-hours gate wake-up: ONE self-clearing timeout scheduled to the
+  // unlock instant — no polling, no interval. It flips a signal so the
+  // button re-enables on time even though the envelope (fetched only on
+  // load/run events) still says blocked until the next refetch.
+  const [gateWake, setGateWake] = createSignal(0);
+  let gateTimer = null;
+  createEffect(() => {
+    const env = latest();
+    if (gateTimer) {
+      clearTimeout(gateTimer);
+      gateTimer = null;
+    }
+    if (env?.run_allowed === false) {
+      const at = stampMs(env.next_open_utc);
+      if (at !== null) {
+        gateTimer = setTimeout(
+          () => setGateWake((n) => n + 1),
+          Math.max(0, at - Date.now())
+        );
+      }
+    }
+  });
 
   function emptyStages() {
     return Object.fromEntries(
@@ -112,7 +140,10 @@ export function createRunController(latest) {
     return true;
   }
 
-  /** S5: stream lost mid-run — poll /api/latest until a newer completion. */
+  /** S5: stream lost mid-run — poll /api/latest until a newer completion,
+   *  or until the server reports idle with nothing newer (the drop itself
+   *  canceled the run), so a dead watcher never keeps waking the
+   *  scale-to-zero service. */
   async function watchFromBaseline(baselineFinished) {
     setPhase("detached");
     poller = setInterval(async () => {
@@ -124,6 +155,16 @@ export function createRunController(latest) {
           stopTimers();
           setPhase("done");
           window.dispatchEvent(new CustomEvent("webapp:refresh-latest"));
+          return;
+        }
+        // Idle + no newer document ⇒ the run died with the stream (the
+        // server cancels the pipeline on disconnect) — stop polling.
+        if (env?.run_state?.status !== "running") {
+          stopTimers();
+          setPhase("idle");
+          setNotice(
+            "Stream lost and the run was canceled — press Run to retry."
+          );
         }
       } catch {
         /* transient API errors keep the watcher alive */
@@ -174,16 +215,17 @@ export function createRunController(latest) {
       }
     }
 
-    // Outcome 2b: off-hours one-run gate — the server refuses politely.
+    // Outcome 2b: off-hours hourly gate — the server refuses politely.
     if (res.status === 403 && ct.includes("application/json")) {
       const v = await res.json().catch(() => null);
       stopTimers();
       setPhase("idle");
-      const when = v?.next_open_utc
-        ? new Date(v.next_open_utc).toLocaleString()
-        : "the next market open";
       setNotice(
-        `One off-hours run already completed — the next unlocks at market open (${when}).`
+        v?.next_open_utc
+          ? `Off-market runs are hourly — the next unlocks at ${new Date(
+              v.next_open_utc
+            ).toLocaleString()}.`
+          : "Off-market runs are hourly — try again after the next hour mark."
       );
       return;
     }
@@ -213,13 +255,23 @@ export function createRunController(latest) {
     setNotice(`Unexpected /api/run response (${res.status}, ${ct || "no type"}).`);
   };
 
-  onCleanup(stopTimers);
+  onCleanup(() => {
+    stopTimers();
+    if (gateTimer) clearTimeout(gateTimer);
+  });
 
   const isBusy = () => ["starting", "running", "detached"].includes(phase());
 
   // Off-hours gate (server-authoritative): the envelope says whether a press
-  // would be refused. Absent field (older envelope) ⇒ allowed.
-  const runAllowed = () => latest()?.run_allowed !== false;
+  // would be refused. Absent field (older envelope) ⇒ allowed. Once the
+  // unlock instant has passed locally, treat it as allowed — the press
+  // proceeds and the server's 403 notice is the backstop for clock skew.
+  const runAllowed = () => {
+    gateWake(); // one-shot wake at the unlock instant
+    const env = latest();
+    if (env?.run_allowed !== false) return true;
+    return gateLifted(stampMs(env?.next_open_utc));
+  };
   const nextOpenUtc = () => latest()?.next_open_utc ?? null;
 
   return {
@@ -240,13 +292,19 @@ export function createRunController(latest) {
 /** Header button (RUN_SLOT part 1). */
 export function RunButton(props) {
   const blocked = () => !props.run.runAllowed();
+  // Off-market the unlock is at most an hour out — the local clock time
+  // carries it (same formatter as the cache line); no timestamp (older
+  // envelope) ⇒ the plain locked label.
+  const unlockHM = () => localHM(props.run.nextOpenUtc());
   const label = () =>
     props.run.phase() === "running"
       ? "Run…"
       : props.run.phase() === "detached"
         ? "Run in progress"
         : blocked()
-          ? "Run at next open"
+          ? unlockHM()
+            ? `Run at ${unlockHM()}`
+            : "Run locked"
           : "▶ Run pipeline";
   return (
     <button
@@ -255,7 +313,7 @@ export function RunButton(props) {
       disabled={props.run.isBusy() || blocked()}
       title={
         blocked() && props.run.nextOpenUtc()
-          ? `Unlocks at market open: ${new Date(
+          ? `Off-market runs are hourly — next unlocks at ${new Date(
               props.run.nextOpenUtc()
             ).toLocaleString()}`
           : undefined

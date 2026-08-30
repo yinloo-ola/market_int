@@ -26,8 +26,13 @@ import { onAuthStateChanged } from "firebase/auth";
 import { AuthGate, DeniedCard } from "./components/AuthGate";
 import AccessPanel from "./components/AccessPanel";
 import ResultsPane from "./components/ResultsPane";
-import { RunButton, RunStrip, createRunController } from "./components/RunPanel";
-import { comma } from "./lib/format";
+import {
+  RunButton,
+  RunStrip,
+  createRunController,
+  gateLifted,
+} from "./components/RunPanel";
+import { comma, localHM, stampMs } from "./lib/format";
 import {
   DEFAULT_COLUMN_IDS,
   loadVisibleColumns,
@@ -63,8 +68,27 @@ function rowCountOf(result, tabId) {
   return tf?.rows?.length ?? tf?.row_count ?? 0;
 }
 
+// Cache-line age in human units: off-market ages routinely span hours.
+function ageText(secs) {
+  const m = Math.floor(secs / 60);
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem ? `${h} h ${rem} min` : `${h} h`;
+}
+
+// "· run 09:07" — the run stamp shared by every cache-line branch.
+function RunAtLine(props) {
+  return (
+    <Show when={props.at()}>
+      {" "}
+      · run <b>{props.at()}</b>
+    </Show>
+  );
+}
+
 function CacheLine(props) {
-  // §6.2 cache pill: "Cached · 6m left · run 09:07 ET", ticking every 30 s.
+  // §6.2 cache pill: "Cached · 6m left · run 09:07", ticking every 30 s.
   // The countdown anchors to the server-computed age_secs at refetch time;
   // between refetches the client clock fills the gap.
   const [tick, setTick] = createSignal(0);
@@ -88,57 +112,69 @@ function CacheLine(props) {
     return ageAtAnchor + Math.floor((Date.now() - anchoredAtMs) / 1000);
   };
   const state = () => props.envelope.cache_state;
-  const mins = () => Math.floor(ageNow() / 60);
+  // Off-market the envelope says so (absent ⇒ older backend ⇒ unknown).
+  const marketClosed = () => props.envelope.market_open === false;
   // "6m left" per §6.2; the final minute counts down in seconds.
   const left = () => {
     const s = Math.max(0, (props.envelope.cache_secs ?? 0) - ageNow());
     return s >= 60 ? `${Math.floor(s / 60)}m` : `${s}s`;
   };
-  // RFC3339 stamp → "09:07 ET" in the market's timezone.
-  const runAtEt = () => {
-    const stamp = props.envelope.result?.run?.finished_at_utc;
-    if (!stamp) return undefined;
-    try {
-      const t = new Date(stamp);
-      if (Number.isNaN(t.getTime())) return undefined;
-      return (
-        new Intl.DateTimeFormat("en-US", {
-          timeZone: "America/New_York",
-          hour: "2-digit",
-          minute: "2-digit",
-          hourCycle: "h23",
-        }).format(t) + " ET"
-      );
-    } catch {
-      return undefined;
-    }
+  const runAtLocal = () =>
+    localHM(props.envelope.result?.run?.finished_at_utc);
+  // The hourly off-market gate's unlock, in the same local format. Hidden
+  // once the instant passes on a not-yet-refetched envelope (the 30 s tick
+  // re-evaluates it; the button has its own one-shot wake).
+  const nextRunLocal = () => {
+    tick();
+    const stamp = props.envelope.next_open_utc;
+    const at = stampMs(stamp);
+    if (at === null || gateLifted(at)) return undefined;
+    return localHM(stamp);
   };
+  // Stale off-market is the expected state, not a problem — say why.
+  const pillState = () =>
+    marketClosed() && state() === "stale" ? "closed" : state();
+  const hasDoc = () => state() === "fresh" || state() === "stale";
   return (
     <div class="cache-line">
+      {/* One clock per regime: market open counts to cache expiry; market
+          closed shows the run age plus the hourly gate's next-run time —
+          the 10-min cache countdown is meaningless off-market, where the
+          gate is the only thing a press waits on. */}
       <Show
-        when={state() === "fresh"}
+        when={marketClosed() && hasDoc()}
         fallback={
-          <Show when={state() === "stale"}>
-            <span>
-              Stale · last run <b>{mins()}</b> min ago
-              <Show when={runAtEt()}>
-                {" "}
-                · run <b>{runAtEt()}</b>
+          <Show
+            when={state() === "fresh"}
+            fallback={
+              <Show when={state() === "stale"}>
+                <span>
+                  Stale · last run <b>{ageText(ageNow())}</b> ago
+                  <RunAtLine at={runAtLocal} />
+                </span>
               </Show>
+            }
+          >
+            {/* Window comes from the server (cache_secs) — never hardcode it. */}
+            <span>
+              Cached · <b>{left()}</b> left
+              <RunAtLine at={runAtLocal} />
             </span>
           </Show>
         }
       >
-        {/* Window comes from the server (cache_secs) — never hardcode it. */}
         <span>
-          Cached · <b>{left()}</b> left
-          <Show when={runAtEt()}>
+          Market closed · last run <b>{ageText(ageNow())}</b> ago
+          <RunAtLine at={runAtLocal} />
+          <Show when={nextRunLocal()}>
             {" "}
-            · run <b>{runAtEt()}</b>
+            · next run <b>{nextRunLocal()}</b>
           </Show>
         </span>
       </Show>
-      <span class={"pill " + state()}>{state()}</span>
+      <span class={"pill " + pillState()}>
+        {pillState() === "closed" ? "market closed" : state()}
+      </span>
       <span class="pill">run: {props.envelope.run_state?.status ?? "idle"}</span>
     </div>
   );

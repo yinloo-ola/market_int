@@ -16,6 +16,31 @@ export function comma(n) {
   return Number(n ?? 0).toLocaleString("en-US");
 }
 
+// RFC3339 stamp → epoch ms, or null for missing/unparseable. The single
+// parse home for every server timestamp the header displays or compares.
+export function stampMs(stamp) {
+  if (!stamp) return null;
+  const ms = new Date(stamp).getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
+// RFC3339 stamp → local browser time with its own zone label ("09:07 GMT+8"),
+// or undefined for missing/unparseable.
+export function localHM(stamp) {
+  const ms = stampMs(stamp);
+  if (ms === null) return undefined;
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+      timeZoneName: "short",
+    }).format(ms);
+  } catch {
+    return undefined;
+  }
+}
+
 const NULL_CELL = { text: NULL_MARK, isNull: true };
 const fixed = (v, dp) => ({ text: Number(v).toFixed(dp), isNull: false });
 
