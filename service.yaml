@@ -11,7 +11,8 @@ spec:
   template:
     metadata:
       annotations:
-        # single writer for the SQLite-on-GCS db (no file locking)
+        # single writer for the shared GCS artifacts (last_run.json atomic
+        # write, grant-file rewrites) — SQLite itself now runs on /tmp
         autoscaling.knative.dev/maxScale: "1"
         # required by the GCS FUSE CSI volume
         run.googleapis.com/execution-environment: gen2
@@ -34,8 +35,13 @@ spec:
             # (Revisit with axum http2 enabled to restore SSE cancel-on-close.)
             - containerPort: 8080
           env:
+            # container-local in-memory disk: pipeline scratch (quotes/metrics/
+            # chains) written+read within one run, discarded with the instance —
+            # same rationale as the Job. Views only read last_run.json; the GCS
+            # volume keeps the durable artifacts (symbols.csv, last_run.json,
+            # allowed_emails.txt).
             - name: sqlite_file
-              value: /data/data.db
+              value: /tmp/data.db
             - name: webapp_symbols_file
               value: /data/symbols.csv
             - name: webapp_result_file

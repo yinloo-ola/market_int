@@ -30,8 +30,11 @@ spec:
               env:
                 - name: telegram_chat_id
                   value: "-1002438976647"
+                # container-local in-memory disk: SQLite WAL writes stay local
+                # (GCS FUSE turns every page flush into an object write) and
+                # the file is discarded when the task ends — each run re-pulls.
                 - name: sqlite_file
-                  value: /data/data.db
+                  value: /tmp/data.db
                 - name: RUST_LOG
                   value: debug
                 - name: marketdata_token
@@ -44,6 +47,18 @@ spec:
                     secretKeyRef:
                       key: latest
                       name: telegram_bot_token
+                # perform-all hard-requires Tiger creds; the live Job had these
+                # injected via console edits, which `jobs replace` would wipe.
+                - name: TIGER_ID
+                  valueFrom:
+                    secretKeyRef:
+                      key: latest
+                      name: tiger_id
+                - name: TIGER_RSA
+                  valueFrom:
+                    secretKeyRef:
+                      key: latest
+                      name: tiger_rsa
               resources:
                 limits:
                   cpu: 1000m

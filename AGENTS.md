@@ -150,7 +150,9 @@ make docker-build tag=x.y.z   # builds linux/amd64, pushes, stamps job.yaml + se
 - Scheduled Telegram Job: `make gcloud-job` (rarely — job.yaml rarely changes).
 - Webapp Service: `make gcloud-service` (deploys `service.yaml`).
 - `service.yaml`: h2c port 8080, timeout 900s, maxScale 1 (single writer for
-  SQLite-on-GCS), concurrency 80, gen2 env, GCS FUSE volume at /data.
+  the GCS artifacts — last_run.json + grant file; SQLite scratch lives on /tmp
+  in both the Job and the webapp), concurrency 80, gen2 env, GCS FUSE volume
+  at /data (symbols.csv, last_run.json, allowed_emails.txt only).
 - Secrets: `marketdata_token`, `tiger_id`, `tiger_rsa` (Secret Manager);
   `FIREBASE_PROJECT_ID` is public. Provisioning checklist:
   `crates/webapp/README.md` + spec §7.3.
