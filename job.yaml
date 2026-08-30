@@ -52,5 +52,5 @@ spec:
                 - name: gcs-1
                   mountPath: /data
           maxRetries: 3
-          timeoutSeconds: "60"
+          timeoutSeconds: "300"
           serviceAccountName: 628240778300-compute@developer.gserviceaccount.com
