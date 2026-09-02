@@ -1056,6 +1056,11 @@ tr.exp-row > td {
   /* the 2×minmax(300px,1fr) expansion grid exceeds phone width */
   .exp-grid { grid-template-columns: 1fr; }
 
+  /* same for the run strip: 2×minmax(220px,1fr) + 24px gap ≈ 464px min —
+     stack the stage rows instead (each row's own min-content fits a 320px
+     viewport: mark + label + count + the bar's 80px floor) */
+  .run-stages { grid-template-columns: 1fr; }
+
   /* touch has no real hover — the pill shows on tap, so it must never depend
      on where the label sits: fixed bottom sheet, always fully visible and
      unclipped by the scroll container */
