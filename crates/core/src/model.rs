@@ -350,6 +350,15 @@ pub fn calculate_put_chain_score_components(
     vol_safety_boost: f64,
     params: ScoreParams,
 ) -> Option<(f64, ScoreComponents)> {
+    // Presentation fence: exclude puts whose real delta implies more than
+    // PRESENT_MAX_ABS_DELTA ITM probability (a strike too close to spot to
+    // hand a user). Null delta passes through — the max_drop band is the
+    // fallback safety there.
+    if let Some(d) = delta {
+        if d.abs() > constants::PRESENT_MAX_ABS_DELTA {
+            return None;
+        }
+    }
     // Earnings rule: strikes in the upper half of the band are excluded outright.
     if earnings_in_window {
         let midpoint = (strike_from + strike_to) / 2.0;
@@ -586,6 +595,15 @@ pub fn scored_chain_rows(
 
     all_chains
         .iter()
+        // Presentation fence: drop near-money puts from EVERY output (result
+        // document, CSV, top picks) — not just null their score. Delta ≈ ITM
+        // probability, so |delta| > PRESENT_MAX_ABS_DELTA means the market
+        // prices the strike above the presentation line (too close to spot).
+        // Null delta passes through — the max_drop band is the fallback safety.
+        .filter(|chain| match chain.delta {
+            Some(d) => d.abs() <= constants::PRESENT_MAX_ABS_DELTA,
+            None => true,
+        })
         .map(|chain| {
             let sharpe_ratio = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
             let trend_data_entry = trend_data.get(&chain.underlying);
@@ -2137,6 +2155,126 @@ mod tests {
             calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.10, 1.0, &bull_regime(), true, None, None, 0.0, params()),
             None
         );
+    }
+
+    // --- Presentation delta fence (PRESENT_MAX_ABS_DELTA, magnitude cap) ---
+    // Put delta ≈ ITM probability: near-money strikes have LARGE |delta| and
+    // are the dangerous ones; far-OTM strikes have tiny |delta| and survive.
+    // These tests pin the DIRECTION: |d| > cap → dropped, |d| ≤ cap → kept.
+
+    #[test]
+    fn test_present_delta_fence_excludes_near_money_put() {
+        // delta -0.20 (20% ITM probability, closer to spot than 1σ) → excluded.
+        assert_eq!(
+            calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false, Some(-0.20), None, 0.0, params()),
+            None
+        );
+        // delta -0.17 (just past the 0.16 cap) → excluded.
+        assert_eq!(
+            calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false, Some(-0.17), None, 0.0, params()),
+            None
+        );
+        // delta exactly at the cap (-0.16, the 1σ line) → kept.
+        assert!(
+            calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false, Some(-0.16), None, 0.0, params()).is_some()
+        );
+    }
+
+    #[test]
+    fn test_present_delta_fence_keeps_shallow_delta_put() {
+        // delta -0.05 (far OTM, ~5% ITM) → kept. Pins the direction: the fence
+        // removes near-MONEY strikes, not far-OTM ones.
+        assert!(
+            calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false, Some(-0.05), None, 0.0, params()).is_some()
+        );
+    }
+
+    #[test]
+    fn test_present_delta_fence_null_delta_passes_through() {
+        // Null delta → no fence; max_drop band is the fallback safety.
+        assert!(
+            calculate_put_chain_score(1.5, 90.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false, None, None, 0.0, params()).is_some()
+        );
+    }
+
+    #[test]
+    fn test_present_delta_fence_applies_before_earnings_gate() {
+        // Near-money put excluded by delta fence even with no earnings.
+        assert_eq!(
+            calculate_put_chain_score(1.5, 110.0, 80.0, 120.0, 0.35, 1.0, &bull_regime(), false, Some(-0.20), None, 0.0, params()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_scored_chain_rows_drops_near_money_puts_from_all_outputs() {
+        // Row-level fence: near-money puts (|delta| > PRESENT_MAX_ABS_DELTA)
+        // must not appear in the result rows at all (they feed the JSON + CSV
+        // + picks). At-fence, shallow, and null-delta rows survive.
+        let mut near_money = make_chain("NEARMONEY", 90.0, 0.35);
+        near_money.delta = Some(-0.20);
+        let mut at_fence = make_chain("ATFENCE", 90.0, 0.35);
+        at_fence.delta = Some(-0.16);
+        let mut shallow = make_chain("SHALLOW", 90.0, 0.35);
+        shallow.delta = Some(-0.05);
+        let null_delta = make_chain("NULLD", 90.0, 0.35); // delta None
+
+        let mut sharpe = HashMap::new();
+        for s in ["NEARMONEY", "ATFENCE", "SHALLOW", "NULLD"] {
+            sharpe.insert(s.to_string(), 1.5);
+        }
+
+        let rows = scored_chain_rows(
+            &[near_money, at_fence, shallow, null_delta],
+            &sharpe,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &bull_regime(),
+        );
+        let underlyings: Vec<&str> = rows.iter().map(|r| r.underlying.as_str()).collect();
+        assert_eq!(
+            underlyings,
+            vec!["ATFENCE", "SHALLOW", "NULLD"],
+            "near-money put must be dropped from raw rows; got {underlyings:?}"
+        );
+    }
+
+    #[test]
+    fn test_top_picks_exclude_near_money_delta() {
+        // The top-picks derivation consumes the filtered rows, so a near-money
+        // put cannot become a pick even if its other signals are strong.
+        let mut near_money = make_chain("NEARMONEY", 90.0, 0.60);
+        near_money.delta = Some(-0.20);
+        let mut safe = make_chain("SAFE", 90.0, 0.35);
+        safe.delta = Some(-0.05);
+
+        let mut sharpe = HashMap::new();
+        sharpe.insert("NEARMONEY".to_string(), 2.0);
+        sharpe.insert("SAFE".to_string(), 1.5);
+
+        let (_, top_picks) = option_chain_to_csv_vec(
+            &[near_money, safe],
+            &sharpe,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &bull_regime(),
+        )
+        .unwrap();
+        assert!(
+            top_picks.iter().all(|p| p.underlying != "NEARMONEY"),
+            "near-money put must not appear in top picks; got {:?}",
+            top_picks.iter().map(|p| &p.underlying).collect::<Vec<_>>()
+        );
+        assert_eq!(top_picks.len(), 1);
+        assert_eq!(top_picks[0].underlying, "SAFE");
     }
 
     // --- Regression: corrupt band data (NaN) must not panic the sort [S-001] ---

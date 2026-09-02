@@ -550,7 +550,8 @@ mod tests {
                 for ror in [0.30, 0.45, 0.80] {
                     let scored =
                         market_int_core::model::calculate_put_chain_score_components(
-                            sh, 95.0, 90.0, 96.0, ror, 1.05, &regime, false, Some(-0.2),
+                            // delta within the presentation fence (|d| <= 0.16)
+                            sh, 95.0, 90.0, 96.0, ror, 1.05, &regime, false, Some(-0.05),
                             Some(0.4), 0.0, Default::default(),
                         );
                     if let Some((total, comps)) = scored {

@@ -24,6 +24,16 @@ pub const MOMENTUM_EXTENDED_THRESHOLD: f64 = 0.90;
 
 // ── Max-drop band ─────────────────────────────────────────────
 pub const PERCENTILE: f64 = 0.97; // 97th-percentile drawdown → deep band end
+/// Presentation fence (delta magnitude): rows with `|delta|` above this are
+/// excluded from scored output AND dropped from raw rows (result document,
+/// CSV, top picks). Put delta ≈ the market's ITM/assignment probability, so
+/// the cap means "never present a strike priced above ~16% ITM" — the
+/// 1-std-dev OTM line (Φ(−1) ≈ 0.1587 ≈ 0.16). Strikes closer to spot than
+/// 1σ are the premium-rich ones a user might sell too casually; because
+/// delta bakes in each name's IV, the cap trims every symbol at its own
+/// risk-equivalent moneyness. Null-delta rows pass through (the max_drop
+/// band remains the fallback safety there).
+pub const PRESENT_MAX_ABS_DELTA: f64 = 0.16;
 pub const TREND_TIGHTEN_MULTIPLIER: f64 = 2.0;
 pub const TREND_TIGHTEN_CAP: f64 = 0.10;
 pub const TREND_TIGHTEN_PEAK: f64 = 1.05;
