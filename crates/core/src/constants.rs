@@ -40,7 +40,7 @@ pub const TREND_TIGHTEN_PEAK: f64 = 1.05;
 pub const TREND_EASE_BACK: f64 = 0.5;
 
 // ── Pre-filters ───────────────────────────────────────────────
-pub const MIN_RATE_OF_RETURN: f64 = 0.30;
+pub const MIN_RATE_OF_RETURN: f64 = 0.20;
 /// Unused in production (no upper cap since 2026-07). Retained for backtest presets.
 pub const MAX_RATE_OF_RETURN: f64 = 0.80;
 /// Unused in production (danger expressed via band). Retained for backtest presets.

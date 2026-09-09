@@ -727,6 +727,9 @@ mod tests {
             report_time: "after_close".to_string(),
             expected_eps: Some(1.24),
         });
+        // Post-fence delta (|Δ| ≤ 0.16): the demo document should look like
+        // something the current pipeline could actually persist.
+        nvda.delta = Some(-0.12);
 
         let mut xom = chain_row("XOM", 48.0, None);
         xom.sector = "Energy".to_string();
@@ -755,8 +758,40 @@ mod tests {
         let mut aapl = chain_row("AAPL", 210.0, Some(0.512));
         aapl.expiration = "2026-09-02".to_string();
         aapl.sector = "Technology".to_string();
+        // Post-fence delta — the chain scorer drops |Δ| > 0.16 outright, so a
+        // fixture row carrying chain_row's -0.28 default would score null.
+        aapl.delta = Some(-0.05);
 
-        let mut outcome = sample_outcome(vec![nvda.clone(), aapl]);
+        // Formula-true scores (client-side re-scoring parity, ticket 01 /
+        // .scratch/rescore): the fixture's score + score_components come from
+        // the ONE scoring implementation, so scripts/run-parity.mjs can pin
+        // the frontend's JS port against this document. The hand-made values
+        // that used to live here satisfied no formula at all.
+        let rescore = |row: &mut ScoredChainRow| {
+            let scored = market_int_core::model::calculate_put_chain_score_components(
+                row.sharpe_ratio,
+                row.strike,
+                row.strike_from,
+                row.strike_to,
+                row.rate_of_return,
+                row.trend_short.unwrap_or(0.0),
+                &market_int_core::regime::MarketRegime::from_spy_trend(
+                    market_int_core::constants::PERFORM_ALL_SPY_TREND_RATIO,
+                ),
+                row.earnings_before_expiry.is_some(),
+                row.delta,
+                row.realized_vol,
+                market_int_core::constants::VOL_SAFETY_BOOST,
+                market_int_core::model::ScoreParams::default(),
+            );
+            row.score = scored.map(|(total, _)| total);
+            row.score_components = scored.map(|(_, parts)| parts);
+        };
+        rescore(&mut nvda);
+        rescore(&mut aapl);
+        rescore(&mut xom);
+
+        let mut outcome = sample_outcome(vec![nvda.clone(), aapl.clone()]);
         outcome.medium = Some(stf(vec![xom], 20));
         outcome.medium.as_mut().unwrap().period = 20;
 
@@ -771,7 +806,10 @@ mod tests {
         } else {
             panic!("fixture needs timeframes");
         }
-        doc.timeframes.as_mut().unwrap().short.as_mut().unwrap().top_picks = vec![pick(1, &nvda)];
+        // Real selection over the formula-true scores: AAPL 0.705 beats NVDA
+        // 0.671, and both are Technology so the sector dedupe keeps only the
+        // winner — the same top_picks_from_rows semantics production applies.
+        doc.timeframes.as_mut().unwrap().short.as_mut().unwrap().top_picks = vec![pick(1, &aapl)];
 
         doc.run.started_at_utc = "2026-08-27T13:02:11Z".to_string();
         doc.run.finished_at_utc = "2026-08-27T13:07:46Z".to_string();

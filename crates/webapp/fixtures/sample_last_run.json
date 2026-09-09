@@ -67,11 +67,11 @@
           "strike_to": 192.5,
           "sharpe_ratio": 1.83,
           "strike_percentile": 0.412,
-          "score": 0.5941234567890123,
+          "score": 0.671,
           "score_components": {
-            "sharpe": 0.11882469135780248,
-            "safety": 0.23764938271560496,
-            "return": 0.23764938271560496
+            "sharpe": 0.18300000000000002,
+            "safety": 0.17600000000000002,
+            "return": 0.312
           },
           "price_percentile": 0.81,
           "earnings_before_expiry": {
@@ -83,7 +83,7 @@
           "trend_long": 1.089,
           "realized_vol": 0.452,
           "implied_vol": 0.481,
-          "delta": -0.28,
+          "delta": -0.12,
           "iv_rv_ratio": 1.0642
         },
         {
@@ -105,11 +105,11 @@
           "strike_to": 201.6,
           "sharpe_ratio": 1.5,
           "strike_percentile": 0.4,
-          "score": 0.512,
+          "score": 0.7050000000000001,
           "score_components": {
-            "sharpe": 0.1024,
-            "safety": 0.2048,
-            "return": 0.2048
+            "sharpe": 0.15000000000000002,
+            "safety": 0.38,
+            "return": 0.175
           },
           "price_percentile": 0.81,
           "earnings_before_expiry": null,
@@ -117,27 +117,22 @@
           "trend_long": 1.089,
           "realized_vol": 0.452,
           "implied_vol": 0.481,
-          "delta": -0.28,
+          "delta": -0.05,
           "iv_rv_ratio": 1.06
         }
       ],
       "top_picks": [
         {
           "rank": 1,
-          "underlying": "NVDA",
+          "underlying": "AAPL",
           "sector": "Technology",
-          "strike": 175.0,
-          "bid": 2.05,
-          "ask": 2.15,
-          "rate_of_return": 0.624,
-          "score": 0.5941234567890123,
-          "sharpe": 1.83,
+          "strike": 210.0,
+          "bid": 4.2,
+          "ask": 4.62,
+          "rate_of_return": 0.35,
+          "score": 0.7050000000000001,
+          "sharpe": 1.5,
           "price_percentile": 0.81,
-          "earnings": {
-            "report_date": "2026-08-31",
-            "report_time": "after_close",
-            "expected_eps": 1.24
-          },
           "trend_short": 1.036,
           "trend_long": 1.089,
           "realized_vol": 0.452

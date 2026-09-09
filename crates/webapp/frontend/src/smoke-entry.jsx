@@ -12,7 +12,7 @@ const THRESHOLDS = {
 };
 
 function row(over = {}) {
-  return {
+  const base = {
     underlying: "NVDA",
     sector: "Technology",
     strike: 175,
@@ -31,18 +31,24 @@ function row(over = {}) {
     strike_to: 192.5,
     sharpe_ratio: 1.83,
     strike_percentile: 0.412,
-    score: 0.5941234567890123,
-    score_components: { sharpe: 0.183, safety: 0.261, return: 0.15 },
     price_percentile: 0.81,
     earnings_before_expiry: { report_date: "2026-08-31", report_time: "after_close", expected_eps: 1.24 },
     trend_short: 1.036,
     trend_long: 1.089,
     realized_vol: 0.452,
     implied_vol: 0.481,
-    delta: -0.28,
+    delta: -0.12, // post-fence (|Δ| ≤ 0.16)
     iv_rv_ratio: 1.0642,
     ...over,
   };
+  // Formula-true scores: computed by the same JS port the GUI re-scoring
+  // uses (pinned to Rust by scripts/run-parity.mjs), so the envelope can
+  // never disagree with the scorer the way the old hand-made values did.
+  const live = rescoreRow(base, PRODUCTION);
+  base.score = live == null ? null : live.total;
+  base.score_components =
+    live == null ? null : { sharpe: live.sharpe, safety: live.safety, return: live.return };
+  return base;
 }
 
 const STAGES = [
@@ -52,9 +58,30 @@ const STAGES = [
   { name: "chains_medium", status: "failed", error: "Failed to get option expirations for batch.", duration_secs: 4 },
 ];
 
+document.body.innerHTML = `<div id="root"></div>`;
+
+await import("./style.css").catch(() => {}); // style optional in smoke
+const { render } = await import("solid-js/web");
+const ResultsPane = (await import("./components/ResultsPane")).default;
+const { createScoringStore } = await import("./components/RescoreControls");
+const { PRODUCTION, rescoreRow } = await import("./lib/scoring");
+
+// Built AFTER the imports: row() needs rescoreRow at evaluation time (the
+// iife bundle renames dynamic-import bindings, so use-before-init throws).
 const TF_SHORT_ROWS = [
   row(), // NVDA: scored + earnings + components
-  row({ underlying: "XOM", sector: "Energy", score: null, score_components: null }), // unscored degrades
+  // TSLA: below the production floor (0.17 < 0.20) but re-admittable — the
+  // client-side floor slider's showcase row.
+  row({
+    underlying: "TSLA",
+    sector: "Consumer Discretionary",
+    strike: 180,
+    rate_of_return: 0.17,
+    sharpe_ratio: 1.2,
+    delta: -0.08,
+  }),
+  // XOM: below floor AND sharpe 0 — stays unscored at any floor.
+  row({ underlying: "XOM", sector: "Energy", rate_of_return: 0.1777, sharpe_ratio: 0.0 }),
 ];
 // medium absent entirely + its stage failed → exercises the S6 inline panel
 const ENVELOPE = {
@@ -68,19 +95,13 @@ const ENVELOPE = {
     thresholds: THRESHOLDS,
     run: {},
     stages: STAGES,
-    timeframes: { short: { expiration: "2026-09-02", row_count: 2, symbols_with_chains: 171, rows: TF_SHORT_ROWS, top_picks: [] } },
+    timeframes: { short: { expiration: "2026-09-02", row_count: 3, symbols_with_chains: 171, rows: TF_SHORT_ROWS, top_picks: [] } },
   },
 };
 
 const checks = [];
 const ok = (name, cond) => checks.push([name, Boolean(cond)]);
 const tick = () => new Promise((r) => setTimeout(r, 25));
-
-document.body.innerHTML = `<div id="root"></div>`;
-
-await import("./style.css").catch(() => {}); // style optional in smoke
-const { render } = await import("solid-js/web");
-const ResultsPane = (await import("./components/ResultsPane")).default;
 
 const VISIBLE = ["underlying","sector","strike","expiration","bid","mid","ask","rate_of_return","score"];
 const columns = {
@@ -92,6 +113,7 @@ const columns = {
 };
 const active = () => true;
 const stages = () => [...STAGES];
+const scoring = createScoringStore();
 
 render(
   () => (
@@ -103,6 +125,7 @@ render(
       stages={stages()}
       thresholds={THRESHOLDS}
       columns={columns}
+      scoring={scoring}
     />
   ),
   document.getElementById("root")
@@ -174,6 +197,17 @@ ok("second click collapses panel", !q(".expansion"));
 qa("#root table thead th[role='button']")[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
 await tick();
 ok("sort interaction leaves no stale panel", !q(".expansion"));
+
+// ── client-side re-scoring (ticket 01 / .scratch/rescore) ──
+scoring.setParam("minRateOfReturn", 0.15);
+await tick();
+ok("lower floor re-admits TSLA", qa("#root " + rowsSel).length === 2);
+ok("count line reports re-admission", (q("#root .count-line")?.textContent ?? "").includes("re-admitted"));
+ok("re-admitted tag on score cell", !!q("#root td.score-cell .score-frozen.readmit"));
+ok("frozen production score shown", (qa("#root td.score-cell .score-frozen").map((e) => e.textContent).join(" ") ?? "").includes("prod 0.671"));
+scoring.reset();
+await tick();
+ok("reset restores production view", qa("#root " + rowsSel).length === 1);
 
 console.log(JSON.stringify({ total: checks.length }));
 let failedCount = 0;
