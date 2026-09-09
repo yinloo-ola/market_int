@@ -1011,8 +1011,9 @@ mod tests {
     #[test]
     fn test_put_score_filtered_low_return() {
         // MIN_RATE_OF_RETURN floor still applies
-        assert!(calculate_put_score(1.5, 0.90, 0.30, 1.0, &bull_regime(), params()).is_some());
-        assert!(calculate_put_score(1.5, 0.90, 0.29, 1.0, &bull_regime(), params()).is_none());
+        let floor = constants::MIN_RATE_OF_RETURN;
+        assert!(calculate_put_score(1.5, 0.90, floor, 1.0, &bull_regime(), params()).is_some());
+        assert!(calculate_put_score(1.5, 0.90, floor - 0.01, 1.0, &bull_regime(), params()).is_none());
     }
 
     #[test]
@@ -1034,8 +1035,9 @@ mod tests {
 
     #[test]
     fn test_put_score_boundary_return_low() {
-        assert!(calculate_put_score(1.0, 0.90, 0.30, 1.0, &bull_regime(), params()).is_some());
-        assert!(calculate_put_score(1.0, 0.90, 0.29, 1.0, &bull_regime(), params()).is_none());
+        let floor = constants::MIN_RATE_OF_RETURN;
+        assert!(calculate_put_score(1.0, 0.90, floor, 1.0, &bull_regime(), params()).is_some());
+        assert!(calculate_put_score(1.0, 0.90, floor - 0.01, 1.0, &bull_regime(), params()).is_none());
     }
 
     #[test]
@@ -1046,12 +1048,12 @@ mod tests {
 
     #[test]
     fn test_put_score_just_below_return_floor() {
-        assert!(calculate_put_score(1.0, 0.90, 0.29, 1.0, &bull_regime(), params()).is_none());
+        assert!(calculate_put_score(1.0, 0.90, constants::MIN_RATE_OF_RETURN - 0.01, 1.0, &bull_regime(), params()).is_none());
     }
 
     #[test]
     fn test_put_score_at_return_floor() {
-        assert!(calculate_put_score(1.0, 0.90, 0.30, 1.0, &bull_regime(), params()).is_some());
+        assert!(calculate_put_score(1.0, 0.90, constants::MIN_RATE_OF_RETURN, 1.0, &bull_regime(), params()).is_some());
     }
 
     #[test]
