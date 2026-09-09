@@ -15,6 +15,7 @@ import {
 } from "solid-js";
 
 import { COLUMNS } from "../lib/columns";
+import { rescoreRow, topPicks } from "../lib/scoring";
 import ColumnPicker from "./ColumnPicker";
 import Pagination from "./Pagination";
 import ResultsTable from "./ResultsTable";
@@ -59,7 +60,8 @@ export default function ResultsPane(props) {
   // props.id ("short" | "medium"), props.active() — tab visibility getter,
   // props.tf (timeframe object or undefined), props.stageError,
   // props.stages (pipeline stage reports), props.thresholds,
-  // props.columns — the shared column store.
+  // props.columns — the shared column store,
+  // props.scoring — the App-level weight store (RescoreControls).
   const [rawFilter, setRawFilter] = createSignal("");
   const [filter, setFilter] = createSignal("");
   const [scoredOnly, setScoredOnly] = createSignal(true); // default ON
@@ -70,6 +72,33 @@ export default function ResultsPane(props) {
   onCleanup(() => clearTimeout(debounceTimer));
 
   const allRows = () => props.tf?.rows ?? [];
+
+  // View-model rows under the CURRENT weights (client-side re-scoring, ticket
+  // 01): at production defaults the view is the FROZEN document verbatim —
+  // identical to the pre-feature app, so an older document never silently
+  // re-scores under newer constants (e.g. a floor change). `.score` becomes
+  // the live custom score ONLY while weights are adjusted; the frozen
+  // production score rides along as `.frozen_score` throughout.
+  const viewRows = createMemo(() => {
+    const p = props.scoring.params();
+    const custom = props.scoring.isCustom();
+    return allRows().map((row) => {
+      const live = rescoreRow(row, p);
+      return {
+        ...row,
+        frozen_score: row.score,
+        live_parts: live,
+        score: custom ? (live == null ? null : live.total) : row.score,
+      };
+    });
+  });
+
+  const reAdmittedCount = createMemo(
+    () =>
+      viewRows().filter(
+        (r) => !isNullValue(r.score) && isNullValue(r.frozen_score)
+      ).length
+  );
 
   const onFilterInput = (e) => {
     const v = e.currentTarget.value;
@@ -120,8 +149,8 @@ export default function ResultsPane(props) {
   // excluding the whole timeframe — different remedies, different copy).
   const textFilteredRows = createMemo(() => {
     const needle = filter();
-    if (!needle) return allRows();
-    return allRows().filter((r) => {
+    if (!needle) return viewRows();
+    return viewRows().filter((r) => {
       const u = r.underlying;
       const s = r.sector;
       return (
@@ -152,10 +181,22 @@ export default function ResultsPane(props) {
   };
 
   // Top picks matched by (underlying, strike); rank drives ★n + tint.
+  // Under custom weights the ranks are re-derived from the live scores
+  // (same dedupe rules as the Rust selection); at production defaults the
+  // frozen document picks are used verbatim.
   const pickRanks = createMemo(() => {
     const m = new Map();
-    for (const p of props.tf?.top_picks ?? []) {
-      m.set(`${p.underlying}|${p.strike}`, p.rank ?? "?");
+    if (props.scoring.isCustom()) {
+      const picks = topPicks(
+        viewRows().map((r) => ({ row: r, score: r.score }))
+      );
+      for (const p of picks) {
+        m.set(`${p.row.underlying}|${p.row.strike}`, m.size + 1);
+      }
+    } else {
+      for (const p of props.tf?.top_picks ?? []) {
+        m.set(`${p.underlying}|${p.strike}`, p.rank ?? "?");
+      }
     }
     return m;
   });
@@ -184,54 +225,22 @@ export default function ResultsPane(props) {
           scored only
         </label>
         <ColumnPicker store={props.columns} />
-        {/* honest count: visible after every hiding rule, vs the raw total */}
+        {/* honest count: visible after every hiding rule, vs the raw total;
+            under custom weights, also the re-admission tally */}
         <span class="count-line">
           {comma(sortedRows().length)} rows (filtered from{" "}
           {comma(allRows().length)})
+          <Show when={props.scoring.isCustom() && reAdmittedCount() > 0}>
+            {" "}
+            · {comma(reAdmittedCount())} re-admitted by lower floor
+          </Show>
         </span>
       </div>
 
-      <div class="scroll-region">
-        <Show
-          when={pageRows().length > 0}
-          fallback={
-            <Show
-              when={
-                chainStage()?.status === "failed" ||
-                chainStage()?.status === "partial"
-              }
-              fallback={
-                <Show
-                  when={scoredOnly() && textFilteredRows().length > 0}
-                  fallback={
-                    <div class="empty-panel">
-                      No rows match the current filter.
-                    </div>
-                  }
-                >
-                  <div class="empty-panel">
-                    <b>No scored candidates on this timeframe.</b> Untick{" "}
-                    <b>scored only</b> to browse the{" "}
-                    {comma(textFilteredRows().length)} raw rows — none cleared
-                    the scoring gates (annualized return ≥ 30%, Sharpe &gt; 0).
-                  </div>
-                </Show>
-              }
-            >
-              {(stg) => (
-                <div class="empty-panel stage-failed-panel">
-                  <b>
-                    {stg().status === "partial" ? "△" : "✗"}{" "}
-                    {STAGE_BY_TAB[props.id].label} — no rows
-                  </b>
-                  <pre class="errbox">
-                    {stg().error ?? "stage produced no data"}
-                  </pre>
-                </div>
-              )}
-            </Show>
-          }
-        >
+      {/* The data view is the table — unchanged at every width (scope
+          correction 2026-09-09: the rescore feature adds only the drawer). */}
+      <Show when={pageRows().length > 0}>
+        <div class="scroll-region">
           <ResultsTable
             visibleCols={props.columns.visible}
             rows={pageRows}
@@ -243,9 +252,48 @@ export default function ResultsPane(props) {
             openKey={openKey}
             onToggleRow={onToggleRow}
             hiddenDefs={hiddenDefs}
+            customScores={props.scoring.isCustom}
           />
+        </div>
+      </Show>
+      <Show when={pageRows().length === 0}>
+        <Show
+          when={
+            chainStage()?.status === "failed" ||
+            chainStage()?.status === "partial"
+          }
+          fallback={
+            <Show
+              when={scoredOnly() && textFilteredRows().length > 0}
+              fallback={
+                <div class="empty-panel">
+                  No rows match the current filter.
+                </div>
+              }
+            >
+              <div class="empty-panel">
+                <b>No scored candidates on this timeframe.</b> Untick{" "}
+                <b>scored only</b> to browse the{" "}
+                {comma(textFilteredRows().length)} raw rows — none cleared
+                the scoring gates (return floor, Sharpe &gt; 0). Try
+                lowering the floor in <b>Adjust scoring</b>.
+              </div>
+            </Show>
+          }
+        >
+          {(stg) => (
+            <div class="empty-panel stage-failed-panel">
+              <b>
+                {stg().status === "partial" ? "△" : "✗"}{" "}
+                {STAGE_BY_TAB[props.id].label} — no rows
+              </b>
+              <pre class="errbox">
+                {stg().error ?? "stage produced no data"}
+              </pre>
+            </div>
+          )}
         </Show>
-      </div>
+      </Show>
 
       <Show when={sortedRows().length > 0}>
         <Pagination page={safePage} pageCount={pageCount} onGo={setPage} />

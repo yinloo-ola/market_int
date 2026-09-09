@@ -25,6 +25,9 @@ import { AUTH_CONFIGURED, firebaseAuth, signOutUser } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { AuthGate, DeniedCard } from "./components/AuthGate";
 import AccessPanel from "./components/AccessPanel";
+import RescoreControls, {
+  createScoringStore,
+} from "./components/RescoreControls";
 import ResultsPane from "./components/ResultsPane";
 import {
   RunButton,
@@ -218,6 +221,26 @@ function App() {
      survives while SIGNED IN to flip Sign out back to the gate.
      Unconfigured ⇒ null immediately (notice card, not infinite spinner). */
   onMount(() => {
+    // Dev-preview bypass (tunnel/phone previews): VITE_PREVIEW_USER arms ONLY
+    // under `vite dev` (the production build statically compiles
+    // import.meta.env.DEV to false — this branch cannot ship) and ONLY when
+    // the server itself confirms auth is disabled (/api/me auth_enabled
+    // false, i.e. FIREBASE_PROJECT_ID unset). An armed server keeps the real
+    // sign-in flow; requests in preview mode go unsigned by design.
+    if (import.meta.env.DEV && import.meta.env.VITE_PREVIEW_USER) {
+      const previewEmail = import.meta.env.VITE_PREVIEW_USER;
+      fetch("/api/me")
+        .then((r) => r.json())
+        .then((v) => {
+          if (v?.auth_enabled === false) {
+            setUser({ email: previewEmail, uid: "dev-preview" });
+          } else {
+            setUser(null);
+          }
+        })
+        .catch(() => setUser(null));
+      return;
+    }
     if (!AUTH_CONFIGURED) {
       setUser(null);
       return;
@@ -261,6 +284,9 @@ function App() {
 
   const columns = createColumnStore();
   const [tab, setTab] = createSignal("short");
+  // Client-side weight adjustment (ticket 01): ONE weight set for both
+  // timeframes, owned here, consumed by the panes + the drawer.
+  const scoring = createScoringStore();
   // Ticket 18 controller: three-outcome Run precedence + SSE progress state.
   const run = createRunController(() => latest());
 
@@ -396,6 +422,7 @@ function App() {
             const result = () => res();
             return (
               <>
+                <RescoreControls scoring={scoring} />
                 <TabsRow result={result} tab={tab} onTab={setTab} />
                 <ResultsPane
                   id="short"
@@ -405,6 +432,7 @@ function App() {
                   stages={result().stages}
                   thresholds={result().thresholds}
                   columns={columns}
+                  scoring={scoring}
                 />
                 <ResultsPane
                   id="medium"
@@ -414,6 +442,7 @@ function App() {
                   stages={result().stages}
                   thresholds={result().thresholds}
                   columns={columns}
+                  scoring={scoring}
                 />
               </>
             );

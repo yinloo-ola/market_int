@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:preview": "vite --config vite.preview.config.mjs",
     "build": "vite build",
     "preview": "vite preview",
-    "smoke": "vite build -c vite.smoke.config.mjs && node scripts/run-smoke.mjs"
+    "smoke": "vite build -c vite.smoke.config.mjs && node scripts/run-parity.mjs && node scripts/run-smoke.mjs"
   },
   "dependencies": {
     "firebase": "^12.18.0",

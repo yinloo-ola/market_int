@@ -23,7 +23,6 @@ import {
 } from "../lib/format";
 
 const rowKey = (row) => `${row.underlying}|${row.strike}`;
-
 function NullMark(props) {
   return <span class="null-mark">{props.text}</span>;
 }
@@ -73,6 +72,29 @@ function Cell(props) {
           )}
         </Show>
         <CellText kind={c.kind} value={r[c.id]} />
+      </td>
+    );
+  }
+
+  if (c.id === "score") {
+    // Live (custom-weight) score primary; under custom weights the frozen
+    // production score rides along — or the "re-admitted" tag for rows the
+    // lowered floor brought back (approved layout, ticket 01).
+    return (
+      <td class="num score-cell">
+        <CellText kind={c.kind} value={r[c.id]} />
+        <Show when={props.customScores?.()}>
+          <Show
+            when={!isNullValue(r.frozen_score)}
+            fallback={
+              <Show when={!isNullValue(r.score)}>
+                <span class="score-frozen readmit">re-admitted</span>
+              </Show>
+            }
+          >
+            <span class="score-frozen">prod {r.frozen_score.toFixed(3)}</span>
+          </Show>
+        </Show>
       </td>
     );
   }
@@ -182,6 +204,7 @@ export default function ResultsTable(props) {
                         row={row}
                         thresholds={props.thresholds}
                         pickRank={rank()}
+                        customScores={props.customScores}
                       />
                     )}
                   </For>
