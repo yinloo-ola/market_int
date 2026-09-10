@@ -1,7 +1,11 @@
-# keep the build context lean; node deps install fresh inside the frontend stage
+# keep the build context lean; the image is assembled from the host-built
+# zigbuild binaries only (frontend dist is embedded in the webapp binary at
+# compile time, so Docker never needs it)
 .git/
 .target/
 target/
+!target/x86_64-unknown-linux-gnu/release/market_int
+!target/x86_64-unknown-linux-gnu/release/market_int_webapp
 data/
 .env
 .env.*

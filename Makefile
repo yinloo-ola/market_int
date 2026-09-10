@@ -66,7 +66,13 @@ clean:
 	cargo clean
 
 # Docker operations
-docker-build:
+# Release flow: frontend + Rust are built on the HOST (cargo zigbuild cross-compiles amd64
+# natively — no emulation), then docker only assembles a thin image from the two binaries.
+# One-time setup: brew install zig && cargo install cargo-zigbuild
+# (rust-toolchain.toml supplies the x86_64-unknown-linux-gnu target).
+docker-build: webapp-frontend
+	@command -v cargo-zigbuild >/dev/null 2>&1 || { echo "error: cargo-zigbuild not found — run: brew install zig && cargo install cargo-zigbuild"; exit 1; }
+	cargo zigbuild --release --target x86_64-unknown-linux-gnu --workspace --features market_int/bundled-sqlite
 	docker build --platform linux/amd64 -t us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:$(tag) .
 	docker push us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:$(tag)
 	sed -i.bak 's|us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:[0-9.]*|us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:'$(tag)'|' job.yaml service.yaml && rm -f job.yaml.bak service.yaml.bak
@@ -103,7 +109,7 @@ help:
 	@echo "  build-release        - Build release version"
 	@echo "  test                 - Run tests"
 	@echo "  clean                - Clean build artifacts"
-	@echo "  docker-build         - Build and push Docker image"
+	@echo "  docker-build tag=x.y.z - Build (zigbuild + thin image), push, stamp manifests"
 	@echo "  gcloud-job           - Update Google Cloud job"
 	@echo "  gcloud-service       - Deploy/update the webapp Cloud Run Service"
 	@echo "  webapp-frontend      - npm ci + build the webapp frontend"

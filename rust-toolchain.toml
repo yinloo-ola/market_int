@@ -1,0 +1,9 @@
+# Pinned toolchain for reproducible host builds — the release image no longer
+# compiles Rust, so this version defines both local dev and shipped binaries.
+# Bump deliberately. `targets` is what `cargo zigbuild --target
+# x86_64-unknown-linux-gnu` links against.
+[toolchain]
+channel = "1.92.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-unknown-linux-gnu"]

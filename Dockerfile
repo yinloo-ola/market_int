@@ -1,74 +1,30 @@
 ####################################################################################################
-## Frontend (node) — vite + Solid build (ticket 08 verdict; solid 1.9 per the §6.1 fallback)
+## Runtime image — thin by design. The frontend (vite/Solid) and the Rust binaries are built on
+## the HOST by `make docker-build`: cargo zigbuild cross-compiles linux/amd64 natively (zig is the
+## linker), and the webapp embeds frontend/dist via include_str! at compile time. This file only
+## assembles the image.
 ####################################################################################################
-FROM node:22-slim AS frontend
-WORKDIR /build
-COPY crates/webapp/frontend/package.json crates/webapp/frontend/package-lock.json ./
-RUN npm ci
-COPY crates/webapp/frontend/ ./
-# Vite emits stable names (index.html + assets/app.js|css) into /build/dist —
-# consumed by include_str!/include_bytes! in crates/webapp/src/assets.rs.
-RUN npm run build
+# Static passwd/group for the uid-10001 runtime user (same uid the old builder-stage adduser
+# produced — kept so existing GCS artifacts stay accessible). busybox is only here because
+# distroless has no shell to generate them.
+FROM busybox:1.36 AS files
+RUN echo "root:x:0:0:root:/root:/sbin/nologin" > /etc/passwd \
+ && echo "nobody:x:65534:65534:nobody:/nonexistent:/sbin/nologin" >> /etc/passwd \
+ && echo "market_int:x:10001:10001::/nonexistent:/sbin/nologin" >> /etc/passwd \
+ && echo "root:x:0:" > /etc/group \
+ && echo "nobody:x:65534:" >> /etc/group \
+ && echo "market_int:x:10001:" >> /etc/group
 
-####################################################################################################
-## Builder
-####################################################################################################
-FROM rust:latest AS builder
+# Pinned by digest (bump deliberately); --platform linux/amd64 on the build selects the amd64 child.
+FROM gcr.io/distroless/cc@sha256:9b615fff20e1a4fad29c2b30562580b212c7dd5e2225236735cca0070ed11c78
 
-ENV USER=market_int
-ENV UID=10001
-
-RUN adduser \
-    --disabled-password \
-    --gecos "" \
-    --home "/nonexistent" \
-    --shell "/sbin/nologin" \
-    --no-create-home \
-    --uid "${UID}" \
-    "${USER}"
+COPY --from=files /etc/passwd /etc/passwd
+COPY --from=files /etc/group /etc/group
 
 WORKDIR /market_int
 
-# 1. Cache dependencies: copy only manifests first (virtual workspace:
-#    root manifest + one per member crate), then dummy sources so cargo can
-#    resolve and compile every dependency into its own cacheable layer.
-COPY Cargo.toml Cargo.lock ./
-COPY crates/core/Cargo.toml crates/core/
-COPY crates/cli/Cargo.toml crates/cli/
-COPY crates/webapp/Cargo.toml crates/webapp/
-
-RUN mkdir -p crates/core/src crates/cli/src crates/webapp/src \
- && echo "" > crates/core/src/lib.rs \
- && echo "fn main() {}" > crates/cli/src/main.rs \
- && echo "fn main() {}" > crates/webapp/src/main.rs \
- && cargo build --release --workspace --features market_int/bundled-sqlite \
- && rm -rf crates
-
-# 2. Now copy the real source — dependency layer is cached unless manifests change
-COPY crates ./crates
-
-# Touch sources so cargo sees newer files than the cached dummy ones
-RUN touch crates/cli/src/main.rs crates/core/src/lib.rs crates/webapp/src/main.rs
-
-# Bring in the built frontend so the webapp's include_str! embeds resolve
-COPY --from=frontend /build/dist crates/webapp/frontend/dist
-
-RUN cargo build --release --workspace --features market_int/bundled-sqlite
-
-RUN strip -s /market_int/target/release/market_int /market_int/target/release/market_int_webapp
-
-####################################################################################################
-## Final image — both binaries, CLI entrypoint unchanged (the Service overrides command:)
-####################################################################################################
-FROM gcr.io/distroless/cc
-
-COPY --from=builder /etc/passwd /etc/passwd
-COPY --from=builder /etc/group /etc/group
-
-WORKDIR /market_int
-
-COPY --from=builder /market_int/target/release/market_int ./
-COPY --from=builder /market_int/target/release/market_int_webapp ./
+COPY target/x86_64-unknown-linux-gnu/release/market_int ./
+COPY target/x86_64-unknown-linux-gnu/release/market_int_webapp ./
 
 USER market_int:market_int
 

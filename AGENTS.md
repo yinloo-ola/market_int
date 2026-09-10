@@ -137,17 +137,27 @@ reads it anymore).
 
 ## Build and Deployment
 
-### Docker (multi-stage: node frontend → rust builder → distroless/cc runtime)
+### Docker (thin runtime: host cross-compile via cargo zigbuild → pinned distroless/cc)
 
 ```bash
-make docker-build tag=x.y.z   # builds linux/amd64, pushes, stamps job.yaml + service.yaml
+make docker-build tag=x.y.z   # frontend + zigbuild on host, assembles/pushes, stamps job.yaml + service.yaml
 ```
 
+- Release flow is host-side (native speed — no amd64-under-Rosetta Docker
+  builds): `make webapp-frontend` builds the vite bundle, then
+  `cargo zigbuild --release --target x86_64-unknown-linux-gnu --workspace
+  --features market_int/bundled-sqlite` cross-compiles both binaries with zig
+  as the linker; the Dockerfile only assembles the image (busybox-generated
+  passwd/group preserving the uid-10001 runtime user + pinned-digest
+  distroless/cc). One-time setup: `brew install zig && cargo install
+  cargo-zigbuild`; releases therefore need host node too.
+- `rust-toolchain.toml` pins the Rust toolchain and the
+  x86_64-unknown-linux-gnu target; bump it deliberately.
 - One image, two binaries: ENTRYPOINT `/market_int/market_int` (the scheduled
   Job is untouched); the webapp Service overrides `command:` to
   `/market_int/market_int_webapp` (`service.yaml`).
-- The frontend is built INSIDE the image (node stage) — no host node needed
-  for releases; local dev does need it (see webapp README).
+- `.dockerignore` re-includes only the two zigbuild outputs from `target/`
+  (the frontend dist is embedded in the webapp binary at compile time).
 
 ### Google Cloud Run
 

@@ -7,11 +7,10 @@
 
 ## Building Docker Image
 
-- docker build --platform linux/amd64 -t us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:x.x.x .
-
-## Pushing Docker Image
-
-- docker push us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:x.x.x
+- `make docker-build tag=x.x.x` — builds the frontend + cross-compiles both
+  binaries on the host (cargo zigbuild, linux/amd64), assembles the thin
+  image, pushes it, and stamps `job.yaml`/`service.yaml`. One-time setup:
+  `brew install zig && cargo install cargo-zigbuild`.
 
 ## Create/Replace Cloud Run Job
 

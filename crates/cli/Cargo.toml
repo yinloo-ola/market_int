@@ -29,3 +29,12 @@ chrono-tz.workspace = true
 rusqlite.workspace = true
 csv.workspace = true
 log.workspace = true
+
+# Cross-compile support for `make docker-build` (macOS → linux/amd64 zigbuild):
+# telegram-bot-api and firebase-auth pull reqwest's default-tls → openssl-sys on
+# Linux, and a cross build has no system OpenSSL to link against. Vendored builds
+# a static OpenSSL for the target; feature unification applies it to the one
+# shared openssl-sys across the whole --workspace build. macOS dev builds never
+# activate this (native-tls uses Security.framework there).
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
