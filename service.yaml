@@ -26,7 +26,7 @@ spec:
       containers:
         - name: webapp
           # bumped by make docker-build
-          image: us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:0.14.5
+          image: us-west1-docker.pkg.dev/opt-intel/docker-repo/market-int:0.15.0
           # Service overrides command; the Job keeps the CLI binary
           command: ["/market_int/market_int_webapp"]
           ports:
