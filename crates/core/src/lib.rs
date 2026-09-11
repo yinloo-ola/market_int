@@ -8,6 +8,8 @@ pub mod http {
 }
 // Data models.
 pub mod model;
+// Currently-holding puts: domain types + pace math (pure, no I/O).
+pub mod holdings;
 pub mod regime;
 // Pull quotes from API.
 pub mod quotes;

@@ -6,6 +6,7 @@
 //! or hardcodes the window.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -49,6 +50,11 @@ pub struct LatestEnvelope {
 #[derive(Clone)]
 pub struct AppState {
     pub result_path: PathBuf,
+    /// Per-user holdings ledgers live under this directory
+    /// (crates/webapp/src/holdings.rs): one `<uid>.json` per identity.
+    pub holdings_dir: PathBuf,
+    /// Tiger mark-to-market seam (holdings refresh): scripted in tests.
+    pub mark_fetcher: crate::holdings::MarkFetcher,
     /// Live single-flight read for `run_state` (ticket 18).
     pub shared: crate::run::SharedState,
     /// Owner-controlled access sources (ticket 22): owners may manage the
@@ -349,7 +355,13 @@ mod tests {
 
     fn test_state(path: PathBuf, clock: fn() -> DateTime<Utc>) -> AppState {
         AppState {
-            result_path: path,
+            result_path: path.clone(),
+            holdings_dir: path.with_file_name("holdings"),
+            mark_fetcher: Arc::new(
+                |_: &[crate::holdings::MarkRequest]| -> Vec<crate::holdings::MarkResult> {
+                    Vec::new()
+                },
+            ),
             shared: crate::run::SharedState::new(),
             access: Default::default(),
             clock,
@@ -495,7 +507,7 @@ mod tests {
         let path = dir.path().join("last_run.json");
         let shared = crate::run::SharedState::new();
         shared.begin().expect("acquire");
-        let app = build_router(AppState { result_path: path, shared, access: Default::default(), clock: crate::run::real_now });
+        let app = build_router(AppState { result_path: path, holdings_dir: PathBuf::from("holdings"), mark_fetcher: Arc::new(|_: &[crate::holdings::MarkRequest]| Vec::new()), shared, access: Default::default(), clock: crate::run::real_now });
 
         let response = app
             .oneshot(axum::http::Request::builder().uri("/api/latest").body(Body::empty()).unwrap())

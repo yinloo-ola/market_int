@@ -364,6 +364,12 @@ mod tests {
                 .route("/api/me", get(api::me))
                 .with_state(crate::api::AppState {
                     result_path: std::path::PathBuf::from("/tmp/none.json"),
+                    holdings_dir: std::path::PathBuf::from("/tmp/holdings"),
+                    mark_fetcher: std::sync::Arc::new(
+                        |_: &[crate::holdings::MarkRequest]| {
+                            Vec::<crate::holdings::MarkResult>::new()
+                        },
+                    ),
                     shared: crate::run::SharedState::new(),
                     access: AccessConfig::default(),
                     clock: crate::run::real_now,

@@ -51,6 +51,13 @@ pub fn app_router(
 ) -> Router {
     let shared = run::SharedState::new();
 
+    // Holdings ledgers live beside the result document: /data/webapp/holdings
+    // in production (both under the durable GCS FUSE mount).
+    let holdings_dir = result_path
+        .parent()
+        .map(|p| p.join("holdings"))
+        .unwrap_or_else(|| PathBuf::from("holdings"));
+
     let run_router: Router<()> = Router::new()
         .route("/api/progress", get(run::progress))
         .route("/api/run", post(run::run))
@@ -58,6 +65,8 @@ pub fn app_router(
 
     let api = api::build_router(api::AppState {
         result_path: result_path.clone(),
+        holdings_dir,
+        mark_fetcher: crate::holdings::live_fetcher(),
         shared,
         access: access.clone(),
         clock: run::real_now,

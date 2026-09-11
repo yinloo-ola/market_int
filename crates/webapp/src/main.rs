@@ -7,6 +7,7 @@
 mod api;
 mod assets;
 mod auth;
+mod holdings;
 mod market;
 mod result;
 mod router;
