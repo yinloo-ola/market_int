@@ -29,6 +29,10 @@ import RescoreControls, {
   createScoringStore,
 } from "./components/RescoreControls";
 import ResultsPane from "./components/ResultsPane";
+// PROTOTYPE (throwaway): holdings UI variants, see the file header. The tab
+// and its content render ONLY under import.meta.env.DEV — a production
+// build compiles the flag to false and never mounts it.
+import HoldingsPrototype from "./components/HoldingsPrototype";
 import {
   RunButton,
   RunStrip,
@@ -189,6 +193,10 @@ function TabsRow(props) {
   const TAB_DEFS = [
     { id: "short", label: "Short · 5-day" },
     { id: "medium", label: "Medium · 20-day" },
+    // PROTOTYPE (throwaway): dev-only holdings tab, no timeframe count.
+    ...(import.meta.env.DEV
+      ? [{ id: "proto-holdings", label: "Holdings · proto ⚒", proto: true }]
+      : []),
   ];
   return (
     <nav class="tabs" role="tablist" aria-label="timeframes">
@@ -200,7 +208,8 @@ function TabsRow(props) {
           classList={{ tab: true, active: props.tab() === d.id }}
           onClick={() => props.onTab(d.id)}
         >
-          {d.label} ({comma(rowCountOf(props.result, d.id))})
+          {d.label}
+          {!d.proto && ` (${comma(rowCountOf(props.result, d.id))})`}
         </button>
       ))}
     </nav>
@@ -285,6 +294,9 @@ function App() {
 
   const columns = createColumnStore();
   const [tab, setTab] = createSignal("short");
+  // PROTOTYPE (throwaway): dev-only holdings tab swaps the whole content
+  // area — hero, rescore controls and result panes included.
+  const protoTab = () => import.meta.env.DEV && tab() === "proto-holdings";
   // Client-side weight adjustment (ticket 01): ONE weight set for both
   // timeframes, owned here, consumed by the panes + the drawer.
   const scoring = createScoringStore();
@@ -395,6 +407,15 @@ function App() {
         <RunStrip run={run} />
         {/* ── end RUN_SLOT part 2 ── */}
 
+        {/* PROTOTYPE (throwaway): dev-only holdings tab. The timeframe tab
+            strip renders here too (Holdings active) so the strip never
+            vanishes while the prototype is on screen. */}
+        <Show when={protoTab()}>
+          <TabsRow result={() => latest()?.result} tab={tab} onTab={setTab} />
+          <HoldingsPrototype />
+        </Show>
+
+        <Show when={!protoTab()}>
         {/* S1: no-run-yet hero */}
         <Show
           when={!latest.loading && latest()?.result}
@@ -448,6 +469,7 @@ function App() {
               </>
             );
           }}
+        </Show>
         </Show>
       </div>
       </Show>
