@@ -4,8 +4,8 @@ Design: docs/plans/2026-09-11-holdings/holdings-design.md
 Branch: 2026-09-11-holdings
 Setup: done
 Started: 2026-09-11T17:08:21Z
-Last updated: 2026-09-11T17:20:00Z
-Feature phase: implementing (1/5)
+Last updated: 2026-09-11T17:54:02Z
+Feature phase: ship-paused
 
 ## Requirements
 | # | Done | Requirement | Per-req ceremony | Commit |
@@ -27,16 +27,42 @@ Feature phase: implementing (1/5)
 
 ## Code digest
 
-<!-- Written once, after the feature review passes; never back-filled per requirement. -->
-
 ### Summary
+The webapp now tracks the puts you actually sold: a per-user "Holdings" tab
+where each open position renders as a decision card — sold-at vs current
+Tiger mid vs close-captures dollars — against a per-working-day pace target
+with a 1-day floor, flagging "buy back?" when decay is ahead of schedule.
+The ledger is one schema-versioned JSON file per verified Firebase UID on
+the durable GCS mount; the server computes every decision number and the
+panel renders views verbatim.
+
 ### Flow
 Spine
-  <entry point> -> [R1] <step> -> [R2] <step> -> <outcome>
+  POST /api/holdings -> [R3] validate (core + future-sold + whole contracts + 100-cap) -> [R2] atomic ledger write -> 201 position
+  GET /api/holdings -> [R2] read_ledger (retry-once) -> [R1] Holding::view(today_et) -> positions + views
+  POST /api/holdings/refresh -> [R4] MarkFetcher on spawn_blocking (Requester -> kline/symbol -> degenerate put-chain query) -> re-read + merge marks by id -> [R2] write -> ok/stale per position
+  DELETE /api/holdings/{id} -> [R3] retain -> 404 or write
+  HoldingsPanel -> [R5] cards render server views -> outcome dialog -> DELETE -> refetch
 Branches
-  <condition> -> <outcome>   [R2]
-  <changed behavior>   was: <previous behavior>
+  invalid payload / future sold / fractional contracts / overfull ledger / overlong span -> 400, no write   [R3]
+  unknown id -> 404, no write   [R3]
+  fetch failure / no chain data / mid <= 0 -> stale, previous mark kept, HTTP 200   [R4]
+  corrupt ledger file -> retry once -> empty + warning   [R2]
+  no mark -> pace_met false, em-dash cells   [R1]
+  armed gate + no token -> 401; auth disarmed -> shared "local" ledger   [R3]
 Side effects
-  reads: <what>   writes: <what>
+  reads/writes: /data/webapp/holdings/<uid>.json (GCS FUSE in prod)
+  network: Tiger daily-kline + put-chain queries per refresh
 ### Gotchas
+- Residual race: two simultaneous fast mutations (add vs delete) for one uid
+  are last-writer-wins — refresh (the long case) re-reads and merges, so it
+  can no longer clobber; reviewer-flagged, accepted for a single-user tool.
+- Working days ignore market holidays (documented, same as market.rs).
+- pace_per_day_* is computed and stored in the API view but not rendered on
+  the card (user decision — kept for future views).
 ### Key files
+- `crates/core/src/holdings.rs` — the whole decision math (1-day-floor target, working days, validation) as pure functions.
+- `crates/webapp/src/holdings.rs` — ledger document store + the four routes + Tiger fetcher seam; the feature's center of gravity.
+- `crates/webapp/src/api.rs` — route registration inside the auth gate; AppState gained holdings_dir + mark_fetcher seams.
+- `crates/webapp/frontend/src/components/HoldingsPanel.jsx` — variant-B cards distilled from the approved prototype; server views verbatim.
+- `crates/webapp/frontend/src/smoke-entry.jsx` — 18 holdings assertions (43 total) incl. the reference-example card values.
