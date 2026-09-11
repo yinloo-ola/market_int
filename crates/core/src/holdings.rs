@@ -9,6 +9,10 @@
 
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 
+/// Longest allowed sold→expiry span (LEAPS ~2y). A validate() bound, and a
+/// CPU bound: view() walks the whole span per request.
+pub const MAX_HOLDING_SPAN_DAYS: i64 = 730;
+
 /// One open short-put position. `premium` is per share (contract = 100
 /// shares); `contracts` is the multiplier count. serde: the webapp ledger
 /// document round-trips these directly (chrono "serde" feature → RFC3339
@@ -54,11 +58,12 @@ pub struct HoldingView {
 /// Working days strictly after `from`, up to and including `to` (date-only,
 /// weekdays only — holidays not modeled, same as market.rs). Inclusive `to`
 /// is what makes expiry day count: sold Fri → expiry next Fri = 5.
+/// Overflow-safe: a corrupt near-max date clamps instead of panicking.
 pub fn working_days_after(from: NaiveDate, to: NaiveDate) -> u32 {
     let mut n = 0;
     let mut d = from;
-    while d < to {
-        d = d.succ_opt().unwrap_or_else(|| panic!("date overflow past {d}"));
+    while let Some(next) = d.succ_opt() {
+        d = next;
         if d > to {
             break;
         }
@@ -89,6 +94,13 @@ impl Holding {
         }
         if self.expiry <= self.sold {
             return Err("expiry must be after the sell date".to_string());
+        }
+        // Span bound: no real put lives past ~2 years (LEAPS). Also a CPU
+        // guard — every view() walks the sold→expiry span per request.
+        if (self.expiry - self.sold).num_days() > MAX_HOLDING_SPAN_DAYS {
+            return Err(format!(
+                "expiry is more than {MAX_HOLDING_SPAN_DAYS} days out"
+            ));
         }
         Ok(())
     }
@@ -274,8 +286,25 @@ mod tests {
 
         h.expiry = h.sold;
         assert!(h.validate().is_err(), "expiry must be after sell date");
+        h.expiry = NaiveDate::from_ymd_opt(2026, 9, 11).unwrap();
 
         h.symbol = "  ".to_string();
         assert!(h.validate().is_err());
+    }
+
+    /// Span bound: LEAPS-length puts are rejected (also the CPU guard for
+    /// view()'s per-request span walk).
+    #[test]
+    fn validation_rejects_overlong_span() {
+        let mut h = holding(
+            NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+            None,
+        );
+        h.validate().unwrap();
+        h.expiry = NaiveDate::from_ymd_opt(2028, 9, 4).unwrap();
+        assert!(h.validate().is_err(), "span > 730 days rejected");
+        h.expiry = NaiveDate::from_ymd_opt(2028, 8, 30).unwrap();
+        h.validate().unwrap();
     }
 }

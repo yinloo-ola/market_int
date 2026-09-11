@@ -362,6 +362,12 @@ mod tests {
             Router::new()
                 .route("/api/ping", get(|| async { "ok" }))
                 .route("/api/me", get(api::me))
+                // Holdings rides the same gate (2026-09-11-holdings R3): the
+                // ledger is per-user, so the armed gate must cover it too.
+                .route(
+                    "/api/holdings",
+                    get(crate::holdings::holdings_list).post(crate::holdings::holdings_add),
+                )
                 .with_state(crate::api::AppState {
                     result_path: std::path::PathBuf::from("/tmp/none.json"),
                     holdings_dir: std::path::PathBuf::from("/tmp/holdings"),
@@ -419,6 +425,11 @@ mod tests {
         let bytes =
             axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         assert_eq!(std::str::from_utf8(&bytes).unwrap(), r#"{"error":"unauthorized"}"#);
+
+        // The holdings ledger is per-user — the gate covers it identically.
+        let app = probe_router(guard_of(RejectAll));
+        let resp = send(app, "/api/holdings", None).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// Garbage bearer shapes (offline-craftable, zero network) → 401 even with

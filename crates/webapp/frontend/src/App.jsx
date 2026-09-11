@@ -185,7 +185,7 @@ function CacheLine(props) {
   );
 }
 
-function TabsRow(props) {
+export function TabsRow(props) {
   // props.result(), props.tab(), props.onTab(id)
   const TAB_DEFS = [
     { id: "short", label: "Short · 5-day" },

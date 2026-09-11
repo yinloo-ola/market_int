@@ -202,29 +202,62 @@ pub fn ledger_path(dir: &std::path::Path, uid: &str) -> std::io::Result<PathBuf>
 }
 
 /// Load the caller's ledger. Missing file ⇒ empty (first visit); corrupt
-/// file ⇒ empty with a warning — never a 500, the user can start over.
+/// file ⇒ ONE retry after a short settle (the `read_document` §4.3 pattern —
+/// a transiently-truncated read must not look like an empty ledger, or the
+/// next write would clobber real data), then empty with a warning — never a
+/// 500, the user can start over. A parsed document with a foreign
+/// schema_version is warned about, not silently mis-handled.
 pub fn read_ledger(dir: &std::path::Path, uid: &str) -> std::io::Result<HoldingsDocument> {
     let path = ledger_path(dir, uid)?;
-    match std::fs::read(&path) {
-        Ok(bytes) => match serde_json::from_slice::<HoldingsDocument>(&bytes) {
-            Ok(doc) => Ok(doc),
-            Err(err) => {
-                log::warn!("holdings: corrupt ledger {}: {err} — treating as empty", path.display());
-                Ok(HoldingsDocument::default())
+    for attempt in 0..2 {
+        match std::fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice::<HoldingsDocument>(&bytes) {
+                Ok(doc) => {
+                    if doc.schema_version != LEDGER_SCHEMA_VERSION {
+                        log::warn!(
+                            "holdings: ledger {} has schema version {} (want {}) — \
+                             handling as-is",
+                            path.display(),
+                            doc.schema_version,
+                            LEDGER_SCHEMA_VERSION
+                        );
+                    }
+                    return Ok(doc);
+                }
+                Err(err) if attempt == 0 => {
+                    log::warn!("holdings: ledger {} did not parse ({err}) — retrying once", path.display());
+                }
+                Err(err) => {
+                    log::warn!(
+                        "holdings: corrupt ledger {}: {err} — treating as empty",
+                        path.display()
+                    );
+                    return Ok(HoldingsDocument::default());
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(HoldingsDocument::default())
             }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HoldingsDocument::default()),
-        Err(e) => Err(e),
+            Err(e) if attempt == 0 => {}
+            Err(e) => return Err(e),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    Ok(HoldingsDocument::default())
 }
 
 /// Atomic write (result.rs `write_document` pattern): temp file in the same
-/// directory → fsync → rename over the target → best-effort dir fsync.
+/// directory → fsync → rename over the target → best-effort dir fsync. The
+/// temp name carries a per-process sequence — unlike the result doc's
+/// single-writer world, two holdings mutations for the same uid can overlap.
 pub fn write_ledger(
     dir: &std::path::Path,
     uid: &str,
     doc: &HoldingsDocument,
 ) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
+
     let path = ledger_path(dir, uid)?;
     std::fs::create_dir_all(dir)?;
 
@@ -232,9 +265,10 @@ pub fn write_ledger(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     let tmp_path = dir.join(format!(
-        ".{}.tmp.{}",
+        ".{}.tmp.{}.{}",
         path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-        std::process::id()
+        std::process::id(),
+        NEXT_TMP.fetch_add(1, Ordering::Relaxed)
     ));
     {
         use std::io::Write;
@@ -263,6 +297,8 @@ use chrono::{DateTime, Utc};
 use market_int_core::holdings::Holding;
 use serde_json::json;
 
+pub(crate) use crate::api::error_response;
+
 /// The caller's ledger key: verified uid, or "local" when auth is disabled
 /// (single open ledger — the caller_is_owner precedent).
 fn uid_of(req: &Request) -> String {
@@ -279,8 +315,26 @@ fn today_et(clock: fn() -> DateTime<Utc>) -> chrono::NaiveDate {
         .date_naive()
 }
 
-fn error_response(status: StatusCode, message: &str) -> Response {
-    (status, Json(json!({ "error": message }))).into_response()
+// Ledger IO parks on the blocking pool — std::fs on the GCS FUSE mount can
+// take hundreds of ms, and the async workers must not stall on it
+// (read_document_off_thread precedent).
+async fn read_ledger_off_thread(
+    dir: PathBuf,
+    uid: String,
+) -> std::io::Result<HoldingsDocument> {
+    tokio::task::spawn_blocking(move || read_ledger(&dir, &uid))
+        .await
+        .expect("spawn_blocking read_ledger")
+}
+
+async fn write_ledger_off_thread(
+    dir: PathBuf,
+    uid: String,
+    doc: HoldingsDocument,
+) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || write_ledger(&dir, &uid, &doc))
+        .await
+        .expect("spawn_blocking write_ledger")
 }
 
 fn position_json(h: &Holding, today: chrono::NaiveDate) -> serde_json::Value {
@@ -327,7 +381,7 @@ fn parse_date(raw: &str, field: &str) -> Result<chrono::NaiveDate, Response> {
 /// stored marks only (never touches the network).
 pub(crate) async fn holdings_list(State(st): State<crate::api::AppState>, req: Request) -> Response {
     let uid = uid_of(&req);
-    let doc = match read_ledger(&st.holdings_dir, &uid) {
+    let doc = match read_ledger_off_thread(st.holdings_dir.clone(), uid).await {
         Ok(doc) => doc,
         Err(err) => {
             return error_response(
@@ -338,6 +392,11 @@ pub(crate) async fn holdings_list(State(st): State<crate::api::AppState>, req: R
     };
     Json(ledger_json(&doc, today_et(st.clock))).into_response()
 }
+
+/// Longest ledger: every mutation rewrites the document and refresh fans out
+/// one chain query per position — a bound keeps both honest. A real book has
+/// handfuls of open puts.
+const MAX_POSITIONS_PER_LEDGER: usize = 100;
 
 /// `POST /api/holdings` — add a position to the caller's ledger.
 pub(crate) async fn holdings_add(State(st): State<crate::api::AppState>, req: Request) -> Response {
@@ -377,18 +436,20 @@ pub(crate) async fn holdings_add(State(st): State<crate::api::AppState>, req: Re
         Ok(d) => d,
         Err(resp) => return resp,
     };
+    if (contracts - contracts.trunc()).abs() > f64::EPSILON {
+        return error_response(StatusCode::BAD_REQUEST, "contracts must be a whole number");
+    }
     let Some(contracts) = u32::try_from(contracts as i64).ok().filter(|c| *c > 0) else {
         return error_response(StatusCode::BAD_REQUEST, "contracts must be a positive integer");
     };
+    if sold > today_et(st.clock) {
+        return error_response(StatusCode::BAD_REQUEST, "sell date is in the future");
+    }
 
     let holding = Holding {
-        // Server-generated id: one per process, monotonic enough for a
-        // single-writer ledger (maxScale 1).
-        id: format!(
-            "h{}-{}",
-            (st.clock)().timestamp_millis(),
-            uuid_like_counter()
-        ),
+        // Server-generated id: process sequence on top of the clock stamp
+        // (NEXT_SEQ precedent).
+        id: format!("h{}-{}", (st.clock)().timestamp_millis(), next_position_seq()),
         symbol,
         strike,
         expiry,
@@ -401,7 +462,7 @@ pub(crate) async fn holdings_add(State(st): State<crate::api::AppState>, req: Re
         return error_response(StatusCode::BAD_REQUEST, &reason);
     }
 
-    let mut doc = match read_ledger(&st.holdings_dir, &uid) {
+    let mut doc = match read_ledger_off_thread(st.holdings_dir.clone(), uid.clone()).await {
         Ok(d) => d,
         Err(err) => {
             return error_response(
@@ -410,18 +471,30 @@ pub(crate) async fn holdings_add(State(st): State<crate::api::AppState>, req: Re
             )
         }
     };
+    if doc.positions.len() >= MAX_POSITIONS_PER_LEDGER {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("ledger holds the maximum of {MAX_POSITIONS_PER_LEDGER} positions — close one first"),
+        );
+    }
     doc.positions.push(holding.clone());
-    if let Err(err) = write_ledger(&st.holdings_dir, &uid, &doc) {
+    if let Err(err) =
+        write_ledger_off_thread(st.holdings_dir.clone(), uid, doc).await
+    {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("ledger write failed: {err}"),
         );
     }
-    Json(json!({ "position": position_json(&holding, today_et(st.clock)) })).into_response()
+    (
+        StatusCode::CREATED,
+        Json(json!({ "position": position_json(&holding, today_et(st.clock)) })),
+    )
+        .into_response()
 }
 
 /// Per-process sequence for server-generated ids (NEXT_SEQ precedent).
-fn uuid_like_counter() -> u64 {
+fn next_position_seq() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     NEXT.fetch_add(1, Ordering::Relaxed)
@@ -434,7 +507,7 @@ pub(crate) async fn holdings_delete(
     req: Request,
 ) -> Response {
     let uid = uid_of(&req);
-    let mut doc = match read_ledger(&st.holdings_dir, &uid) {
+    let mut doc = match read_ledger_off_thread(st.holdings_dir.clone(), uid.clone()).await {
         Ok(d) => d,
         Err(err) => {
             return error_response(
@@ -448,7 +521,7 @@ pub(crate) async fn holdings_delete(
     if doc.positions.len() == before {
         return error_response(StatusCode::NOT_FOUND, "no such position");
     }
-    if let Err(err) = write_ledger(&st.holdings_dir, &uid, &doc) {
+    if let Err(err) = write_ledger_off_thread(st.holdings_dir.clone(), uid, doc).await {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("ledger write failed: {err}"),
@@ -459,13 +532,16 @@ pub(crate) async fn holdings_delete(
 
 /// `POST /api/holdings/refresh` — mark every open position to market.
 /// One position's fetch failure never fails the request: it keeps its
-/// previous mark and is reported stale.
+/// previous mark and is reported stale. The ledger is RE-READ after the
+/// fetch and marks merged by id — a position added while Tiger was being
+/// queried keeps its (mark-less) state instead of being clobbered by the
+/// pre-fetch snapshot.
 pub(crate) async fn holdings_refresh(
     State(st): State<crate::api::AppState>,
     req: Request,
 ) -> Response {
     let uid = uid_of(&req);
-    let mut doc = match read_ledger(&st.holdings_dir, &uid) {
+    let doc = match read_ledger_off_thread(st.holdings_dir.clone(), uid.clone()).await {
         Ok(d) => d,
         Err(err) => {
             return error_response(
@@ -496,9 +572,21 @@ pub(crate) async fn holdings_refresh(
     let now = (st.clock)();
     let mut ok: Vec<String> = Vec::new();
     let mut stale: Vec<(String, String)> = Vec::new();
+    let mut doc = match read_ledger_off_thread(st.holdings_dir.clone(), uid.clone()).await {
+        Ok(d) => d,
+        Err(err) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("ledger read failed: {err}"),
+            )
+        }
+    };
     for result in results {
         let Some(position) = doc.positions.iter_mut().find(|p| p.id == result.id) else {
-            continue; // ledger changed between read and fetch — drop it
+            // Added/removed while the fetch was in flight — its request was
+            // for a snapshot position; nothing to apply.
+            log::warn!("holdings: refresh result for unknown id {} dropped", result.id);
+            continue;
         };
         match result.mid {
             Ok(Some(mid)) if mid > 0.0 => {
@@ -520,7 +608,7 @@ pub(crate) async fn holdings_refresh(
         }
     }
 
-    if let Err(err) = write_ledger(&st.holdings_dir, &uid, &doc) {
+    if let Err(err) = write_ledger_off_thread(st.holdings_dir.clone(), uid, doc.clone()).await {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("ledger write failed: {err}"),
@@ -762,7 +850,7 @@ mod tests {
             })),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "add fails: {v}");
+        assert_eq!(status, StatusCode::CREATED, "add fails: {v}");
         let id = v["position"]["id"].as_str().expect("server-generated id").to_string();
         assert_eq!(v["position"]["symbol"], "GOOG");
         assert!(v["position"]["mark"].is_null(), "no mark until refresh");
@@ -828,7 +916,7 @@ mod tests {
         });
         let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
         let (status, _) = call(app, "POST", "/api/holdings", Some(payload)).await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::CREATED);
 
         // uid "test-uid" sees the position…
         let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
@@ -872,6 +960,105 @@ mod tests {
         let (status, v) = call(app, "DELETE", "/api/holdings/h-nope", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(v["error"].as_str().is_some());
+    }
+
+    /// R3: a sell date in the future is rejected (400), no write.
+    #[tokio::test]
+    async fn add_rejects_future_sell_date() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "symbol": "GOOG", "strike": 350.0, "premium": 1.0,
+                "contracts": 1, "sold": "2026-09-09", "expiry": "2026-09-16"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            !dir.path().join("holdings/test-uid.json").exists(),
+            "future-dated add must not create the ledger"
+        );
+    }
+
+    /// R3: fractional contracts truncate silently no more — 400.
+    #[tokio::test]
+    async fn add_rejects_fractional_contracts() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "symbol": "GOOG", "strike": 350.0, "premium": 1.0,
+                "contracts": 2.5, "sold": "2026-09-04", "expiry": "2026-09-11"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(v["error"].as_str().unwrap().contains("whole number"));
+    }
+
+    /// Ledger bound: the 101st position is a 400 (every mutation rewrites
+    /// the document and refresh fans out per position — the bound keeps
+    /// both honest).
+    #[tokio::test]
+    async fn add_rejects_overfull_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = HoldingsDocument::default();
+        for i in 0..100 {
+            doc.positions.push(market_int_core::holdings::Holding {
+                id: format!("p{i}"),
+                symbol: "GOOG".to_string(),
+                strike: 350.0,
+                expiry: NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+                premium: 1.0,
+                contracts: 1,
+                sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                mark: None,
+            });
+        }
+        write_ledger(&dir.path().join("holdings"), "test-uid", &doc).unwrap();
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "symbol": "GOOG", "strike": 350.0, "premium": 1.0,
+                "contracts": 1, "sold": "2026-09-04", "expiry": "2026-09-11"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(v["error"].as_str().unwrap().contains("maximum"));
+    }
+
+    /// Auth disabled (no VerifiedIdentity extension): the caller folds to
+    /// the shared "local" ledger — local dev parity, not a path the armed
+    /// gate can ever reach.
+    #[tokio::test]
+    async fn auth_disabled_folds_to_local_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let request = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/holdings")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["positions"].as_array().unwrap().len(), 0);
+        // No per-uid file was created by a plain read.
+        assert!(!dir.path().join("holdings/test-uid.json").exists());
+        assert!(!dir.path().join("holdings/local.json").exists());
     }
 
     /// Seed two positions directly into the ledger document.

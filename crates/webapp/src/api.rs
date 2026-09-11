@@ -203,7 +203,7 @@ fn grants_response(st: &AppState) -> Response {
     .into_response()
 }
 
-fn error_response(status: StatusCode, message: &str) -> Response {
+pub(crate) fn error_response(status: StatusCode, message: &str) -> Response {
     (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 

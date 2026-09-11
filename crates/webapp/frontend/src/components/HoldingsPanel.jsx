@@ -44,6 +44,7 @@ function AddForm(props) {
   const set = (k) => (e) => setF({ ...f(), [k]: e.target.value });
   const submit = async (e) => {
     e.preventDefault();
+    if (props.busy?.()) return;
     if (!f().symbol) return;
     if (![f().strike, f().premium, f().contracts].every((x) => Number(x) > 0)) {
       return;
@@ -63,7 +64,7 @@ function AddForm(props) {
     <Show
       when={open()}
       fallback={
-        <button type="button" class="btn" onClick={() => setOpen(true)}>
+        <button type="button" class="btn" disabled={props.busy?.()} onClick={() => setOpen(true)}>
           + New position
         </button>
       }
@@ -91,7 +92,7 @@ function AddForm(props) {
         <label>
           expiry <input type="date" value={f().expiry} onInput={set("expiry")} />
         </label>
-        <button type="submit" class="btn btn-primary">Add</button>
+        <button type="submit" class="btn btn-primary" disabled={props.busy?.()}>Add</button>
         <button type="button" class="btn" onClick={() => setOpen(false)}>Cancel</button>
       </form>
     </Show>
@@ -148,6 +149,7 @@ function OutcomeDialog(props) {
         <button
           type="button"
           class="btn btn-primary"
+          disabled={props.busy?.()}
           onClick={() => props.onConfirm(outcome(), outcome() === "expired" ? null : Number(price()))}
         >
           Confirm
@@ -161,6 +163,9 @@ export default function HoldingsPanel() {
   const [ledger, { refetch }] = createResource(getHoldings);
   const [notice, setNotice] = createSignal("");
   const [closing, setClosing] = createSignal(null);
+  // In-flight guard: a double-clicked Add/Refresh/Confirm must not double-
+  // submit (review finding — the prototype ignored it).
+  const [busy, setBusy] = createSignal(false);
 
   const flash = (msg) => {
     setNotice(msg);
@@ -177,6 +182,8 @@ export default function HoldingsPanel() {
       });
 
   const onRefresh = async () => {
+    if (busy()) return;
+    setBusy(true);
     try {
       const res = await refreshHoldings();
       const stale = res.refresh?.stale ?? [];
@@ -187,21 +194,29 @@ export default function HoldingsPanel() {
       );
     } catch (err) {
       flash(`Refresh failed: ${err.message}`);
+    } finally {
+      setBusy(false);
     }
     await refetch();
   };
 
   const onAdd = async (fields) => {
+    if (busy()) return;
+    setBusy(true);
     try {
       const res = await addHolding(fields);
       flash(`Added ${res.position.symbol} ${res.position.strike} — press Refresh marks to price it.`);
     } catch (err) {
       flash(`Add failed: ${err.message}`);
+    } finally {
+      setBusy(false);
     }
     await refetch();
   };
 
   const onClose = async (id, outcome, closePrice) => {
+    if (busy()) return;
+    setBusy(true);
     try {
       await deleteHolding(id);
       flash(
@@ -211,6 +226,8 @@ export default function HoldingsPanel() {
       );
     } catch (err) {
       flash(`Close failed: ${err.message}`);
+    } finally {
+      setBusy(false);
     }
     setClosing(null);
     await refetch();
@@ -219,8 +236,8 @@ export default function HoldingsPanel() {
   return (
     <div class="holdings-panel">
       <div class="holdings-toolbar">
-        <AddForm onAdd={onAdd} />
-        <button type="button" class="btn holdings-refresh" onClick={onRefresh}>
+        <AddForm onAdd={onAdd} busy={busy} />
+        <button type="button" class="btn holdings-refresh" disabled={busy()} onClick={onRefresh}>
           ⟳<span class="holdings-refresh-label"> Refresh marks</span>
         </button>
       </div>
@@ -246,7 +263,7 @@ export default function HoldingsPanel() {
                 </div>
                 <div class="holdings-card-big">
                   <span class={v.pl_pct >= 0 ? "holdings-pos" : "holdings-neg"}>
-                    {v.pl_pct == null ? "—" : pct(v.pl_pct, 1)}
+                    {v.pl_pct == null ? "—" : `${v.pl_pct >= 0 ? "+" : ""}${pct(v.pl_pct, 1)}`}
                   </span>
                   <span class="holdings-card-target">target {pct(v.target_pct)}</span>
                 </div>
@@ -295,6 +312,7 @@ export default function HoldingsPanel() {
       <Show when={closing()}>
         <OutcomeDialog
           position={closing()}
+          busy={busy}
           onClose={() => setClosing(null)}
           onConfirm={(outcome, price) => onClose(closing().id, outcome, price)}
         />

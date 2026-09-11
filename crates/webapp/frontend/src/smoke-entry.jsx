@@ -320,6 +320,51 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
     "outcome confirm DELETEs the position",
     calls.some(([p, m]) => m === "DELETE" && p === "/api/holdings/h1")
   );
+
+  // Reference-example values, verbatim from the design doc scenario.
+  const googCard = qa(".holdings-card").find((c) => c.textContent.includes("GOOG"));
+  ok("reference card shows +50.0%", !!googCard && googCard.textContent.includes("+50.0%"));
+  ok("reference card shows target 40%", !!googCard && googCard.textContent.includes("target 40%"));
+  ok("reference card shows 2/5 working days", !!googCard && googCard.textContent.includes("2/5 wd"));
+  ok("reference card shows NOW mid 0.50", !!googCard && googCard.textContent.includes("0.50"));
+  ok("reference card shows CLOSE CAPTURES $50.00", !!googCard && googCard.textContent.includes("$50.00"));
+
+  // Empty submit is blocked (no numbers ⇒ no POST, form stays open).
+  const postsBefore = calls.filter(([p, m]) => p === "/api/holdings" && m === "POST").length;
+  qa(".holdings-toolbar button").find((b) => b.textContent.includes("New position"))?.click();
+  await tick();
+  qa(".holdings-add button").find((b) => b.textContent === "Add")?.click();
+  await tick();
+  const postsAfter = calls.filter(([p, m]) => p === "/api/holdings" && m === "POST").length;
+  ok("empty numeric fields block submit", postsAfter === postsBefore && !!q(".holdings-add"));
+
+  // Refresh marks: POST goes out, the notice confirms, the ledger refetches.
+  qa(".holdings-toolbar button").find((b) => b.textContent.includes("Refresh marks"))?.click();
+  await tick();
+  ok(
+    "refresh POSTs and the notice confirms",
+    calls.some(([p, m]) => p === "/api/holdings/refresh" && m === "POST") &&
+      (q(".holdings-notice")?.textContent ?? "").includes("Marks refreshed")
+  );
+}
+
+// Tab-strip persistence: the Holdings tab lives in the same strip as the
+// timeframes and navigating both ways keeps the strip mounted (R5 criterion).
+{
+  const { TabsRow } = await import("./App");
+  const { createSignal } = await import("solid-js");
+  const [tab, setTab] = createSignal("short");
+  const div = document.createElement("div");
+  div.id = "tabs-root";
+  document.body.appendChild(div);
+  render(() => <TabsRow result={() => undefined} tab={tab} onTab={setTab} />, div);
+  await tick();
+  qa("#tabs-root .tab").find((b) => b.textContent.includes("Holdings"))?.click();
+  await tick();
+  const holdingsSelected = tab() === "holdings";
+  qa("#tabs-root .tab").find((b) => b.textContent.startsWith("Short"))?.click();
+  await tick();
+  ok("tab strip routes to holdings and back", holdingsSelected && tab() === "short");
 }
 
 console.log(JSON.stringify({ total: checks.length }));
