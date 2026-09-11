@@ -209,6 +209,119 @@ scoring.reset();
 await tick();
 ok("reset restores production view", qa("#root " + rowsSel).length === 1);
 
+// ── holdings panel (2026-09-11-holdings, variant B) ──
+// Mount against a mocked /api/holdings (server owns the pace math — the
+// panel renders the view verbatim), then drive add + outcome flows through
+// captured fetch calls.
+{
+  const HP = (await import("./components/HoldingsPanel")).default;
+  const POSITION = {
+    id: "h1",
+    symbol: "GOOG",
+    strike: 350,
+    expiry: "2026-09-11",
+    premium: 1.0,
+    contracts: 1,
+    sold: "2026-09-04",
+    mark: { mid: 0.5, as_of: "2026-09-08T19:00:00Z" },
+    view: {
+      pl_dollars: 50.0,
+      pl_pct: 0.5,
+      pace_per_day_dollars: 25.0,
+      pace_per_day_pct: 0.25,
+      days_elapsed: 2,
+      days_total: 5,
+      target_pct: 0.4,
+      pace_met: true,
+    },
+  };
+  const calls = [];
+  const jsonRes = (v) =>
+    new Response(JSON.stringify(v), { status: 200, headers: { "Content-Type": "application/json" } });
+  globalThis.fetch = async (path, opts = {}) => {
+    const method = opts.method ?? "GET";
+    calls.push([String(path), method, opts.body ? JSON.parse(opts.body) : null]);
+    if (path === "/api/holdings" && method === "GET") {
+      // After the add POST, the new position shows up too (refetch).
+      const didAdd = calls.some(([, m]) => m === "POST");
+      return jsonRes({
+        schema_version: 1,
+        positions: didAdd ? [POSITION, POSITION_VIEWLESS] : [POSITION],
+      });
+    }
+    if (path === "/api/holdings" && method === "POST") return jsonRes({ position: POSITION_VIEWLESS });
+    if (path === "/api/holdings/refresh") return jsonRes({ schema_version: 1, positions: [POSITION], refresh: { ok: ["h1"], stale: [] } });
+    if (String(path).startsWith("/api/holdings/")) return jsonRes({ removed: String(path).split("/").pop() });
+    return new Response("not found", { status: 404 });
+  };
+  const POSITION_VIEWLESS = {
+    ...POSITION,
+    id: "h2",
+    symbol: "AMD",
+    strike: 417.5,
+    premium: 3.75,
+    mark: null,
+    view: {
+      pl_dollars: null,
+      pl_pct: null,
+      pace_per_day_dollars: null,
+      pace_per_day_pct: null,
+      days_elapsed: 2,
+      days_total: 5,
+      target_pct: 0.4,
+      pace_met: false,
+    },
+  };
+
+  const div = document.createElement("div");
+  div.id = "holdings-root";
+  document.body.appendChild(div);
+  render(() => <HP />, div);
+  await tick();
+
+  ok("holdings card renders title with contract count", (q("#holdings-root")?.textContent ?? "").includes("GOOG 350P ×1"));
+  ok("holdings card shows the premium anchor", (q("#holdings-root")?.textContent ?? "").includes("$1.00"));
+  ok("pace bar tick sits at the server target", (q(".holdings-bar-mark")?.style?.left ?? "") === "40%");
+  ok("pace-met card carries the buy-back chip", (q("#holdings-root")?.textContent ?? "").includes("buy back?"));
+  ok("mark age is visible", (q("#holdings-root")?.textContent ?? "").includes("ago"));
+
+  // Add form: decimals survive the round trip to the POST body.
+  qa(".holdings-toolbar button").find((b) => b.textContent.includes("New position"))?.click();
+  await tick();
+  const setVal = (el, v) => {
+    el.value = v;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const rootEl = q("#holdings-root");
+  setVal(rootEl.querySelector('.holdings-add input[placeholder="SYMBOL"]'), "AMD");
+  setVal(rootEl.querySelector('.holdings-add input[placeholder="e.g. 350.00"]'), "417.50");
+  setVal(rootEl.querySelector('.holdings-add input[placeholder="e.g. 1.00"]'), "3.75");
+  qa(".holdings-add button").find((b) => b.textContent === "Add")?.click();
+  await tick();
+  const addCall = calls.find(([, m, b]) => m === "POST" && b?.symbol === "AMD");
+  ok("add POST carries the typed decimals", !!addCall && addCall[2].strike === 417.5 && addCall[2].premium === 3.75);
+  ok("unpriced card renders the empty-mark state", (q("#holdings-root")?.textContent ?? "").includes("unpriced"));
+
+  // Outcome flow: open the dialog on the priced card, confirm bought-back.
+  qa(".holdings-card")
+    .find((c) => c.textContent.includes("GOOG"))
+    ?.querySelector(".holdings-close-btn")
+    ?.click();
+  await tick();
+  ok("outcome dialog offers the three outcomes", ["bought back", "expired", "assigned"].every((o) =>
+    (q(".holdings-outcome")?.textContent ?? "").toLowerCase().includes(o)
+  ));
+  ok("outcome dialog previews realized P&L", (q(".holdings-outcome")?.textContent ?? "").includes("$50.00"));
+  qa(".holdings-outcome button")
+    .find((b) => b.textContent === "Confirm")
+    ?.click();
+  await tick();
+  ok(
+    "outcome confirm DELETEs the position",
+    calls.some(([p, m]) => m === "DELETE" && p === "/api/holdings/h1")
+  );
+}
+
 console.log(JSON.stringify({ total: checks.length }));
 let failedCount = 0;
 for (const [name, passed] of checks) {

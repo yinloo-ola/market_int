@@ -92,3 +92,40 @@ export async function postRun() {
 export async function getProgress() {
   return authorizedFetch("/api/progress");
 }
+
+// ── Holdings (currently-holding puts ledger) ───────────────────
+// Shapes mirror crates/webapp/src/holdings.rs: positions carry their mark
+// and the server-computed pace view; the client never does pace math.
+
+export async function getHoldings() {
+  const res = await authorizedFetch("/api/holdings");
+  if (!res.ok) throw new Error(`GET /api/holdings -> ${res.status}`);
+  return res.json();
+}
+
+export async function addHolding(position) {
+  const res = await authorizedFetch("/api/holdings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(position),
+  });
+  const v = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(v?.error ?? `POST /api/holdings -> ${res.status}`);
+  return v;
+}
+
+export async function deleteHolding(id) {
+  const res = await authorizedFetch(`/api/holdings/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  const v = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(v?.error ?? `DELETE /api/holdings/${id} -> ${res.status}`);
+  return v;
+}
+
+export async function refreshHoldings() {
+  const res = await authorizedFetch("/api/holdings/refresh", { method: "POST" });
+  const v = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(v?.error ?? `POST /api/holdings/refresh -> ${res.status}`);
+  return v;
+}
