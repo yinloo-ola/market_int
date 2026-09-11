@@ -24,9 +24,14 @@ function ageText(rfc3339) {
 }
 
 function AddForm(props) {
-  const today = () => new Date().toISOString().slice(0, 10);
-  const in7 = () =>
-    new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
+  // Local-date ISO (never toISOString: it shifts a day for UTC-positive
+  // offsets — the GMT+8 bug caught in the prototype).
+  const isoLocal = (d) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+      d.getDate()
+    ).padStart(2, "0")}`;
+  const today = () => isoLocal(new Date());
+  const in7 = () => isoLocal(new Date(Date.now() + 7 * 86_400_000));
   const [open, setOpen] = createSignal(false);
   const [f, setF] = createSignal({
     symbol: "",
