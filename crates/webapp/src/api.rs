@@ -72,6 +72,16 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/grants/add", axum::routing::post(grants_add))
         .route("/api/grants/remove", axum::routing::post(grants_remove))
         .route("/api/me", axum::routing::get(me))
+        // Holdings (per-user ledger; uid from the verified identity only).
+        .route(
+            "/api/holdings",
+            axum::routing::get(crate::holdings::holdings_list)
+                .post(crate::holdings::holdings_add),
+        )
+        .route(
+            "/api/holdings/{id}",
+            axum::routing::delete(crate::holdings::holdings_delete),
+        )
         .with_state(state)
 }
 

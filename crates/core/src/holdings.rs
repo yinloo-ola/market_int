@@ -35,7 +35,7 @@ pub struct Mark {
 
 /// The close decision for one holding, as rendered on the card.
 /// `Option` fields are `None` exactly when no mark exists yet.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct HoldingView {
     pub pl_dollars: Option<f64>,
     pub pl_pct: Option<f64>,
