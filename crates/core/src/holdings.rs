@@ -10,8 +10,10 @@
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 
 /// One open short-put position. `premium` is per share (contract = 100
-/// shares); `contracts` is the multiplier count.
-#[derive(Debug, Clone, PartialEq)]
+/// shares); `contracts` is the multiplier count. serde: the webapp ledger
+/// document round-trips these directly (chrono "serde" feature → RFC3339
+/// timestamps, ISO dates).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Holding {
     pub id: String,
     pub symbol: String,
@@ -21,10 +23,11 @@ pub struct Holding {
     pub contracts: u32,
     pub sold: NaiveDate,
     /// Latest Tiger mid mark; `None` until the first refresh succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mark: Option<Mark>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Mark {
     pub mid: f64,
     pub as_of: DateTime<Utc>,

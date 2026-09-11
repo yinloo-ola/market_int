@@ -50,6 +50,196 @@ pub fn live_fetcher() -> MarkFetcher {
     })
 }
 
+// ── Per-user ledger document (R2) ──────────────────────────────
+// One `<uid>.json` per verified identity under `holdings_dir`; written with
+// the result-doc atomic pattern (temp + fsync + rename). The uid comes only
+// from the verified identity — never a client-supplied parameter.
+
+pub const LEDGER_SCHEMA_VERSION: u64 = 1;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HoldingsDocument {
+    pub schema_version: u64,
+    pub positions: Vec<market_int_core::holdings::Holding>,
+}
+
+impl Default for HoldingsDocument {
+    fn default() -> Self {
+        Self {
+            schema_version: LEDGER_SCHEMA_VERSION,
+            positions: Vec::new(),
+        }
+    }
+}
+
+/// Defensive filename mapping: Firebase UIDs are alphanumeric, but anything
+/// path-shaped (`/`, `..`, `:`) is rejected here rather than trusted.
+fn ledger_filename(uid: &str) -> std::io::Result<String> {
+    if uid.is_empty()
+        || !uid
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unsafe holdings uid: {uid:?}"),
+        ));
+    }
+    Ok(format!("{uid}.json"))
+}
+
+pub fn ledger_path(dir: &std::path::Path, uid: &str) -> std::io::Result<PathBuf> {
+    Ok(dir.join(ledger_filename(uid)?))
+}
+
+/// Load the caller's ledger. Missing file ⇒ empty (first visit); corrupt
+/// file ⇒ empty with a warning — never a 500, the user can start over.
+pub fn read_ledger(dir: &std::path::Path, uid: &str) -> std::io::Result<HoldingsDocument> {
+    let path = ledger_path(dir, uid)?;
+    match std::fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice::<HoldingsDocument>(&bytes) {
+            Ok(doc) => Ok(doc),
+            Err(err) => {
+                log::warn!("holdings: corrupt ledger {}: {err} — treating as empty", path.display());
+                Ok(HoldingsDocument::default())
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HoldingsDocument::default()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Atomic write (result.rs `write_document` pattern): temp file in the same
+/// directory → fsync → rename over the target → best-effort dir fsync.
+pub fn write_ledger(
+    dir: &std::path::Path,
+    uid: &str,
+    doc: &HoldingsDocument,
+) -> std::io::Result<()> {
+    let path = ledger_path(dir, uid)?;
+    std::fs::create_dir_all(dir)?;
+
+    let bytes = serde_json::to_vec_pretty(doc)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    let tmp_path = dir.join(format!(
+        ".{}.tmp.{}",
+        path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        std::process::id()
+    ));
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, &path)?;
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod store_tests {
+    use super::*;
+
+    fn sample_holding(id: &str) -> market_int_core::holdings::Holding {
+        market_int_core::holdings::Holding {
+            id: id.to_string(),
+            symbol: "GOOG".to_string(),
+            strike: 350.0,
+            expiry: NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+            premium: 1.0,
+            contracts: 2,
+            sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+            mark: Some(market_int_core::holdings::Mark {
+                mid: 0.5,
+                as_of: chrono::Utc::now(),
+            }),
+        }
+    }
+
+    /// Round-trip: every field (including mark + dates) survives a write.
+    #[test]
+    fn ledger_round_trips_losslessly() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = HoldingsDocument {
+            positions: vec![sample_holding("h1"), sample_holding("h2")],
+            ..Default::default()
+        };
+        write_ledger(dir.path(), "uid1", &doc).unwrap();
+        let back = read_ledger(dir.path(), "uid1").unwrap();
+        assert_eq!(back.schema_version, LEDGER_SCHEMA_VERSION);
+        assert_eq!(back.positions, doc.positions);
+    }
+
+    /// Missing file ⇒ empty ledger, no error (first visit).
+    #[test]
+    fn missing_file_is_empty_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = read_ledger(dir.path(), "nobody").unwrap();
+        assert!(doc.positions.is_empty());
+        assert_eq!(doc.schema_version, LEDGER_SCHEMA_VERSION);
+    }
+
+    /// Corrupt file ⇒ empty ledger + warning, never an error to the caller.
+    #[test]
+    fn corrupt_file_treated_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(dir.path().join("uid1.json"), b"{ not json").unwrap();
+        let doc = read_ledger(dir.path(), "uid1").unwrap();
+        assert!(doc.positions.is_empty());
+    }
+
+    /// No temp leftovers: the atomic pattern renames or nothing survives.
+    #[test]
+    fn atomic_write_leaves_no_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write_ledger(
+            dir.path(),
+            "uid1",
+            &HoldingsDocument {
+                positions: vec![sample_holding("h1")],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp leftovers: {leftovers:?}");
+    }
+
+    /// Different uids never share a file; the filename mapping is injective
+    /// over safe uids and rejects path-shaped ones.
+    #[test]
+    fn uid_paths_are_isolated_and_sanitized() {
+        let dir = tempfile::tempdir().unwrap();
+        write_ledger(
+            dir.path(),
+            "uid1",
+            &HoldingsDocument {
+                positions: vec![sample_holding("h1")],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(read_ledger(dir.path(), "uid2").unwrap().positions.is_empty());
+
+        assert_eq!(
+            ledger_path(dir.path(), "abc-123_X").unwrap(),
+            dir.path().join("abc-123_X.json")
+        );
+        for bad in ["../etc", "a/b", "", "a:b"] {
+            assert!(ledger_path(dir.path(), bad).is_err(), "uid {bad:?} must be rejected");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
