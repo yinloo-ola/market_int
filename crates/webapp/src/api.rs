@@ -79,6 +79,10 @@ pub fn build_router(state: AppState) -> axum::Router {
                 .post(crate::holdings::holdings_add),
         )
         .route(
+            "/api/holdings/refresh",
+            axum::routing::post(crate::holdings::holdings_refresh),
+        )
+        .route(
             "/api/holdings/{id}",
             axum::routing::delete(crate::holdings::holdings_delete),
         )

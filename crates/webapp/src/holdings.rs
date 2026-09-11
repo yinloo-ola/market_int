@@ -36,18 +36,127 @@ pub struct MarkResult {
 /// per-symbol outcomes with no network.
 pub type MarkFetcher = Arc<dyn Fn(&[MarkRequest]) -> Vec<MarkResult> + Send + Sync>;
 
-/// Production fetcher — wired to the Tiger client in the refresh handler
-/// (R4). Never cached: credentials come from env per `execute_query`.
+/// Production fetcher: one Tiger requester per refresh call, one underlying
+/// kline per unique symbol, then a degenerate `(strike, strike)` put-chain
+/// query per position (the `test-tiger` shape) — row mid already folds
+/// bid/ask with a latest-trade fallback (`calculate_mid_price` at parse
+/// time). OI minimum 0: we want *our* strike, not liquid ones. Blocking by
+/// design — the refresh handler parks it on `spawn_blocking`.
 pub fn live_fetcher() -> MarkFetcher {
-    Arc::new(|requests: &[MarkRequest]| {
-        requests
-            .iter()
+    Arc::new(|requests: &[MarkRequest]| fetch_marks_blocking(requests.to_vec()))
+}
+
+fn fetch_marks_blocking(requests: Vec<MarkRequest>) -> Vec<MarkResult> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build();
+    match runtime {
+        Ok(rt) => rt.block_on(fetch_marks(requests)),
+        Err(e) => requests
+            .into_iter()
             .map(|r| MarkResult {
-                id: r.id.clone(),
-                mid: Err("tiger mark fetch not wired yet".to_string()),
+                id: r.id,
+                mid: Err(format!("async runtime unavailable: {e}")),
             })
-            .collect()
-    })
+            .collect(),
+    }
+}
+
+async fn fetch_marks(requests: Vec<MarkRequest>) -> Vec<MarkResult> {
+    use market_int_core::model::OptionChainSide;
+    use std::collections::BTreeSet;
+
+    let Some(requester) =
+        market_int_core::tiger::api_caller::Requester::new().await
+    else {
+        return requests
+            .into_iter()
+            .map(|r| MarkResult {
+                id: r.id,
+                mid: Err(
+                    "tiger requester init failed (TIGER_ID/TIGER_RSA set?)"
+                        .to_string(),
+                ),
+            })
+            .collect();
+    };
+
+    // Underlying last close per unique symbol — the chain query needs it to
+    // apply its moneyness filter correctly (0.0 would mark every strike ITM).
+    let mut underlyings: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
+    let symbols: BTreeSet<String> =
+        requests.iter().map(|r| r.symbol.clone()).collect();
+    for symbol in &symbols {
+        match requester
+            .query_stock_quotes(&[symbol.as_str()], &chrono::Local::now(), 1, "day")
+            .await
+        {
+            Ok(candles) => {
+                if let Some(last) = candles.last() {
+                    underlyings.insert(symbol.clone(), last.close);
+                }
+            }
+            // Leave the symbol out — its positions go stale below with a
+            // precise reason.
+            Err(e) => log::warn!("holdings: underlying quote for {symbol} failed: {e}"),
+        }
+    }
+
+    let mut results = Vec::with_capacity(requests.len());
+    for r in requests {
+        if !underlyings.contains_key(&r.symbol) {
+            results.push(MarkResult {
+                id: r.id,
+                mid: Err(format!("underlying quote for {} unavailable", r.symbol)),
+            });
+            continue;
+        }
+        let expiry_ny = r
+            .expiry
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono_tz::America::New_York)
+            .single()
+            .expect("midnight ET resolves unambiguously");
+        let mid = chain_mid(
+            &requester,
+            &r.symbol,
+            r.strike,
+            &expiry_ny,
+            &underlyings,
+        )
+        .await;
+        results.push(MarkResult { id: r.id, mid });
+    }
+    results
+}
+
+// The chain query is async and must run on the same runtime as the kline
+// call — inlined as a small async helper driven by `fetch_marks`.
+async fn chain_mid(
+    requester: &market_int_core::tiger::api_caller::Requester,
+    symbol: &str,
+    strike: f64,
+    expiry_ny: &chrono::DateTime<chrono_tz::Tz>,
+    underlyings: &std::collections::HashMap<String, f64>,
+) -> Result<Option<f64>, String> {
+    use market_int_core::model::OptionChainSide;
+    let rows = requester
+        .query_option_chain(
+            &[(symbol, (strike, strike))],
+            underlyings,
+            expiry_ny,
+            0,
+            &OptionChainSide::Put,
+        )
+        .await
+        .map_err(|e| format!("chain query failed: {e}"))?;
+    Ok(rows
+        .iter()
+        .find(|c| (c.strike - strike).abs() < 1e-6)
+        .map(|c| c.mid)
+        .filter(|mid| *mid > 0.0))
 }
 
 // ── Per-user ledger document (R2) ──────────────────────────────
@@ -346,6 +455,93 @@ pub(crate) async fn holdings_delete(
         );
     }
     Json(json!({ "removed": id })).into_response()
+}
+
+/// `POST /api/holdings/refresh` — mark every open position to market.
+/// One position's fetch failure never fails the request: it keeps its
+/// previous mark and is reported stale.
+pub(crate) async fn holdings_refresh(
+    State(st): State<crate::api::AppState>,
+    req: Request,
+) -> Response {
+    let uid = uid_of(&req);
+    let mut doc = match read_ledger(&st.holdings_dir, &uid) {
+        Ok(d) => d,
+        Err(err) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("ledger read failed: {err}"),
+            )
+        }
+    };
+
+    let requests: Vec<MarkRequest> = doc
+        .positions
+        .iter()
+        .map(|p| MarkRequest {
+            id: p.id.clone(),
+            symbol: p.symbol.clone(),
+            strike: p.strike,
+            expiry: p.expiry,
+        })
+        .collect();
+    // Tiger is a blocking HTTP client — park the whole batch off the async
+    // workers (read_document_off_thread precedent).
+    let fetcher = st.mark_fetcher.clone();
+    let results =
+        tokio::task::spawn_blocking(move || fetcher(&requests)).await.expect(
+            "spawn_blocking mark fetch",
+        );
+
+    let now = (st.clock)();
+    let mut ok: Vec<String> = Vec::new();
+    let mut stale: Vec<(String, String)> = Vec::new();
+    for result in results {
+        let Some(position) = doc.positions.iter_mut().find(|p| p.id == result.id) else {
+            continue; // ledger changed between read and fetch — drop it
+        };
+        match result.mid {
+            Ok(Some(mid)) if mid > 0.0 => {
+                position.mark = Some(market_int_core::holdings::Mark { mid, as_of: now });
+                ok.push(result.id);
+            }
+            Ok(Some(_)) => stale.push((
+                result.id,
+                "non-positive mid rejected".to_string(),
+            )),
+            Ok(None) => stale.push((
+                result.id,
+                "no chain data for that contract".to_string(),
+            )),
+            Err(reason) => {
+                log::warn!("holdings: mark fetch failed for {}: {reason}", result.id);
+                stale.push((result.id, reason));
+            }
+        }
+    }
+
+    if let Err(err) = write_ledger(&st.holdings_dir, &uid, &doc) {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("ledger write failed: {err}"),
+        );
+    }
+    Json(json!({
+        "schema_version": doc.schema_version,
+        "positions": doc
+            .positions
+            .iter()
+            .map(|p| position_json(p, today_et(st.clock)))
+            .collect::<Vec<_>>(),
+        "refresh": {
+            "ok": ok,
+            "stale": stale
+                .into_iter()
+                .map(|(id, reason)| json!({"id": id, "reason": reason}))
+                .collect::<Vec<_>>(),
+        }
+    }))
+    .into_response()
 }
 
 #[cfg(test)]
@@ -676,5 +872,139 @@ mod tests {
         let (status, v) = call(app, "DELETE", "/api/holdings/h-nope", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(v["error"].as_str().is_some());
+    }
+
+    /// Seed two positions directly into the ledger document.
+    fn seed_two(dir: &std::path::Path) {
+        write_ledger(
+            &dir.join("holdings"),
+            "test-uid",
+            &HoldingsDocument {
+                positions: vec![
+                    market_int_core::holdings::Holding {
+                        id: "p-tsla".to_string(),
+                        symbol: "TSLA".to_string(),
+                        strike: 420.0,
+                        expiry: NaiveDate::from_ymd_opt(2026, 9, 17).unwrap(),
+                        premium: 4.5,
+                        contracts: 1,
+                        sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                        mark: Some(market_int_core::holdings::Mark {
+                            mid: 4.0,
+                            as_of: frozen_today() - chrono::Duration::hours(2),
+                        }),
+                    },
+                    market_int_core::holdings::Holding {
+                        id: "p-aapl".to_string(),
+                        symbol: "AAPL".to_string(),
+                        strike: 230.0,
+                        expiry: NaiveDate::from_ymd_opt(2026, 9, 18).unwrap(),
+                        premium: 3.2,
+                        contracts: 1,
+                        sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                        mark: None,
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    /// R4: a successful refresh updates every mark with a fresh as_of.
+    #[tokio::test]
+    async fn refresh_updates_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_two(dir.path());
+        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest]| {
+            reqs.iter()
+                .map(|r| {
+                    let mid = if r.symbol == "TSLA" { 2.2 } else { 2.9 };
+                    MarkResult {
+                        id: r.id.clone(),
+                        mid: Ok(Some(mid)),
+                    }
+                })
+                .collect()
+        });
+        let app = crate::api::build_router(test_state(dir.path(), fetcher));
+        let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["refresh"]["ok"].as_array().unwrap().len(), 2);
+        assert_eq!(v["refresh"]["stale"].as_array().unwrap().len(), 0);
+        for p in v["positions"].as_array().unwrap() {
+            assert!(p["mark"]["mid"].as_f64().unwrap() > 0.0);
+            assert!(p["mark"]["as_of"].as_str().is_some());
+        }
+        // Persisted, not just echoed.
+        let file = std::fs::read_to_string(dir.path().join("holdings/test-uid.json")).unwrap();
+        assert!(file.contains("\"mid\": 2.2"), "tsla mark persisted: {file}");
+    }
+
+    /// R4: one failed fetch never fails the request — that position keeps
+    /// its previous mark and lands in `stale`; the other still updates.
+    #[tokio::test]
+    async fn refresh_partial_failure_is_stale_not_error() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_two(dir.path());
+        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest]| {
+            reqs.iter()
+                .map(|r| MarkResult {
+                    id: r.id.clone(),
+                    mid: if r.symbol == "TSLA" {
+                        Err("chain query failed: upstream 500".to_string())
+                    } else {
+                        Ok(Some(2.9))
+                    },
+                })
+                .collect()
+        });
+        let app = crate::api::build_router(test_state(dir.path(), fetcher));
+        let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
+        assert_eq!(status, StatusCode::OK, "one failure ≠ request failure");
+        assert_eq!(v["refresh"]["ok"].as_array().unwrap().len(), 1);
+        let stale = v["refresh"]["stale"].as_array().unwrap();
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0]["id"], "p-tsla");
+        assert!(stale[0]["reason"].as_str().is_some());
+
+        let p = v["positions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "p-tsla")
+            .unwrap();
+        assert_eq!(p["mark"]["mid"], 4.0, "previous mark kept");
+        let as_of = p["mark"]["as_of"].as_str().unwrap();
+        assert_eq!(
+            as_of,
+            (frozen_today() - chrono::Duration::hours(2))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "as_of unchanged for the stale position"
+        );
+    }
+
+    /// R4: no chain data (expired/delisted) is stale, not an error, and a
+    /// non-positive mid is treated the same (no garbage marks).
+    #[tokio::test]
+    async fn refresh_missing_chain_data_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_two(dir.path());
+        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest]| {
+            reqs.iter()
+                .map(|r| MarkResult {
+                    id: r.id.clone(),
+                    mid: if r.symbol == "TSLA" {
+                        Ok(None)
+                    } else {
+                        Ok(Some(0.0)) // garbage quote — rejected
+                    },
+                })
+                .collect()
+        });
+        let app = crate::api::build_router(test_state(dir.path(), fetcher));
+        let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["refresh"]["stale"].as_array().unwrap().len(), 2);
     }
 }
