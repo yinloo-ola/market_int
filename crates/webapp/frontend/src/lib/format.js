@@ -27,12 +27,26 @@ export function stampMs(stamp) {
 // RFC3339 stamp → local browser time with its own zone label ("09:07 GMT+8"),
 // or undefined for missing/unparseable.
 export function localHM(stamp) {
+  return localStamp(stamp, { hour: "2-digit", minute: "2-digit" });
+}
+
+// Same, prefixed with the calendar date ("Sep 11, 09:07 GMT+8") — for run
+// stamps that can age past midnight (weekends, off-market staleness).
+export function localDayHM(stamp) {
+  return localStamp(stamp, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function localStamp(stamp, fields) {
   const ms = stampMs(stamp);
   if (ms === null) return undefined;
   try {
     return new Intl.DateTimeFormat(undefined, {
-      hour: "2-digit",
-      minute: "2-digit",
+      ...fields,
       hourCycle: "h23",
       timeZoneName: "short",
     }).format(ms);

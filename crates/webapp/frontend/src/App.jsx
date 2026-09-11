@@ -35,7 +35,7 @@ import {
   createRunController,
   gateLifted,
 } from "./components/RunPanel";
-import { comma, localHM, stampMs } from "./lib/format";
+import { comma, localDayHM, localHM, stampMs } from "./lib/format";
 import {
   DEFAULT_COLUMN_IDS,
   loadVisibleColumns,
@@ -80,7 +80,8 @@ function ageText(secs) {
   return rem ? `${h} h ${rem} min` : `${h} h`;
 }
 
-// "· run 09:07" — the run stamp shared by every cache-line branch.
+// "· run Sep 11, 09:07" — the run stamp shared by every cache-line branch.
+// Date included: off-market staleness routinely crosses midnight/weekends.
 function RunAtLine(props) {
   return (
     <Show when={props.at()}>
@@ -123,7 +124,7 @@ function CacheLine(props) {
     return s >= 60 ? `${Math.floor(s / 60)}m` : `${s}s`;
   };
   const runAtLocal = () =>
-    localHM(props.envelope.result?.run?.finished_at_utc);
+    localDayHM(props.envelope.result?.run?.finished_at_utc);
   // The hourly off-market gate's unlock, in the same local format. Hidden
   // once the instant passes on a not-yet-refetched envelope (the 30 s tick
   // re-evaluates it; the button has its own one-shot wake).
