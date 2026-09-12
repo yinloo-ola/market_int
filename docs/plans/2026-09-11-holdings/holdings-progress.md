@@ -5,7 +5,7 @@ Branch: 2026-09-11-holdings
 Setup: done
 Started: 2026-09-11T17:08:21Z
 Last updated: 2026-09-11T18:25:00Z
-Feature phase: ship-paused
+Feature phase: done
 
 ## Requirements
 | # | Done | Requirement | Per-req ceremony | Commit |
