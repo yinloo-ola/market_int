@@ -56,6 +56,7 @@ prototype file (see "Prototype reference" below).
 | R3 | Holdings CRUD API behind the Firebase gate | ⚠ production-risk |
 | R4 | Mark-to-market refresh via Tiger | ⚠ production-risk |
 | R5 | Frontend holdings panel (variant B cards) | — |
+| R6 | Underlying spot price on the card (stored on the mark) | — |
 
 ## Requirements
 
@@ -229,6 +230,32 @@ wraps. All decisions/edge handling match the prototype in the working tree.
 
 ### Checkpoints: full
 ### Review: inline
+
+### R6: Underlying spot price on the card
+Each refresh already fetches every unique symbol's daily kline (for the
+chain query's moneyness filter) and discards the close — store that close as
+`underlying_price` on the position's mark (additive, optional ledger field;
+old documents deserialize unchanged) so the card renders it between
+refreshes, and compute `spot_pct_vs_strike = (spot − strike) / strike` in the
+view. The card's stat strip gains a 4th cell — SOLD AT | NOW (MID) | SPOT |
+CLOSE CAPTURES — showing `spot (±x.x% vs strike)`, red when the stock is
+below the strike (a short put is ITM — danger), neutral otherwise.
+Informational only: the pace rule keeps using the option's mid.
+
+**Acceptance criteria**
+- Given a refresh whose kline reports spot 331.20 for a 350 strike, When the
+  position is listed, Then the mark carries `underlying_price` 331.20, the
+  view exposes `spot_pct_vs_strike` ≈ −0.0537, and the card's SPOT cell shows
+  `331.20 (−5.4% vs strike)` in the danger color.
+- Given a mark stored by an older ledger (no `underlying_price` field), When
+  read and viewed, Then the field is `None`, the SPOT cell shows `—`, and
+  nothing errors (serde default, round-trip test).
+- Given a refresh where the kline fails but the chain query succeeds, When
+  listed, Then the mark has mid but no `underlying_price` and the card shows
+  `—` (the two are independent).
+
+### Checkpoints: none
+### Review: skip
 
 ## Production-risk areas
 - **New persisted artifact on GCS FUSE** (R2): additive `holdings/` prefix on

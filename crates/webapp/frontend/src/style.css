@@ -1271,7 +1271,7 @@ details.adjust .hint-custom { color: var(--accent); }
 /* sold at / now (mid) / close captures */
 .holdings-card-stats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 6px;
   border-top: 1px solid var(--border);
   padding-top: 8px;
@@ -1310,6 +1310,8 @@ details.adjust .hint-custom { color: var(--accent); }
 .holdings-outcome-actions { display: flex; gap: 8px; justify-content: flex-end; }
 
 @media (max-width: 720px) {
+  /* Four stat cells wrap to a 2×2 grid on phones. */
+  .holdings-card-stats { grid-template-columns: repeat(2, 1fr); }
   /* Refresh drops to its own full-width row below the toolbar, label kept. */
   .holdings-toolbar {
     flex-direction: column;

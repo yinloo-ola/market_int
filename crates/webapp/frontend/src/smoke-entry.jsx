@@ -223,7 +223,7 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
     premium: 1.0,
     contracts: 1,
     sold: "2026-09-04",
-    mark: { mid: 0.5, as_of: "2026-09-08T19:00:00Z" },
+    mark: { mid: 0.5, as_of: "2026-09-08T19:00:00Z", underlying_price: 331.2 },
     view: {
       pl_dollars: 50.0,
       pl_pct: 0.5,
@@ -233,6 +233,7 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
       days_total: 5,
       target_pct: 0.4,
       pace_met: true,
+      spot_pct_vs_strike: (331.2 - 350) / 350,
     },
   };
   const calls = [];
@@ -270,6 +271,7 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
       days_total: 5,
       target_pct: 0.4,
       pace_met: false,
+      spot_pct_vs_strike: null,
     },
   };
 
@@ -284,6 +286,12 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
   ok("pace bar tick sits at the server target", (q(".holdings-bar-mark")?.style?.left ?? "") === "40%");
   ok("pace-met card carries the buy-back chip", (q("#holdings-root")?.textContent ?? "").includes("buy back?"));
   ok("mark age is visible", (q("#holdings-root")?.textContent ?? "").includes("ago"));
+
+  // R6: SPOT cell — price, % vs strike, danger color when below the strike.
+  const spotCell = qa(".holdings-card-stats div").find((d) => d.querySelector("span")?.textContent === "spot");
+  ok("spot cell renders price and % vs strike", !!spotCell && spotCell.textContent.includes("331.20") && spotCell.textContent.includes("-5.4% vs strike"));
+  ok("spot below strike is danger-colored", !!spotCell?.querySelector("i.holdings-neg"));
+  ok("stat strip has four cells", qa(".holdings-card .holdings-card-stats > div").length >= 4);
 
   // Add form: decimals survive the round trip to the POST body.
   qa(".holdings-toolbar button").find((b) => b.textContent.includes("New position"))?.click();

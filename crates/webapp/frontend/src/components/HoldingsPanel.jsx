@@ -290,6 +290,17 @@ export default function HoldingsPanel() {
                     </Show>
                   </div>
                   <div>
+                    <span>spot</span>
+                    <Show when={p.mark?.underlying_price != null} fallback={<b>—</b>}>
+                      <b>{p.mark.underlying_price.toFixed(2)}</b>
+                      <i
+                        class={v.spot_pct_vs_strike < 0 ? "holdings-neg" : "holdings-pos"}
+                      >
+                        {`${v.spot_pct_vs_strike >= 0 ? "+" : ""}${pct(v.spot_pct_vs_strike, 1)} vs strike`}
+                      </i>
+                    </Show>
+                  </div>
+                  <div>
                     <span>close captures</span>
                     <b class={v.pl_dollars >= 0 ? "holdings-pos" : "holdings-neg"}>
                       {v.pl_dollars == null ? "—" : money(v.pl_dollars)}

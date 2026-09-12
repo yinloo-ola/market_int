@@ -24,11 +24,13 @@ pub struct MarkRequest {
 
 /// Fetcher outcome per position: `Ok(Some(mid))` priced, `Ok(None)` = no
 /// chain data (expired/delisted — stale, not an error), `Err(reason)` =
-/// fetch failure (stale, not an error).
+/// fetch failure (stale, not an error). `underlying` is the symbol's last
+/// close captured by the same refresh (R6) — `None` when its kline failed.
 #[derive(Debug)]
 pub struct MarkResult {
     pub id: String,
     pub mid: Result<Option<f64>, String>,
+    pub underlying: Option<f64>,
 }
 
 /// Seam (Runner precedent): production constructs ONE Tiger requester per
@@ -43,7 +45,9 @@ pub type MarkFetcher = Arc<dyn Fn(&[MarkRequest]) -> Vec<MarkResult> + Send + Sy
 /// time). OI minimum 0: we want *our* strike, not liquid ones. Blocking by
 /// design — the refresh handler parks it on `spawn_blocking`.
 pub fn live_fetcher() -> MarkFetcher {
-    Arc::new(|requests: &[MarkRequest]| fetch_marks_blocking(requests.to_vec()))
+    Arc::new(move |requests: &[MarkRequest]| {
+        fetch_marks_blocking(requests.to_vec())
+    })
 }
 
 fn fetch_marks_blocking(requests: Vec<MarkRequest>) -> Vec<MarkResult> {
@@ -57,13 +61,13 @@ fn fetch_marks_blocking(requests: Vec<MarkRequest>) -> Vec<MarkResult> {
             .map(|r| MarkResult {
                 id: r.id,
                 mid: Err(format!("async runtime unavailable: {e}")),
+                underlying: None,
             })
             .collect(),
     }
 }
 
 async fn fetch_marks(requests: Vec<MarkRequest>) -> Vec<MarkResult> {
-    use market_int_core::model::OptionChainSide;
     use std::collections::BTreeSet;
 
     let Some(requester) =
@@ -77,6 +81,7 @@ async fn fetch_marks(requests: Vec<MarkRequest>) -> Vec<MarkResult> {
                     "tiger requester init failed (TIGER_ID/TIGER_RSA set?)"
                         .to_string(),
                 ),
+                underlying: None,
             })
             .collect();
     };
@@ -105,13 +110,14 @@ async fn fetch_marks(requests: Vec<MarkRequest>) -> Vec<MarkResult> {
 
     let mut results = Vec::with_capacity(requests.len());
     for r in requests {
-        if !underlyings.contains_key(&r.symbol) {
+        let Some(&spot) = underlyings.get(&r.symbol) else {
             results.push(MarkResult {
                 id: r.id,
                 mid: Err(format!("underlying quote for {} unavailable", r.symbol)),
+                underlying: None,
             });
             continue;
-        }
+        };
         let expiry_ny = r
             .expiry
             .and_hms_opt(0, 0, 0)
@@ -127,7 +133,11 @@ async fn fetch_marks(requests: Vec<MarkRequest>) -> Vec<MarkResult> {
             &underlyings,
         )
         .await;
-        results.push(MarkResult { id: r.id, mid });
+        results.push(MarkResult {
+            id: r.id,
+            mid,
+            underlying: Some(spot),
+        });
     }
     results
 }
@@ -342,6 +352,7 @@ fn position_json(h: &Holding, today: chrono::NaiveDate) -> serde_json::Value {
         json!({
             "mid": m.mid,
             "as_of": m.as_of.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "underlying_price": m.underlying_price,
         })
     });
     json!({
@@ -590,7 +601,11 @@ pub(crate) async fn holdings_refresh(
         };
         match result.mid {
             Ok(Some(mid)) if mid > 0.0 => {
-                position.mark = Some(market_int_core::holdings::Mark { mid, as_of: now });
+                position.mark = Some(market_int_core::holdings::Mark {
+                    mid,
+                    as_of: now,
+                    underlying_price: result.underlying,
+                });
                 ok.push(result.id);
             }
             Ok(Some(_)) => stale.push((
@@ -648,6 +663,7 @@ mod store_tests {
             mark: Some(market_int_core::holdings::Mark {
                 mid: 0.5,
                 as_of: chrono::Utc::now(),
+                underlying_price: Some(244.0),
             }),
         }
     }
@@ -683,6 +699,23 @@ mod store_tests {
         std::fs::write(dir.path().join("uid1.json"), b"{ not json").unwrap();
         let doc = read_ledger(dir.path(), "uid1").unwrap();
         assert!(doc.positions.is_empty());
+    }
+
+    /// R6: a mark persisted by an older ledger (no underlying_price field)
+    /// deserializes with the field absent — additive schema, nothing breaks.
+    #[test]
+    fn old_ledger_mark_without_underlying_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(
+            dir.path().join("uid1.json"),
+            r#"{"schema_version":1,"positions":[{"id":"h1","symbol":"GOOG","strike":350.0,
+               "expiry":"2026-09-11","premium":1.0,"contracts":1,"sold":"2026-09-04",
+               "mark":{"mid":0.5,"as_of":"2026-09-08T19:00:00Z"}}]}"#,
+        )
+        .unwrap();
+        let doc = read_ledger(dir.path(), "uid1").unwrap();
+        assert_eq!(doc.positions[0].mark.as_ref().unwrap().underlying_price, None);
     }
 
     /// No temp leftovers: the atomic pattern renames or nothing survives.
@@ -814,6 +847,7 @@ mod tests {
                 .map(|r| MarkResult {
                     id: r.id.clone(),
                     mid: Ok(Some(mid)),
+                    underlying: None,
                 })
                 .collect()
         })
@@ -1079,6 +1113,7 @@ mod tests {
                         mark: Some(market_int_core::holdings::Mark {
                             mid: 4.0,
                             as_of: frozen_today() - chrono::Duration::hours(2),
+                            underlying_price: Some(401.0),
                         }),
                     },
                     market_int_core::holdings::Holding {
@@ -1106,10 +1141,11 @@ mod tests {
         let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest]| {
             reqs.iter()
                 .map(|r| {
-                    let mid = if r.symbol == "TSLA" { 2.2 } else { 2.9 };
+                    let (mid, spot) = if r.symbol == "TSLA" { (2.2, 401.0) } else { (2.9, 244.0) };
                     MarkResult {
                         id: r.id.clone(),
                         mid: Ok(Some(mid)),
+                        underlying: Some(spot),
                     }
                 })
                 .collect()
@@ -1123,9 +1159,18 @@ mod tests {
             assert!(p["mark"]["mid"].as_f64().unwrap() > 0.0);
             assert!(p["mark"]["as_of"].as_str().is_some());
         }
-        // Persisted, not just echoed.
+        // Persisted, not just echoed — including the R6 underlying close.
         let file = std::fs::read_to_string(dir.path().join("holdings/test-uid.json")).unwrap();
         assert!(file.contains("\"mid\": 2.2"), "tsla mark persisted: {file}");
+        assert!(file.contains("\"underlying_price\": 401.0"), "spot persisted: {file}");
+        let tsla = v["positions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "p-tsla")
+            .unwrap();
+        let spot_pct = tsla["view"]["spot_pct_vs_strike"].as_f64().unwrap();
+        assert!((spot_pct - (401.0 - 420.0) / 420.0).abs() < 1e-12);
     }
 
     /// R4: one failed fetch never fails the request — that position keeps
@@ -1143,6 +1188,7 @@ mod tests {
                     } else {
                         Ok(Some(2.9))
                     },
+                    underlying: if r.symbol == "TSLA" { None } else { Some(244.0) },
                 })
                 .collect()
         });
@@ -1186,6 +1232,7 @@ mod tests {
                     } else {
                         Ok(Some(0.0)) // garbage quote — rejected
                     },
+                    underlying: None,
                 })
                 .collect()
         });

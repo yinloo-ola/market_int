@@ -35,6 +35,11 @@ pub struct Holding {
 pub struct Mark {
     pub mid: f64,
     pub as_of: DateTime<Utc>,
+    /// Underlying last close captured by the same refresh (informational —
+    /// the pace rule uses the option's mid). `None` on marks from older
+    /// ledgers or when the kline failed while the chain succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underlying_price: Option<f64>,
 }
 
 /// The close decision for one holding, as rendered on the card.
@@ -53,6 +58,9 @@ pub struct HoldingView {
     pub target_pct: f64,
     /// Requires a mark — an unpriced position never flags.
     pub pace_met: bool,
+    /// `(spot − strike) / strike` — negative = the short put is ITM (danger).
+    /// `None` without a mark or when the refresh had no underlying quote.
+    pub spot_pct_vs_strike: Option<f64>,
 }
 
 /// Working days strictly after `from`, up to and including `to` (date-only,
@@ -127,8 +135,12 @@ impl Holding {
                 days_total,
                 target_pct,
                 pace_met: false,
+                spot_pct_vs_strike: None,
             };
         };
+        let spot_pct_vs_strike = mark
+            .underlying_price
+            .map(|spot| (spot - self.strike) / self.strike);
 
         let pl_per_share = self.premium - mark.mid;
         let pl_dollars = pl_per_share * 100.0 * self.contracts as f64;
@@ -150,6 +162,7 @@ impl Holding {
             days_total,
             target_pct,
             pace_met: pl_pct >= target_pct,
+            spot_pct_vs_strike,
         }
     }
 }
@@ -170,6 +183,7 @@ mod tests {
             mark: mark_mid.map(|mid| Mark {
                 mid,
                 as_of: Utc::now(),
+                underlying_price: None,
             }),
         }
     }
@@ -248,6 +262,25 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
         );
         assert_eq!(n, 5);
+    }
+
+    /// R6: spot vs strike — negative means the short put is ITM (danger);
+    /// absent underlying quote ⇒ None.
+    #[test]
+    fn spot_pct_vs_strike() {
+        let mut h = holding(
+            NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+            Some(0.5),
+        );
+        h.mark.as_mut().unwrap().underlying_price = Some(331.2);
+        let v = h.view(NaiveDate::from_ymd_opt(2026, 9, 8).unwrap());
+        let pct = v.spot_pct_vs_strike.unwrap();
+        assert!((pct - (331.2 - 350.0) / 350.0).abs() < 1e-12);
+        assert!(pct < 0.0, "spot below strike is ITM danger");
+
+        h.mark.as_mut().unwrap().underlying_price = None;
+        assert_eq!(h.view(NaiveDate::from_ymd_opt(2026, 9, 8).unwrap()).spot_pct_vs_strike, None);
     }
 
     /// Multiplier: P&L dollars are per-contract (×100) × contract count.
