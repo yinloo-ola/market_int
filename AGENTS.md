@@ -17,7 +17,8 @@ frontend build.
 **Workspace layout (three-crate virtual workspace, 2026-08):**
 
 - `crates/core/` — package `market_int_core` (lib): domain types, scoring,
-  stores, Tiger client, metrics, pipeline. **Telegram-free by construction** —
+  stores, Tiger client, metrics, pipeline, holdings (currently-holding-put
+  ledger math: 1-day-floor pace rule, working-day counting). **Telegram-free by construction** —
   the webapp depends only on core, so it cannot link publishing code.
   - `src/model.rs` — domain types, `QuotesError`, scoring
     (`calculate_put_score`, `calculate_put_chain_score`,
@@ -47,6 +48,8 @@ frontend build.
 - `crates/webapp/` — package `market_int_webapp`: axum server
   (`api.rs` /api/latest, `run.rs` POST /api/run + SSE progress,
   `auth.rs` Firebase token gate, `result.rs` frozen last-run JSON document,
+  `holdings.rs` per-user put ledger (/api/holdings CRUD + Tiger mark
+  refresh, JSON document per Firebase UID under /data/webapp/holdings/),
   `assets.rs` embedded frontend) + vite/Solid frontend under `frontend/`
   (see `crates/webapp/README.md`).
 
@@ -101,10 +104,10 @@ reads it anymore).
 
 - Run everything: `cargo test` (workspace root runs all three members).
 - One member: `cargo test -p market_int_core`.
-- Tests live in 18 `#[cfg(test)]` modules (181 tests as of 2026-08): core
-  `model, metrics, greeks, regime, sectors, maxdrop, trend, option, pipeline,
-  store/earnings, store/trend, tiger/api_caller`; cli `backtest, publish`;
-  webapp `result, api, auth, run`. (AGENTS.md's earlier "all tests in
+- Tests live in 20 `#[cfg(test)]` modules (230 tests as of 2026-09): core
+  `model, metrics, greeks, regime, sectors, maxdrop, trend, option, holdings,
+  pipeline, store/earnings, store/trend, tiger/api_caller`; cli `backtest,
+  publish`; webapp `result, api, auth, run, holdings`. (AGENTS.md's earlier "all tests in
   model.rs" was stale even before the workspace split.)
 - Culture: pure-function/hermetic tests; fixtures over mocks; the pipeline is
   tested through an injectable requester factory (loopback stub, no network);
