@@ -21,3 +21,4 @@ gui-test-screenshots/
 
 # local before/after comparison runs (carry credential copies in .env)
 .compare/
+crates/webapp/fixtures/holdings/
