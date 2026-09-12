@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "positions": [
+    {
+      "id": "h1789173033896-1",
+      "symbol": "GLW",
+      "strike": 149.0,
+      "expiry": "2026-09-18",
+      "premium": 0.95,
+      "contracts": 3,
+      "sold": "2026-09-09",
+      "mark": {
+        "mid": 0.5,
+        "as_of": "2026-09-12T00:31:48.291047Z"
+      }
+    }
+  ]
+}

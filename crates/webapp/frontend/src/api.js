@@ -100,7 +100,15 @@ export async function getProgress() {
 export async function getHoldings() {
   const res = await authorizedFetch("/api/holdings");
   if (!res.ok) throw new Error(`GET /api/holdings -> ${res.status}`);
-  return res.json();
+  // A stale backend (pre-holdings routes) serves the SPA fallback here —
+  // 200 + index.html. Parse defensively and say what actually happened.
+  const v = await res.json().catch(() => null);
+  if (v === null) {
+    throw new Error(
+      "GET /api/holdings returned non-JSON — the backend predates the holdings routes (rebuild/restart it)"
+    );
+  }
+  return v;
 }
 
 export async function addHolding(position) {
