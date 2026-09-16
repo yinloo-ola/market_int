@@ -60,6 +60,28 @@ pub struct CallHolding {
     pub mark: Option<Mark>,
 }
 
+/// Shares held from an assignment — the lot a covered call is sold
+/// against. Priced from the underlying spot, never from an option chain.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ShareLot {
+    pub id: String,
+    pub symbol: String,
+    pub shares: u32,
+    pub basis_per_share: f64,
+    pub acquired: NaiveDate,
+    /// Latest underlying spot; `None` until the first refresh succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<SpotMark>,
+}
+
+/// The underlying spot quote a lot prices from, captured by the refresh
+/// that covered its symbol.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SpotMark {
+    pub spot: f64,
+    pub as_of: DateTime<Utc>,
+}
+
 /// The close decision for one holding, as rendered on the card.
 /// `Option` fields are `None` exactly when no mark exists yet.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -153,6 +175,74 @@ impl CallHolding {
             self.mark.as_ref(),
             today,
         )
+    }
+}
+
+/// The rendered lot row. `value`/P&L/spot need a spot mark; `capacity` and
+/// the caller-supplied `covered` count (it derives from the calls array —
+/// the lot can't see it) never do.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct LotView {
+    pub value: Option<f64>,
+    pub pl_dollars: Option<f64>,
+    pub pl_pct: Option<f64>,
+    /// `floor(shares / 100)` — how many covered calls the lot could back.
+    pub capacity: u32,
+    /// Covered-call contracts currently covering this lot (passed in).
+    pub covered: u32,
+    pub spot: Option<f64>,
+    pub spot_as_of: Option<DateTime<Utc>>,
+    /// Calendar days held, from `acquired` to the caller's `today`.
+    pub age_days: u32,
+}
+
+impl ShareLot {
+    /// Structural validation only — a future `acquired` date is rejected
+    /// handler-side, matching how `sold` is handled today.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.symbol.trim().is_empty() {
+            return Err("symbol is required".to_string());
+        }
+        if self.shares == 0 {
+            return Err("shares must be at least 1".to_string());
+        }
+        if !(self.basis_per_share.is_finite() && self.basis_per_share > 0.0) {
+            return Err("basis must be > 0".to_string());
+        }
+        Ok(())
+    }
+
+    /// The lot row as of `today`, covered by `covered_contracts` call
+    /// contracts.
+    pub fn view(&self, today: NaiveDate, covered_contracts: u32) -> LotView {
+        // u32 division floors — the contract is "floor(shares/100)".
+        let capacity = self.shares / 100;
+        let age_days = (today - self.acquired).num_days().max(0) as u32;
+        let Some(mark) = &self.mark else {
+            return LotView {
+                value: None,
+                pl_dollars: None,
+                pl_pct: None,
+                capacity,
+                covered: covered_contracts,
+                spot: None,
+                spot_as_of: None,
+                age_days,
+            };
+        };
+        let value = mark.spot * self.shares as f64;
+        let total_basis = self.basis_per_share * self.shares as f64;
+        let pl_dollars = value - total_basis;
+        LotView {
+            value: Some(value),
+            pl_dollars: Some(pl_dollars),
+            pl_pct: Some(pl_dollars / total_basis),
+            capacity,
+            covered: covered_contracts,
+            spot: Some(mark.spot),
+            spot_as_of: Some(mark.as_of),
+            age_days,
+        }
     }
 }
 
@@ -516,6 +606,93 @@ mod tests {
             assert_eq!(v.days_elapsed, 2);
             assert_eq!(v.days_total, 5);
             assert_eq!(v.target_pct, 0.4);
+        }
+    }
+
+    /// R2: share lots from assignments, priced from the underlying spot.
+    mod share_lot {
+        use super::*;
+
+        fn lot(shares: u32, basis: f64) -> ShareLot {
+            ShareLot {
+                id: "l1".to_string(),
+                symbol: "GOOG".to_string(),
+                shares,
+                basis_per_share: basis,
+                acquired: NaiveDate::from_ymd_opt(2026, 9, 8).unwrap(),
+                mark: None,
+            }
+        }
+
+        /// The design doc's reference numbers: 200 sh @ $349.00 basis,
+        /// spot $344.20, 2 contracts covered.
+        #[test]
+        fn reference_lot_view() {
+            let today = NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
+            let mut l = lot(200, 349.0);
+            l.mark = Some(SpotMark {
+                spot: 344.20,
+                as_of: Utc::now(),
+            });
+            let v = l.view(today, 2);
+            let value = v.value.unwrap();
+            assert!((value - 68840.0).abs() < 1e-6, "value {value}");
+            let pl = v.pl_dollars.unwrap();
+            assert!((pl - (-960.0)).abs() < 1e-6, "P&L {pl}");
+            let pct = v.pl_pct.unwrap();
+            assert!((pct - (-960.0 / 69_800.0)).abs() < 1e-12, "P&L% {pct}");
+            assert_eq!(v.capacity, 2);
+            assert_eq!(v.covered, 2);
+            assert_eq!(v.spot, Some(344.20));
+            assert!(v.spot_as_of.is_some());
+            assert_eq!(v.age_days, 0);
+        }
+
+        /// Unpriced lots report no value/P&L/spot but still compute
+        /// capacity, and carry the passed-in covered count.
+        #[test]
+        fn unpriced_lot_still_computes_capacity() {
+            let today = NaiveDate::from_ymd_opt(2026, 9, 10).unwrap();
+            let l = lot(200, 349.0);
+            let v = l.view(today, 1);
+            assert_eq!(v.value, None);
+            assert_eq!(v.pl_dollars, None);
+            assert_eq!(v.pl_pct, None);
+            assert_eq!(v.capacity, 2);
+            assert_eq!(v.covered, 1);
+            assert_eq!(v.spot, None);
+            assert_eq!(v.spot_as_of, None);
+            assert_eq!(v.age_days, 2);
+        }
+
+        /// Capacity floors, never rounds.
+        #[test]
+        fn capacity_floors() {
+            let today = NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
+            assert_eq!(lot(150, 10.0).view(today, 0).capacity, 1);
+            assert_eq!(lot(99, 10.0).view(today, 0).capacity, 0);
+            assert_eq!(lot(300, 10.0).view(today, 0).capacity, 3);
+        }
+
+        /// Structural validation only — future `acquired` dates are a
+        /// handler concern (R6), matching how `sold` is handled.
+        #[test]
+        fn validation_rejects_bad_fields() {
+            let mut l = lot(100, 10.0);
+            l.validate().unwrap();
+
+            l.symbol = "  ".to_string();
+            assert!(l.validate().is_err());
+            l.symbol = "GOOG".to_string();
+
+            l.shares = 0;
+            assert!(l.validate().is_err());
+            l.shares = 100;
+
+            l.basis_per_share = 0.0;
+            assert!(l.validate().is_err());
+            l.basis_per_share = -1.0;
+            assert!(l.validate().is_err());
         }
     }
 }
