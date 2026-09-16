@@ -176,10 +176,21 @@ async fn chain_mid(
 
 pub const LEDGER_SCHEMA_VERSION: u64 = 1;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Per-user ledger document (R4): sibling arrays, never a tagged position
+/// enum. Additive `#[serde(default)]` fields only — pre-wheel documents
+/// (just `positions`) parse unchanged, schema version stays 1.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HoldingsDocument {
     pub schema_version: u64,
     pub positions: Vec<market_int_core::holdings::Holding>,
+    #[serde(default)]
+    pub calls: Vec<market_int_core::holdings::CallHolding>,
+    #[serde(default)]
+    pub lots: Vec<market_int_core::holdings::ShareLot>,
+    /// Manual balance — never the Tiger account API. `None` until the user
+    /// sets it once.
+    #[serde(default)]
+    pub cash: Option<f64>,
 }
 
 impl Default for HoldingsDocument {
@@ -187,6 +198,9 @@ impl Default for HoldingsDocument {
         Self {
             schema_version: LEDGER_SCHEMA_VERSION,
             positions: Vec::new(),
+            calls: Vec::new(),
+            lots: Vec::new(),
+            cash: None,
         }
     }
 }
@@ -716,6 +730,74 @@ mod store_tests {
         .unwrap();
         let doc = read_ledger(dir.path(), "uid1").unwrap();
         assert_eq!(doc.positions[0].mark.as_ref().unwrap().underlying_price, None);
+    }
+
+    /// R4: a pre-wheel document (only schema_version + positions) loads
+    /// unchanged — calls/lots default empty, cash defaults None, positions
+    /// round-trip intact. Schema version stays 1.
+    #[test]
+    fn old_put_only_ledger_loads_with_empty_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(
+            dir.path().join("uid1.json"),
+            r#"{"schema_version":1,"positions":[{"id":"h1","symbol":"GOOG","strike":350.0,
+               "expiry":"2026-09-11","premium":1.0,"contracts":2,"sold":"2026-09-04",
+               "mark":{"mid":0.5,"as_of":"2026-09-08T19:00:00Z","underlying_price":344.2}}]}"#,
+        )
+        .unwrap();
+        let doc = read_ledger(dir.path(), "uid1").unwrap();
+        assert_eq!(doc.schema_version, LEDGER_SCHEMA_VERSION);
+        assert!(doc.calls.is_empty());
+        assert!(doc.lots.is_empty());
+        assert_eq!(doc.cash, None);
+        assert_eq!(doc.positions.len(), 1);
+        assert_eq!(doc.positions[0].id, "h1");
+        assert_eq!(
+            doc.positions[0].mark.as_ref().unwrap().underlying_price,
+            Some(344.2)
+        );
+    }
+
+    /// R4: a full wheel document round-trips losslessly — every field of
+    /// every entry across positions, calls, lots, and cash.
+    #[test]
+    fn full_wheel_document_round_trips_losslessly() {
+        let dir = tempfile::tempdir().unwrap();
+        let as_of = chrono::Utc::now();
+        let doc = HoldingsDocument {
+            schema_version: LEDGER_SCHEMA_VERSION,
+            positions: vec![sample_holding("h1")],
+            calls: vec![market_int_core::holdings::CallHolding {
+                id: "c1".to_string(),
+                symbol: "GOOG".to_string(),
+                strike: 360.0,
+                expiry: NaiveDate::from_ymd_opt(2026, 9, 18).unwrap(),
+                premium: 1.2,
+                contracts: 2,
+                sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                mark: Some(market_int_core::holdings::Mark {
+                    mid: 0.3,
+                    as_of,
+                    underlying_price: Some(370.0),
+                }),
+            }],
+            lots: vec![market_int_core::holdings::ShareLot {
+                id: "l1".to_string(),
+                symbol: "GOOG".to_string(),
+                shares: 200,
+                basis_per_share: 349.0,
+                acquired: NaiveDate::from_ymd_opt(2026, 9, 8).unwrap(),
+                mark: Some(market_int_core::holdings::SpotMark {
+                    spot: 370.0,
+                    as_of,
+                }),
+            }],
+            cash: Some(150_000.0),
+        };
+        write_ledger(dir.path(), "uid1", &doc).unwrap();
+        let back = read_ledger(dir.path(), "uid1").unwrap();
+        assert_eq!(back, doc, "every field of every entry survives");
     }
 
     /// No temp leftovers: the atomic pattern renames or nothing survives.
