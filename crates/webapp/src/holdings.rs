@@ -2329,4 +2329,194 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
+
+    /// R7: one pass marks all three kinds and survives a mid-flight
+    /// mutation — an entry added while the fetch was in flight survives
+    /// the re-read merge unclobbered (the write-back-pre-call-snapshot
+    /// hazard from docs/lessons.md).
+    #[tokio::test]
+    async fn refresh_marks_all_kinds_and_keeps_mid_flight_adds() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger_dir = dir.path().join("holdings");
+        write_ledger(
+            &ledger_dir,
+            "test-uid",
+            &HoldingsDocument {
+                schema_version: LEDGER_SCHEMA_VERSION,
+                positions: vec![market_int_core::holdings::Holding {
+                    id: "p1".to_string(),
+                    symbol: "GOOG".to_string(),
+                    strike: 350.0,
+                    expiry: NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+                    premium: 1.0,
+                    contracts: 1,
+                    sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                    mark: None,
+                }],
+                calls: vec![market_int_core::holdings::CallHolding {
+                    id: "c1".to_string(),
+                    symbol: "GOOG".to_string(),
+                    strike: 360.0,
+                    expiry: NaiveDate::from_ymd_opt(2026, 9, 18).unwrap(),
+                    premium: 1.2,
+                    contracts: 2,
+                    sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                    mark: None,
+                }],
+                lots: vec![market_int_core::holdings::ShareLot {
+                    id: "l1".to_string(),
+                    symbol: "GOOG".to_string(),
+                    shares: 200,
+                    basis_per_share: 349.0,
+                    acquired: NaiveDate::from_ymd_opt(2026, 9, 8).unwrap(),
+                    mark: None,
+                }],
+                cash: None,
+            },
+        )
+        .unwrap();
+
+        let fetcher: MarkFetcher = {
+            let ledger_dir = ledger_dir.clone();
+            Arc::new(move |reqs: &[MarkRequest], _lots: &[String]| {
+                // Another request's mutation lands while "Tiger" is being
+                // queried: a fresh mark-less position joins the ledger.
+                let mut doc = read_ledger(&ledger_dir, "test-uid").unwrap();
+                doc.positions
+                    .push(market_int_core::holdings::Holding {
+                        id: "p-late".to_string(),
+                        symbol: "AAPL".to_string(),
+                        strike: 230.0,
+                        expiry: NaiveDate::from_ymd_opt(2026, 9, 18).unwrap(),
+                        premium: 3.2,
+                        contracts: 1,
+                        sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                        mark: None,
+                    });
+                write_ledger(&ledger_dir, "test-uid", &doc).unwrap();
+                MarkBatch {
+                    marks: reqs
+                        .iter()
+                        .map(|r| MarkResult {
+                            id: r.id.clone(),
+                            mid: Ok(Some(if r.id == "p1" { 0.5 } else { 0.3 })),
+                            underlying: Some(370.0),
+                        })
+                        .collect(),
+                    spots: [("GOOG".to_string(), 370.0)].into_iter().collect(),
+                }
+            })
+        };
+        let app = crate::api::build_router(test_state(dir.path(), fetcher));
+        let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        let ok = v["refresh"]["ok"].as_array().unwrap();
+        assert_eq!(ok.len(), 3, "put + call + lot all priced: {ok:?}");
+
+        // The mid-flight position survived with its mark-less state; the
+        // snapshot entries still got their marks.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let positions = v["positions"].as_array().unwrap();
+        assert_eq!(positions.len(), 2, "p1 + p-late both present");
+        let p1 = positions.iter().find(|p| p["id"] == "p1").unwrap();
+        assert_eq!(p1["mark"]["mid"], 0.5);
+        let late = positions.iter().find(|p| p["id"] == "p-late").unwrap();
+        assert!(late["mark"].is_null(), "added mid-flight, never clobbered");
+        assert_eq!(v["calls"][0]["mark"]["mid"], 0.3);
+        assert_eq!(v["lots"][0]["mark"]["spot"], 370.0);
+    }
+
+    /// R7: one pass can fail half its kinds — the option lands stale with
+    /// its previous mark while the lot still prices from spots.
+    #[tokio::test]
+    async fn refresh_mixed_failure_is_per_entry_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger_dir = dir.path().join("holdings");
+        write_ledger(
+            &ledger_dir,
+            "test-uid",
+            &HoldingsDocument {
+                schema_version: LEDGER_SCHEMA_VERSION,
+                positions: vec![market_int_core::holdings::Holding {
+                    id: "p1".to_string(),
+                    symbol: "GOOG".to_string(),
+                    strike: 350.0,
+                    expiry: NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+                    premium: 1.0,
+                    contracts: 1,
+                    sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                    mark: Some(market_int_core::holdings::Mark {
+                        mid: 0.9,
+                        as_of: frozen_today() - chrono::Duration::hours(2),
+                        underlying_price: None,
+                    }),
+                }],
+                calls: Vec::new(),
+                lots: vec![
+                    market_int_core::holdings::ShareLot {
+                        id: "l-goog".to_string(),
+                        symbol: "GOOG".to_string(),
+                        shares: 200,
+                        basis_per_share: 349.0,
+                        acquired: NaiveDate::from_ymd_opt(2026, 9, 8).unwrap(),
+                        mark: None,
+                    },
+                    market_int_core::holdings::ShareLot {
+                        id: "l-nope".to_string(),
+                        symbol: "NOPE".to_string(),
+                        shares: 100,
+                        basis_per_share: 100.0,
+                        acquired: NaiveDate::from_ymd_opt(2026, 9, 8).unwrap(),
+                        mark: Some(market_int_core::holdings::SpotMark {
+                            spot: 100.0,
+                            as_of: frozen_today() - chrono::Duration::hours(2),
+                        }),
+                    },
+                ],
+                cash: None,
+            },
+        )
+        .unwrap();
+
+        // The put's chain query fails; GOOT spot arrives for the GOOG lot;
+        // NOPE's kline failed so it's missing from spots entirely.
+        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], _lots: &[String]| {
+            MarkBatch {
+                marks: reqs
+                    .iter()
+                    .map(|r| MarkResult {
+                        id: r.id.clone(),
+                        mid: Err("chain query failed: upstream 500".to_string()),
+                        underlying: None,
+                    })
+                    .collect(),
+                spots: [("GOOG".to_string(), 370.0)].into_iter().collect(),
+            }
+        });
+        let app = crate::api::build_router(test_state(dir.path(), fetcher));
+        let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
+        assert_eq!(status, StatusCode::OK, "per-entry failures ≠ request failure");
+        let ok = v["refresh"]["ok"].as_array().unwrap();
+        assert_eq!(
+            ok,
+            &vec![json!("l-goog")],
+            "only the spot-priced lot is ok: {ok:?}"
+        );
+        let stale: Vec<String> = v["refresh"]["stale"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap().to_string())
+            .collect();
+        assert!(stale.contains(&"p1".to_string()), "{stale:?}");
+        assert!(stale.contains(&"l-nope".to_string()), "{stale:?}");
+
+        let lots = v["lots"].as_array().unwrap();
+        let nope = lots.iter().find(|l| l["id"] == "l-nope").unwrap();
+        assert_eq!(nope["mark"]["spot"], 100.0, "previous SpotMark kept");
+        let p1 = v["positions"][0].clone();
+        assert_eq!(p1["mark"]["mid"], 0.9, "previous mark kept");
+    }
 }
