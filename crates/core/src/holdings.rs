@@ -126,6 +126,21 @@ fn is_weekend(d: NaiveDate) -> bool {
     matches!(d.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun)
 }
 
+/// Cash reserved by open short puts: Σ strike × 100 × contracts. Calls
+/// never reserve (they're covered by held shares) and lots never reserve —
+/// the cash-secured assumption lives entirely in the puts book (R3).
+pub fn reserved_cash(puts: &[Holding]) -> f64 {
+    puts.iter()
+        .map(|p| p.strike * 100.0 * p.contracts as f64)
+        .sum()
+}
+
+/// `cash − reserved_cash(puts)`. Negative is real (margin used elsewhere)
+/// and is displayed honestly, never clamped.
+pub fn free_cash(cash: f64, puts: &[Holding]) -> f64 {
+    cash - reserved_cash(puts)
+}
+
 impl Holding {
     pub fn validate(&self) -> Result<(), String> {
         validate_option_leg(
@@ -693,6 +708,54 @@ mod tests {
             assert!(l.validate().is_err());
             l.basis_per_share = -1.0;
             assert!(l.validate().is_err());
+        }
+    }
+
+    /// R3: cash reserve math — puts only, honest negatives.
+    mod cash {
+        use super::*;
+
+        fn put(strike: f64, contracts: u32) -> Holding {
+            Holding {
+                id: format!("p{strike}x{contracts}"),
+                symbol: "X".to_string(),
+                strike,
+                expiry: NaiveDate::from_ymd_opt(2026, 10, 16).unwrap(),
+                premium: 1.0,
+                contracts,
+                sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                mark: None,
+            }
+        }
+
+        /// The design doc's reference book: 420×1, 350×2, 230×1 against
+        /// $148,000 cash.
+        #[test]
+        fn reference_reserve_and_free() {
+            let puts = vec![put(420.0, 1), put(350.0, 2), put(230.0, 1)];
+            assert_eq!(reserved_cash(&puts), 135_000.0);
+            assert_eq!(free_cash(148_000.0, &puts), 13_000.0);
+        }
+
+        /// Calls and lots never reserve — the functions take only the puts
+        /// slice, so a mixed book cannot change the answer by construction.
+        #[test]
+        fn only_puts_count() {
+            let puts = vec![put(420.0, 1), put(350.0, 2), put(230.0, 1)];
+            assert_eq!(reserved_cash(&puts), 135_000.0);
+        }
+
+        /// Free cash goes negative honestly — no clamping.
+        #[test]
+        fn free_cash_going_negative_is_honest() {
+            let puts = vec![put(420.0, 1), put(350.0, 2), put(230.0, 1)];
+            assert_eq!(free_cash(10_000.0, &puts), -125_000.0);
+        }
+
+        #[test]
+        fn empty_book_reserves_nothing() {
+            assert_eq!(reserved_cash(&[]), 0.0);
+            assert_eq!(free_cash(50_000.0, &[]), 50_000.0);
         }
     }
 }
