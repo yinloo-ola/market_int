@@ -1241,4 +1241,206 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(v["refresh"]["stale"].as_array().unwrap().len(), 2);
     }
+
+    /// Design doc `## Feature acceptance` (wheel-holdings), verbatim: the
+    /// full wheel in one per-user ledger — cash in, put sold and refreshed
+    /// (pace met), assigned into a share lot, a covered call sold from it
+    /// and refreshed ITM, called away (FIFO reduction to zero) — with every
+    /// intermediate state consistent: reserved/free re-derived, no orphan
+    /// ids, one document per uid.
+    ///
+    /// Contract-picker script: strike 350 → mid 0.50 with GOOG at 344.20
+    /// (the put refresh); strike 360 → mid 0.30 with GOOG at 370.00 (the
+    /// call refresh — ITM for a short 360 call). Each phase refreshes
+    /// exactly one option, so the strike key is unambiguous.
+    #[tokio::test]
+    async fn feature_acceptance_wheel_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest]| {
+            reqs.iter()
+                .map(|r| {
+                    let (mid, spot) = if (r.strike - 360.0).abs() < f64::EPSILON {
+                        (0.30, 370.00)
+                    } else {
+                        (0.50, 344.20)
+                    };
+                    MarkResult {
+                        id: r.id.clone(),
+                        mid: Ok(Some(mid)),
+                        underlying: Some(spot),
+                    }
+                })
+                .collect()
+        });
+
+        // Fresh ledger: nothing held anywhere, cash never set.
+        let app = crate::api::build_router(test_state(dir.path(), fetcher.clone()));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["positions"].as_array().unwrap().len(), 0);
+        assert_eq!(v["calls"].as_array().unwrap().len(), 0);
+        assert_eq!(v["lots"].as_array().unwrap().len(), 0);
+        assert!(v["cash"].is_null(), "cash is null until first set");
+        assert!(v["cash_free"].is_null(), "free stays null while cash is unset");
+
+        // Cash in: PATCH $150,000 — the derived numbers come back computed.
+        let app = crate::api::build_router(test_state(dir.path(), fetcher.clone()));
+        let (status, v) = call(
+            app,
+            "PATCH",
+            "/api/holdings/cash",
+            Some(json!({"cash": 150000.0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "patch cash: {v}");
+        assert_eq!(v["cash"], 150000.0);
+        assert_eq!(v["cash_reserved"], 0.0);
+        assert_eq!(v["cash_free"], 150000.0);
+
+        // Sell the GOOG 350P ×2 @ $1.00 (sold 2 working days ago, expiry 5
+        // working days out) — a kind-less body, exactly as today.
+        let app = crate::api::build_router(test_state(dir.path(), fetcher.clone()));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "symbol": "GOOG", "strike": 350.0, "premium": 1.0,
+                "contracts": 2, "sold": "2026-09-04", "expiry": "2026-09-11"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "put add: {v}");
+        let put_id = v["position"]["id"].as_str().expect("put id").to_string();
+
+        // Reserved/free re-derive from the open put: $70,000 / $80,000.
+        let app = crate::api::build_router(test_state(dir.path(), fetcher.clone()));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["cash_reserved"], 70000.0);
+        assert_eq!(v["cash_free"], 80000.0);
+
+        // Refresh with the scripted mid/spot: +50% vs target 40%, pace met.
+        let app = crate::api::build_router(test_state(dir.path(), fetcher.clone()));
+        let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
+        assert_eq!(status, StatusCode::OK, "refresh: {v}");
+        assert_eq!(v["refresh"]["ok"].as_array().unwrap().len(), 1);
+        let view = &v["positions"][0]["view"];
+        assert_eq!(view["target_pct"], 0.4);
+        assert_eq!(view["pl_pct"], 0.5);
+        assert_eq!(view["pl_dollars"], 100.0, "2 contracts × 100 × $0.50 captured");
+        assert_eq!(view["pace_met"], true);
+        let vs_strike = view["spot_pct_vs_strike"].as_f64().unwrap();
+        assert!(vs_strike < 0.0, "344.20 vs 350 strike is OTM for the put");
+
+        // Close as assigned at $340 → the prefilled lot (200 sh, basis =
+        // strike − premium = $349.00, acquired today) records with
+        // assigned_from, and the put is gone in the same rewrite.
+        let app = crate::api::build_router(test_state(dir.path(), fetcher.clone()));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "lot", "symbol": "GOOG", "shares": 200,
+                "basis_per_share": 349.0, "acquired": "2026-09-08",
+                "assigned_from": put_id
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "assignment: {v}");
+        let lot_id = v["lot"]["id"].as_str().expect("lot id").to_string();
+
+        let app = crate::api::build_router(test_state(dir.path(), fetcher.clone()));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["positions"].as_array().unwrap().len(), 0, "put gone");
+        let lots = v["lots"].as_array().unwrap();
+        assert_eq!(lots.len(), 1);
+        assert_eq!(lots[0]["shares"], 200);
+        assert_eq!(lots[0]["basis_per_share"], 349.0);
+        assert!(lots[0]["view"]["value"].is_null(), "unpriced until refresh");
+
+        // Sell the covered ×2 call (strike 360) from the lot.
+        let app = crate::api::build_router(test_state(dir.path(), fetcher.clone()));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "call", "symbol": "GOOG", "strike": 360.0,
+                "premium": 1.20, "contracts": 2,
+                "sold": "2026-09-04", "expiry": "2026-09-11"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "call add: {v}");
+        let call_id = v["call"]["id"].as_str().expect("call id").to_string();
+
+        let app = crate::api::build_router(test_state(dir.path(), fetcher.clone()));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(v["calls"].as_array().unwrap().len(), 1);
+        assert_eq!(v["lots"][0]["view"]["capacity"], 2, "floor(200/100)");
+        assert_eq!(
+            v["lots"][0]["view"]["covered"], 2,
+            "covered derives from the calls array"
+        );
+
+        // Refresh with GOOG at $370 (mid 0.30): the short 360 call is ITM
+        // and the lot prices from the same pass's spot.
+        let app = crate::api::build_router(test_state(dir.path(), fetcher.clone()));
+        let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
+        assert_eq!(status, StatusCode::OK, "refresh 2: {v}");
+        assert_eq!(
+            v["refresh"]["ok"].as_array().unwrap().len(), 1,
+            "only the call is an option request"
+        );
+        let call_view = &v["calls"][0]["view"];
+        let vs_strike = call_view["spot_pct_vs_strike"].as_f64().unwrap();
+        assert!(
+            vs_strike > 0.0,
+            "370 vs 360 strike is ITM for the call — the chip's driver"
+        );
+        let lot_view = &v["lots"][0]["view"];
+        assert_eq!(lot_view["value"], 74000.0, "370 × 200");
+        assert_eq!(lot_view["pl_dollars"], 4200.0, "(370 − 349) × 200");
+        assert_eq!(lot_view["covered"], 2);
+
+        // Called away: the call is removed and the lot reduces 200 → 0 in
+        // the same rewrite, so it disappears too.
+        let app = crate::api::build_router(test_state(dir.path(), fetcher.clone()));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings/called-away",
+            Some(json!({"call_id": call_id})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "called away: {v}");
+        assert_eq!(v["called_away"], true);
+        assert_eq!(v["reduced"], true);
+
+        // End state: everything closed, cash back at the full balance.
+        let app = crate::api::build_router(test_state(dir.path(), fetcher.clone()));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["positions"].as_array().unwrap().len(), 0);
+        assert_eq!(v["calls"].as_array().unwrap().len(), 0);
+        assert_eq!(v["lots"].as_array().unwrap().len(), 0);
+        assert_eq!(v["cash"], 150000.0);
+        assert_eq!(v["cash_reserved"], 0.0);
+        assert_eq!(v["cash_free"], 150000.0);
+
+        // No orphan ids, one document per uid.
+        let file =
+            std::fs::read_to_string(dir.path().join("holdings/test-uid.json")).unwrap();
+        for orphan in [put_id, call_id, lot_id] {
+            assert!(!file.contains(&orphan), "orphan id {orphan} survived: {file}");
+        }
+        let files: Vec<String> = std::fs::read_dir(dir.path().join("holdings"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(files, vec!["test-uid.json".to_string()], "one document per uid");
+    }
 }
