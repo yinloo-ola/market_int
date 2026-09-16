@@ -482,6 +482,14 @@ fn ledger_json(doc: &HoldingsDocument, today: chrono::NaiveDate) -> serde_json::
             .iter()
             .map(|l| lot_json(l, today, covered_contracts(doc, &l.symbol)))
             .collect::<Vec<_>>(),
+        // The manual balance and its derived numbers (R3/R6): `cash` is
+        // null until first set — `cash_free` then stays null with it,
+        // while `cash_reserved` still derives from the open puts.
+        "cash": doc.cash,
+        "cash_reserved": market_int_core::holdings::reserved_cash(&doc.positions),
+        "cash_free": doc
+            .cash
+            .map(|c| market_int_core::holdings::free_cash(c, &doc.positions)),
     })
 }
 
@@ -511,11 +519,18 @@ pub(crate) async fn holdings_list(State(st): State<crate::api::AppState>, req: R
 }
 
 /// Longest ledger: every mutation rewrites the document and refresh fans out
-/// one chain query per position — a bound keeps both honest. A real book has
-/// handfuls of open puts.
+/// one chain query per option — a bound keeps both honest. A real book has
+/// handfuls of open positions.
 const MAX_POSITIONS_PER_LEDGER: usize = 100;
 
-/// `POST /api/holdings` — add a position to the caller's ledger.
+/// The entry count the cap bounds — all three arrays combined (R6).
+fn ledger_entry_count(doc: &HoldingsDocument) -> usize {
+    doc.positions.len() + doc.calls.len() + doc.lots.len()
+}
+
+/// `POST /api/holdings` — add to the caller's ledger. `kind` selects the
+/// array: `"put"` (the default — deployed clients never send it),
+/// `"call"`, or `"lot"` (R6).
 pub(crate) async fn holdings_add(State(st): State<crate::api::AppState>, req: Request) -> Response {
     let uid = uid_of(&req);
     let bytes = match axum::body::to_bytes(req.into_body(), 16 * 1024).await {
@@ -527,6 +542,25 @@ pub(crate) async fn holdings_add(State(st): State<crate::api::AppState>, req: Re
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "body is not JSON"),
     };
 
+    match v.get("kind").and_then(|k| k.as_str()).unwrap_or("put") {
+        "put" | "call" => add_option_leg(st, uid, &v).await,
+        "lot" => add_lot(st, uid, &v).await,
+        other => error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("unknown kind {other:?} (want put, call, or lot)"),
+        ),
+    }
+}
+
+/// The shared option-leg add: identical validation for puts and calls
+/// (one rule set, two arrays — R6). The kind only picks where the entry
+/// lands and the response key.
+async fn add_option_leg(
+    st: crate::api::AppState,
+    uid: String,
+    v: &serde_json::Value,
+) -> Response {
+    let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("put");
     let symbol = v
         .get("symbol")
         .and_then(|s| s.as_str())
@@ -565,7 +599,8 @@ pub(crate) async fn holdings_add(State(st): State<crate::api::AppState>, req: Re
 
     let holding = Holding {
         // Server-generated id: process sequence on top of the clock stamp
-        // (NEXT_SEQ precedent).
+        // (NEXT_SEQ precedent). Unique across ALL arrays — the id prefix
+        // and clock stamp are shared by every kind.
         id: format!("h{}-{}", (st.clock)().timestamp_millis(), next_position_seq()),
         symbol,
         strike,
@@ -575,6 +610,7 @@ pub(crate) async fn holdings_add(State(st): State<crate::api::AppState>, req: Re
         sold,
         mark: None,
     };
+    // One validation rule set serves both option kinds (R1 pinning).
     if let Err(reason) = holding.validate() {
         return error_response(StatusCode::BAD_REQUEST, &reason);
     }
@@ -588,13 +624,29 @@ pub(crate) async fn holdings_add(State(st): State<crate::api::AppState>, req: Re
             )
         }
     };
-    if doc.positions.len() >= MAX_POSITIONS_PER_LEDGER {
+    if ledger_entry_count(&doc) >= MAX_POSITIONS_PER_LEDGER {
         return error_response(
             StatusCode::BAD_REQUEST,
             &format!("ledger holds the maximum of {MAX_POSITIONS_PER_LEDGER} positions — close one first"),
         );
     }
-    doc.positions.push(holding.clone());
+    let body = if kind == "call" {
+        let call_h = market_int_core::holdings::CallHolding {
+            id: holding.id.clone(),
+            symbol: holding.symbol.clone(),
+            strike: holding.strike,
+            expiry: holding.expiry,
+            premium: holding.premium,
+            contracts: holding.contracts,
+            sold: holding.sold,
+            mark: None,
+        };
+        doc.calls.push(call_h.clone());
+        Json(json!({ "call": call_json(&call_h, today_et(st.clock)) }))
+    } else {
+        doc.positions.push(holding.clone());
+        Json(json!({ "position": position_json(&holding, today_et(st.clock)) }))
+    };
     if let Err(err) =
         write_ledger_off_thread(st.holdings_dir.clone(), uid, doc).await
     {
@@ -603,9 +655,78 @@ pub(crate) async fn holdings_add(State(st): State<crate::api::AppState>, req: Re
             &format!("ledger write failed: {err}"),
         );
     }
+    (StatusCode::CREATED, body).into_response()
+}
+
+/// The lot add (R6): core owns structural validation; the handler owns the
+/// `acquired`-not-in-the-future rule, matching how `sold` is handled.
+async fn add_lot(st: crate::api::AppState, uid: String, v: &serde_json::Value) -> Response {
+    let symbol = v
+        .get("symbol")
+        .and_then(|s| s.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_uppercase();
+    let Some(shares_raw) = v.get("shares").and_then(|x| x.as_f64()) else {
+        return error_response(StatusCode::BAD_REQUEST, "missing shares");
+    };
+    if (shares_raw - shares_raw.trunc()).abs() > f64::EPSILON {
+        return error_response(StatusCode::BAD_REQUEST, "shares must be a whole number");
+    }
+    let Some(shares) = u32::try_from(shares_raw as i64).ok().filter(|s| *s > 0) else {
+        return error_response(StatusCode::BAD_REQUEST, "shares must be a positive integer");
+    };
+    let Some(basis_per_share) = v.get("basis_per_share").and_then(|x| x.as_f64()) else {
+        return error_response(StatusCode::BAD_REQUEST, "missing basis_per_share");
+    };
+    let Some(acquired_raw) = v.get("acquired").and_then(|x| x.as_str()) else {
+        return error_response(StatusCode::BAD_REQUEST, "missing acquired date");
+    };
+    let acquired = match parse_date(acquired_raw, "acquired") {
+        Ok(d) => d,
+        Err(resp) => return resp,
+    };
+    if acquired > today_et(st.clock) {
+        return error_response(StatusCode::BAD_REQUEST, "acquired date is in the future");
+    }
+
+    let lot = market_int_core::holdings::ShareLot {
+        id: format!("h{}-{}", (st.clock)().timestamp_millis(), next_position_seq()),
+        symbol,
+        shares,
+        basis_per_share,
+        acquired,
+        mark: None,
+    };
+    if let Err(reason) = lot.validate() {
+        return error_response(StatusCode::BAD_REQUEST, &reason);
+    }
+
+    let mut doc = match read_ledger_off_thread(st.holdings_dir.clone(), uid.clone()).await {
+        Ok(d) => d,
+        Err(err) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("ledger read failed: {err}"),
+            )
+        }
+    };
+    if ledger_entry_count(&doc) >= MAX_POSITIONS_PER_LEDGER {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("ledger holds the maximum of {MAX_POSITIONS_PER_LEDGER} positions — close one first"),
+        );
+    }
+    doc.lots.push(lot.clone());
+    if let Err(err) = write_ledger_off_thread(st.holdings_dir.clone(), uid, doc).await {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("ledger write failed: {err}"),
+        );
+    }
     (
         StatusCode::CREATED,
-        Json(json!({ "position": position_json(&holding, today_et(st.clock)) })),
+        Json(json!({ "lot": lot_json(&lot, today_et(st.clock), 0) })),
     )
         .into_response()
 }
@@ -617,7 +738,9 @@ fn next_position_seq() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// `DELETE /api/holdings/{id}` — the outcome-confirm removal.
+/// `DELETE /api/holdings/{id}` — the outcome-confirm removal. One route
+/// for every kind: positions, then calls, then lots (R6); an id in no
+/// array is a 404 with no write.
 pub(crate) async fn holdings_delete(
     State(st): State<crate::api::AppState>,
     AxPath(id): AxPath<String>,
@@ -633,9 +756,19 @@ pub(crate) async fn holdings_delete(
             )
         }
     };
-    let before = doc.positions.len();
-    doc.positions.retain(|p| p.id != id);
-    if doc.positions.len() == before {
+    let removed = if doc.positions.iter().any(|p| p.id == id) {
+        doc.positions.retain(|p| p.id != id);
+        true
+    } else if doc.calls.iter().any(|c| c.id == id) {
+        doc.calls.retain(|c| c.id != id);
+        true
+    } else if doc.lots.iter().any(|l| l.id == id) {
+        doc.lots.retain(|l| l.id != id);
+        true
+    } else {
+        false
+    };
+    if !removed {
         return error_response(StatusCode::NOT_FOUND, "no such position");
     }
     if let Err(err) = write_ledger_off_thread(st.holdings_dir.clone(), uid, doc).await {
@@ -645,6 +778,53 @@ pub(crate) async fn holdings_delete(
         );
     }
     Json(json!({ "removed": id })).into_response()
+}
+
+/// `PATCH /api/holdings/cash` — set the manual cash balance (R6, never the
+/// Tiger account API). The response carries the derived reserved/free so
+/// the UI strip re-renders from the response alone.
+pub(crate) async fn holdings_patch_cash(
+    State(st): State<crate::api::AppState>,
+    req: Request,
+) -> Response {
+    let uid = uid_of(&req);
+    let bytes = match axum::body::to_bytes(req.into_body(), 16 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "unreadable body"),
+    };
+    let v: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "body is not JSON"),
+    };
+    let Some(cash) = v.get("cash").and_then(|x| x.as_f64()) else {
+        return error_response(StatusCode::BAD_REQUEST, "missing cash");
+    };
+    if !cash.is_finite() || cash < 0.0 {
+        return error_response(StatusCode::BAD_REQUEST, "cash must be a number ≥ 0");
+    }
+
+    let mut doc = match read_ledger_off_thread(st.holdings_dir.clone(), uid.clone()).await {
+        Ok(d) => d,
+        Err(err) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("ledger read failed: {err}"),
+            )
+        }
+    };
+    doc.cash = Some(cash);
+    if let Err(err) = write_ledger_off_thread(st.holdings_dir.clone(), uid, doc.clone()).await {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("ledger write failed: {err}"),
+        );
+    }
+    Json(json!({
+        "cash": cash,
+        "cash_reserved": market_int_core::holdings::reserved_cash(&doc.positions),
+        "cash_free": market_int_core::holdings::free_cash(cash, &doc.positions),
+    }))
+    .into_response()
 }
 
 /// `POST /api/holdings/refresh` — mark every open option (puts AND calls,
@@ -1894,5 +2074,259 @@ mod tests {
         assert!(file.contains("\"mid\": 0.5"), "{file}");
         assert!(file.contains("\"mid\": 0.3"), "{file}");
         assert!(file.contains("\"spot\": 100.0"), "{file}");
+    }
+
+    /// R6: `kind: "call"` lands in the calls array with its computed view.
+    #[tokio::test]
+    async fn add_call_lands_in_calls_with_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "call", "symbol": "GOOG", "strike": 360.0,
+                "premium": 1.2, "contracts": 2,
+                "sold": "2026-09-04", "expiry": "2026-09-11"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{v}");
+        assert_eq!(v["call"]["symbol"], "GOOG");
+        assert!(
+            v["call"]["view"]["days_total"].as_u64().is_some(),
+            "computed view rides the response: {v}"
+        );
+        assert!(v["call"]["mark"].is_null(), "no mark until refresh");
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["calls"].as_array().unwrap().len(), 1);
+        assert_eq!(v["positions"].as_array().unwrap().len(), 0, "not a put");
+    }
+
+    /// R6: `kind: "lot"` lands unpriced in lots; capacity still computes.
+    #[tokio::test]
+    async fn add_lot_lands_unpriced() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "lot", "symbol": "GOOG", "shares": 200,
+                "basis_per_share": 349.0, "acquired": "2026-09-08"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{v}");
+        let lot = &v["lot"];
+        assert_eq!(lot["shares"], 200);
+        assert!(lot["mark"].is_null(), "unpriced until refresh");
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        let lots = v["lots"].as_array().unwrap();
+        assert_eq!(lots.len(), 1);
+        assert!(lots[0]["view"]["value"].is_null(), "unpriced lot view");
+        assert_eq!(lots[0]["view"]["capacity"], 2);
+    }
+
+    /// R6: lot validation — future acquired, zero shares, non-positive
+    /// basis, blank symbol are 400s and never write the ledger.
+    #[tokio::test]
+    async fn add_lot_rejects_invalid_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        for (label, payload) in [
+            ("future acquired", json!({"kind": "lot", "symbol": "GOOG", "shares": 100, "basis_per_share": 349.0, "acquired": "2026-09-09"})),
+            ("zero shares", json!({"kind": "lot", "symbol": "GOOG", "shares": 0, "basis_per_share": 349.0, "acquired": "2026-09-08"})),
+            ("zero basis", json!({"kind": "lot", "symbol": "GOOG", "shares": 100, "basis_per_share": 0.0, "acquired": "2026-09-08"})),
+            ("blank symbol", json!({"kind": "lot", "symbol": "  ", "shares": 100, "basis_per_share": 349.0, "acquired": "2026-09-08"})),
+        ] {
+            let (status, v) = call(app.clone(), "POST", "/api/holdings", Some(payload)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {v}");
+            assert!(v["error"].as_str().is_some(), "{label} carries a reason");
+        }
+        assert!(
+            !dir.path().join("holdings/test-uid.json").exists(),
+            "failed lot adds must not create the ledger"
+        );
+    }
+
+    /// R6: an unknown kind is a 400.
+    #[tokio::test]
+    async fn add_rejects_unknown_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({"kind": "bond", "symbol": "GOOG"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    }
+
+    /// R6: PATCH /api/holdings/cash sets the balance and derives
+    /// reserved/free from the open puts; negative or missing cash is a
+    /// 400 with no write.
+    #[tokio::test]
+    async fn patch_cash_sets_balance_and_derives() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = HoldingsDocument::default();
+        doc.positions.push(market_int_core::holdings::Holding {
+            id: "p1".to_string(),
+            symbol: "GOOG".to_string(),
+            strike: 350.0,
+            expiry: NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+            premium: 1.0,
+            contracts: 2,
+            sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+            mark: None,
+        });
+        write_ledger(&dir.path().join("holdings"), "test-uid", &doc).unwrap();
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "PATCH",
+            "/api/holdings/cash",
+            Some(json!({"cash": 150000.0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["cash"], 150000.0);
+        assert_eq!(v["cash_reserved"], 70000.0);
+        assert_eq!(v["cash_free"], 80000.0);
+
+        // GET reflects the balance alongside the derived numbers.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(v["cash"], 150000.0);
+        assert_eq!(v["cash_reserved"], 70000.0);
+        assert_eq!(v["cash_free"], 80000.0);
+
+        // Negative and missing are 400s.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(app, "PATCH", "/api/holdings/cash", Some(json!({"cash": -1.0}))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(app, "PATCH", "/api/holdings/cash", Some(json!({}))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// R6: DELETE searches positions, then calls, then lots — one route
+    /// for every kind; an id in no array stays a 404 with no write.
+    #[tokio::test]
+    async fn delete_removes_from_any_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = HoldingsDocument::default();
+        doc.positions.push(market_int_core::holdings::Holding {
+            id: "p1".to_string(),
+            symbol: "GOOG".to_string(),
+            strike: 350.0,
+            expiry: NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+            premium: 1.0,
+            contracts: 1,
+            sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+            mark: None,
+        });
+        doc.calls.push(market_int_core::holdings::CallHolding {
+            id: "c1".to_string(),
+            symbol: "GOOG".to_string(),
+            strike: 360.0,
+            expiry: NaiveDate::from_ymd_opt(2026, 9, 18).unwrap(),
+            premium: 1.2,
+            contracts: 1,
+            sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+            mark: None,
+        });
+        doc.lots.push(market_int_core::holdings::ShareLot {
+            id: "l1".to_string(),
+            symbol: "GOOG".to_string(),
+            shares: 100,
+            basis_per_share: 349.0,
+            acquired: NaiveDate::from_ymd_opt(2026, 9, 8).unwrap(),
+            mark: None,
+        });
+        write_ledger(&dir.path().join("holdings"), "test-uid", &doc).unwrap();
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(app, "DELETE", "/api/holdings/c1", None).await;
+        assert_eq!(status, StatusCode::OK, "call removed");
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["calls"].as_array().unwrap().len(), 0);
+        assert_eq!(v["positions"].as_array().unwrap().len(), 1, "put untouched");
+        assert_eq!(v["lots"].as_array().unwrap().len(), 1, "lot untouched");
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(app, "DELETE", "/api/holdings/l1", None).await;
+        assert_eq!(status, StatusCode::OK, "lot removed");
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(app, "DELETE", "/api/holdings/h-nope", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// R6: the 100-entry cap counts across all three arrays combined.
+    #[tokio::test]
+    async fn cap_counts_entries_combined() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = HoldingsDocument::default();
+        for i in 0..99 {
+            doc.positions.push(market_int_core::holdings::Holding {
+                id: format!("p{i}"),
+                symbol: "GOOG".to_string(),
+                strike: 350.0,
+                expiry: NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+                premium: 1.0,
+                contracts: 1,
+                sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                mark: None,
+            });
+        }
+        doc.calls.push(market_int_core::holdings::CallHolding {
+            id: "c99".to_string(),
+            symbol: "GOOG".to_string(),
+            strike: 360.0,
+            expiry: NaiveDate::from_ymd_opt(2026, 9, 18).unwrap(),
+            premium: 1.2,
+            contracts: 1,
+            sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+            mark: None,
+        });
+        write_ledger(&dir.path().join("holdings"), "test-uid", &doc).unwrap();
+
+        // Any kind is rejected at 100 combined.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "symbol": "GOOG", "strike": 350.0, "premium": 1.0,
+                "contracts": 1, "sold": "2026-09-04", "expiry": "2026-09-11"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("maximum"));
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({"kind": "lot", "symbol": "GOOG", "shares": 100, "basis_per_share": 349.0, "acquired": "2026-09-08"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }
