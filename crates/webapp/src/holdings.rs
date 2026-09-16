@@ -13,13 +13,16 @@ use std::sync::Arc;
 
 use chrono::NaiveDate;
 
-/// One open position handed to the mark fetcher.
+/// One open option position handed to the mark fetcher. `side` selects the
+/// chain side queried — puts and calls each query their own side (R5; the
+/// call side existed in the Tiger client but was never exercised here).
 #[derive(Debug, Clone)]
 pub struct MarkRequest {
     pub id: String,
     pub symbol: String,
     pub strike: f64,
     pub expiry: NaiveDate,
+    pub side: market_int_core::model::OptionChainSide,
 }
 
 /// Fetcher outcome per position: `Ok(Some(mid))` priced, `Ok(None)` = no
@@ -33,65 +36,86 @@ pub struct MarkResult {
     pub underlying: Option<f64>,
 }
 
+/// The fetcher's whole outcome: option marks by request id, plus the
+/// per-symbol underlying closes the same kline pass produced. Lots price
+/// from `spots` — chain queries are never issued for lot symbols (R5).
+#[derive(Debug)]
+pub struct MarkBatch {
+    pub marks: Vec<MarkResult>,
+    pub spots: std::collections::BTreeMap<String, f64>,
+}
+
 /// Seam (Runner precedent): production constructs ONE Tiger requester per
-/// refresh request and prices every position serially; tests script
-/// per-symbol outcomes with no network.
-pub type MarkFetcher = Arc<dyn Fn(&[MarkRequest]) -> Vec<MarkResult> + Send + Sync>;
+/// refresh request and prices every position serially; the second argument
+/// lists lot symbols so the same kline pass prices them into `spots`.
+/// Tests script per-symbol outcomes with no network.
+pub type MarkFetcher =
+    Arc<dyn Fn(&[MarkRequest], &[String]) -> MarkBatch + Send + Sync>;
 
 /// Production fetcher: one Tiger requester per refresh call, one underlying
-/// kline per unique symbol, then a degenerate `(strike, strike)` put-chain
-/// query per position (the `test-tiger` shape) — row mid already folds
-/// bid/ask with a latest-trade fallback (`calculate_mid_price` at parse
-/// time). OI minimum 0: we want *our* strike, not liquid ones. Blocking by
-/// design — the refresh handler parks it on `spawn_blocking`.
+/// kline per unique symbol across option AND lot symbols, then a
+/// degenerate `(strike, strike)` chain query per option request on its
+/// requested side (the `test-tiger` shape) — row mid already folds bid/ask
+/// with a latest-trade fallback (`calculate_mid_price` at parse time). OI
+/// minimum 0: we want *our* strike, not liquid ones. Blocking by design —
+/// the refresh handler parks it on `spawn_blocking`.
 pub fn live_fetcher() -> MarkFetcher {
-    Arc::new(move |requests: &[MarkRequest]| {
-        fetch_marks_blocking(requests.to_vec())
+    Arc::new(move |requests: &[MarkRequest], lot_symbols: &[String]| {
+        fetch_marks_blocking(requests.to_vec(), lot_symbols.to_vec())
     })
 }
 
-fn fetch_marks_blocking(requests: Vec<MarkRequest>) -> Vec<MarkResult> {
+fn fetch_marks_blocking(requests: Vec<MarkRequest>, lot_symbols: Vec<String>) -> MarkBatch {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build();
     match runtime {
-        Ok(rt) => rt.block_on(fetch_marks(requests)),
-        Err(e) => requests
-            .into_iter()
-            .map(|r| MarkResult {
-                id: r.id,
-                mid: Err(format!("async runtime unavailable: {e}")),
-                underlying: None,
-            })
-            .collect(),
+        Ok(rt) => rt.block_on(fetch_marks(requests, lot_symbols)),
+        Err(e) => MarkBatch {
+            marks: requests
+                .into_iter()
+                .map(|r| MarkResult {
+                    id: r.id,
+                    mid: Err(format!("async runtime unavailable: {e}")),
+                    underlying: None,
+                })
+                .collect(),
+            spots: Default::default(),
+        },
     }
 }
 
-async fn fetch_marks(requests: Vec<MarkRequest>) -> Vec<MarkResult> {
+async fn fetch_marks(requests: Vec<MarkRequest>, lot_symbols: Vec<String>) -> MarkBatch {
     use std::collections::BTreeSet;
 
     let Some(requester) =
         market_int_core::tiger::api_caller::Requester::new().await
     else {
-        return requests
-            .into_iter()
-            .map(|r| MarkResult {
-                id: r.id,
-                mid: Err(
-                    "tiger requester init failed (TIGER_ID/TIGER_RSA set?)"
-                        .to_string(),
-                ),
-                underlying: None,
-            })
-            .collect();
+        return MarkBatch {
+            marks: requests
+                .into_iter()
+                .map(|r| MarkResult {
+                    id: r.id,
+                    mid: Err(
+                        "tiger requester init failed (TIGER_ID/TIGER_RSA set?)"
+                            .to_string(),
+                    ),
+                    underlying: None,
+                })
+                .collect(),
+            spots: Default::default(),
+        };
     };
 
     // Underlying last close per unique symbol — the chain query needs it to
-    // apply its moneyness filter correctly (0.0 would mark every strike ITM).
+    // apply its moneyness filter correctly (0.0 would mark every strike
+    // ITM), and lot symbols price from the very same pass (R5: one quote
+    // per unique symbol, no extra API calls for lots).
     let mut underlyings: std::collections::HashMap<String, f64> =
         std::collections::HashMap::new();
-    let symbols: BTreeSet<String> =
+    let mut symbols: BTreeSet<String> =
         requests.iter().map(|r| r.symbol.clone()).collect();
+    symbols.extend(lot_symbols.iter().cloned());
     for symbol in &symbols {
         match requester
             .query_stock_quotes(&[symbol.as_str()], &chrono::Local::now(), 1, "day")
@@ -102,16 +126,22 @@ async fn fetch_marks(requests: Vec<MarkRequest>) -> Vec<MarkResult> {
                     underlyings.insert(symbol.clone(), last.close);
                 }
             }
-            // Leave the symbol out — its positions go stale below with a
-            // precise reason.
+            // Leave the symbol out — its positions/lots go stale below with
+            // a precise reason.
             Err(e) => log::warn!("holdings: underlying quote for {symbol} failed: {e}"),
         }
     }
 
-    let mut results = Vec::with_capacity(requests.len());
+    let spots: std::collections::BTreeMap<String, f64> = underlyings
+        .iter()
+        .filter(|(symbol, _)| lot_symbols.contains(symbol))
+        .map(|(symbol, &close)| (symbol.clone(), close))
+        .collect();
+
+    let mut marks = Vec::with_capacity(requests.len());
     for r in requests {
         let Some(&spot) = underlyings.get(&r.symbol) else {
-            results.push(MarkResult {
+            marks.push(MarkResult {
                 id: r.id,
                 mid: Err(format!("underlying quote for {} unavailable", r.symbol)),
                 underlying: None,
@@ -130,16 +160,17 @@ async fn fetch_marks(requests: Vec<MarkRequest>) -> Vec<MarkResult> {
             &r.symbol,
             r.strike,
             &expiry_ny,
+            &r.side,
             &underlyings,
         )
         .await;
-        results.push(MarkResult {
+        marks.push(MarkResult {
             id: r.id,
             mid,
             underlying: Some(spot),
         });
     }
-    results
+    MarkBatch { marks, spots }
 }
 
 // The chain query is async and must run on the same runtime as the kline
@@ -149,16 +180,16 @@ async fn chain_mid(
     symbol: &str,
     strike: f64,
     expiry_ny: &chrono::DateTime<chrono_tz::Tz>,
+    side: &market_int_core::model::OptionChainSide,
     underlyings: &std::collections::HashMap<String, f64>,
 ) -> Result<Option<f64>, String> {
-    use market_int_core::model::OptionChainSide;
     let rows = requester
         .query_option_chain(
             &[(symbol, (strike, strike))],
             underlyings,
             expiry_ny,
             0,
-            &OptionChainSide::Put,
+            side,
         )
         .await
         .map_err(|e| format!("chain query failed: {e}"))?;
@@ -382,6 +413,57 @@ fn position_json(h: &Holding, today: chrono::NaiveDate) -> serde_json::Value {
     })
 }
 
+/// Calls render with the identical option shape (sibling arrays, same
+/// fields — R1).
+fn call_json(c: &market_int_core::holdings::CallHolding, today: chrono::NaiveDate) -> serde_json::Value {
+    let mark = c.mark.as_ref().map(|m| {
+        json!({
+            "mid": m.mid,
+            "as_of": m.as_of.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "underlying_price": m.underlying_price,
+        })
+    });
+    json!({
+        "id": c.id,
+        "symbol": c.symbol,
+        "strike": c.strike,
+        "expiry": c.expiry.to_string(),
+        "premium": c.premium,
+        "contracts": c.contracts,
+        "sold": c.sold.to_string(),
+        "mark": mark,
+        "view": c.view(today),
+    })
+}
+
+/// Covered-call contracts covering a lot's symbol — the covered count the
+/// lot view renders (R2: it derives from the calls array).
+fn covered_contracts(doc: &HoldingsDocument, symbol: &str) -> u32 {
+    doc.calls
+        .iter()
+        .filter(|c| c.symbol == symbol)
+        .map(|c| c.contracts)
+        .sum()
+}
+
+fn lot_json(l: &market_int_core::holdings::ShareLot, today: chrono::NaiveDate, covered: u32) -> serde_json::Value {
+    let mark = l.mark.as_ref().map(|m| {
+        json!({
+            "spot": m.spot,
+            "as_of": m.as_of.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        })
+    });
+    json!({
+        "id": l.id,
+        "symbol": l.symbol,
+        "shares": l.shares,
+        "basis_per_share": l.basis_per_share,
+        "acquired": l.acquired.to_string(),
+        "mark": mark,
+        "view": l.view(today, covered),
+    })
+}
+
 fn ledger_json(doc: &HoldingsDocument, today: chrono::NaiveDate) -> serde_json::Value {
     json!({
         "schema_version": doc.schema_version,
@@ -389,6 +471,16 @@ fn ledger_json(doc: &HoldingsDocument, today: chrono::NaiveDate) -> serde_json::
             .positions
             .iter()
             .map(|p| position_json(p, today))
+            .collect::<Vec<_>>(),
+        "calls": doc
+            .calls
+            .iter()
+            .map(|c| call_json(c, today))
+            .collect::<Vec<_>>(),
+        "lots": doc
+            .lots
+            .iter()
+            .map(|l| lot_json(l, today, covered_contracts(doc, &l.symbol)))
             .collect::<Vec<_>>(),
     })
 }
@@ -555,12 +647,13 @@ pub(crate) async fn holdings_delete(
     Json(json!({ "removed": id })).into_response()
 }
 
-/// `POST /api/holdings/refresh` — mark every open position to market.
-/// One position's fetch failure never fails the request: it keeps its
-/// previous mark and is reported stale. The ledger is RE-READ after the
-/// fetch and marks merged by id — a position added while Tiger was being
-/// queried keeps its (mark-less) state instead of being clobbered by the
-/// pre-fetch snapshot.
+/// `POST /api/holdings/refresh` — mark every open option (puts AND calls,
+/// each queried on its own chain side) and price every lot from the same
+/// pass's spot map (R5). One entry's fetch failure never fails the
+/// request: it keeps its previous mark and is reported stale. The ledger
+/// is RE-READ after the fetch and marks merged by id — a position added
+/// while Tiger was being queried keeps its (mark-less) state instead of
+/// being clobbered by the pre-fetch snapshot.
 pub(crate) async fn holdings_refresh(
     State(st): State<crate::api::AppState>,
     req: Request,
@@ -576,7 +669,8 @@ pub(crate) async fn holdings_refresh(
         }
     };
 
-    let requests: Vec<MarkRequest> = doc
+    use market_int_core::model::OptionChainSide;
+    let mut requests: Vec<MarkRequest> = doc
         .positions
         .iter()
         .map(|p| MarkRequest {
@@ -584,15 +678,29 @@ pub(crate) async fn holdings_refresh(
             symbol: p.symbol.clone(),
             strike: p.strike,
             expiry: p.expiry,
+            side: OptionChainSide::Put,
         })
         .collect();
+    requests.extend(doc.calls.iter().map(|c| MarkRequest {
+        id: c.id.clone(),
+        symbol: c.symbol.clone(),
+        strike: c.strike,
+        expiry: c.expiry,
+        side: OptionChainSide::Call,
+    }));
+    // Lot symbols travel for the spot map — deduped, several lots can
+    // share one symbol and Tiger is quoted once for all of them.
+    let lot_symbols: Vec<String> = {
+        let mut symbols: std::collections::BTreeSet<String> =
+            doc.lots.iter().map(|l| l.symbol.clone()).collect();
+        symbols.into_iter().collect()
+    };
     // Tiger is a blocking HTTP client — park the whole batch off the async
     // workers (read_document_off_thread precedent).
     let fetcher = st.mark_fetcher.clone();
-    let results =
-        tokio::task::spawn_blocking(move || fetcher(&requests)).await.expect(
-            "spawn_blocking mark fetch",
-        );
+    let batch = tokio::task::spawn_blocking(move || fetcher(&requests, &lot_symbols))
+        .await
+        .expect("spawn_blocking mark fetch");
 
     let now = (st.clock)();
     let mut ok: Vec<String> = Vec::new();
@@ -606,34 +714,82 @@ pub(crate) async fn holdings_refresh(
             )
         }
     };
-    for result in results {
-        let Some(position) = doc.positions.iter_mut().find(|p| p.id == result.id) else {
-            // Added/removed while the fetch was in flight — its request was
-            // for a snapshot position; nothing to apply.
-            log::warn!("holdings: refresh result for unknown id {} dropped", result.id);
-            continue;
-        };
-        match result.mid {
-            Ok(Some(mid)) if mid > 0.0 => {
-                position.mark = Some(market_int_core::holdings::Mark {
-                    mid,
-                    as_of: now,
-                    underlying_price: result.underlying,
-                });
-                ok.push(result.id);
+
+    // Option marks merge by id across BOTH arrays — puts and calls carry
+    // the same Mark.
+    {
+        trait OptionMarkSlot {
+            fn opt_id(&self) -> &str;
+            fn mark_slot(&mut self) -> &mut Option<market_int_core::holdings::Mark>;
+        }
+        impl OptionMarkSlot for Holding {
+            fn opt_id(&self) -> &str {
+                &self.id
             }
-            Ok(Some(_)) => stale.push((
-                result.id,
-                "non-positive mid rejected".to_string(),
-            )),
-            Ok(None) => stale.push((
-                result.id,
-                "no chain data for that contract".to_string(),
-            )),
-            Err(reason) => {
-                log::warn!("holdings: mark fetch failed for {}: {reason}", result.id);
-                stale.push((result.id, reason));
+            fn mark_slot(&mut self) -> &mut Option<market_int_core::holdings::Mark> {
+                &mut self.mark
             }
+        }
+        impl OptionMarkSlot for market_int_core::holdings::CallHolding {
+            fn opt_id(&self) -> &str {
+                &self.id
+            }
+            fn mark_slot(&mut self) -> &mut Option<market_int_core::holdings::Mark> {
+                &mut self.mark
+            }
+        }
+
+        let mut slots: Vec<&mut dyn OptionMarkSlot> = doc
+            .positions
+            .iter_mut()
+            .map(|h| h as &mut dyn OptionMarkSlot)
+            .chain(doc.calls.iter_mut().map(|c| c as &mut dyn OptionMarkSlot))
+            .collect();
+        for result in batch.marks {
+            let Some(slot) = slots.iter_mut().find(|s| s.opt_id() == result.id) else {
+                // Added/removed while the fetch was in flight — its request
+                // was for a snapshot entry; nothing to apply.
+                log::warn!("holdings: refresh result for unknown id {} dropped", result.id);
+                continue;
+            };
+            match result.mid {
+                Ok(Some(mid)) if mid > 0.0 => {
+                    *slot.mark_slot() = Some(market_int_core::holdings::Mark {
+                        mid,
+                        as_of: now,
+                        underlying_price: result.underlying,
+                    });
+                    ok.push(result.id);
+                }
+                Ok(Some(_)) => stale.push((
+                    result.id,
+                    "non-positive mid rejected".to_string(),
+                )),
+                Ok(None) => stale.push((
+                    result.id,
+                    "no chain data for that contract".to_string(),
+                )),
+                Err(reason) => {
+                    log::warn!("holdings: mark fetch failed for {}: {reason}", result.id);
+                    stale.push((result.id, reason));
+                }
+            }
+        }
+    }
+
+    // Lots price from the spot map — a lot whose symbol is missing from it
+    // (kline failed, say) is stale with a reason and keeps its previous
+    // SpotMark.
+    for lot in &mut doc.lots {
+        match batch.spots.get(&lot.symbol) {
+            Some(&spot) => {
+                lot.mark = Some(market_int_core::holdings::SpotMark { spot, as_of: now });
+                ok.push(lot.id.clone());
+            }
+            None => stale.push((
+                lot.id.clone(),
+                format!("no underlying quote for {}", lot.symbol),
+            )),
         }
     }
 
@@ -643,22 +799,20 @@ pub(crate) async fn holdings_refresh(
             &format!("ledger write failed: {err}"),
         );
     }
-    Json(json!({
-        "schema_version": doc.schema_version,
-        "positions": doc
-            .positions
-            .iter()
-            .map(|p| position_json(p, today_et(st.clock)))
-            .collect::<Vec<_>>(),
-        "refresh": {
-            "ok": ok,
-            "stale": stale
-                .into_iter()
-                .map(|(id, reason)| json!({"id": id, "reason": reason}))
-                .collect::<Vec<_>>(),
-        }
-    }))
-    .into_response()
+    let mut body = ledger_json(&doc, today_et(st.clock));
+    if let serde_json::Value::Object(map) = &mut body {
+        map.insert(
+            "refresh".to_string(),
+            json!({
+                "ok": ok,
+                "stale": stale
+                    .into_iter()
+                    .map(|(id, reason)| json!({"id": id, "reason": reason}))
+                    .collect::<Vec<_>>(),
+            }),
+        );
+    }
+    axum::Json(body).into_response()
 }
 
 #[cfg(test)]
@@ -923,15 +1077,16 @@ mod tests {
     }
 
     fn goog_fetcher(mid: f64) -> MarkFetcher {
-        Arc::new(move |requests: &[MarkRequest]| {
-            requests
+        Arc::new(move |requests: &[MarkRequest], _lots: &[String]| MarkBatch {
+            marks: requests
                 .iter()
                 .map(|r| MarkResult {
                     id: r.id.clone(),
                     mid: Ok(Some(mid)),
                     underlying: None,
                 })
-                .collect()
+                .collect(),
+            spots: Default::default(),
         })
     }
 
@@ -1220,17 +1375,21 @@ mod tests {
     async fn refresh_updates_marks() {
         let dir = tempfile::tempdir().unwrap();
         seed_two(dir.path());
-        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest]| {
-            reqs.iter()
-                .map(|r| {
-                    let (mid, spot) = if r.symbol == "TSLA" { (2.2, 401.0) } else { (2.9, 244.0) };
-                    MarkResult {
-                        id: r.id.clone(),
-                        mid: Ok(Some(mid)),
-                        underlying: Some(spot),
-                    }
-                })
-                .collect()
+        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], _lots: &[String]| {
+            MarkBatch {
+                marks: reqs
+                    .iter()
+                    .map(|r| {
+                        let (mid, spot) = if r.symbol == "TSLA" { (2.2, 401.0) } else { (2.9, 244.0) };
+                        MarkResult {
+                            id: r.id.clone(),
+                            mid: Ok(Some(mid)),
+                            underlying: Some(spot),
+                        }
+                    })
+                    .collect(),
+                spots: Default::default(),
+            }
         });
         let app = crate::api::build_router(test_state(dir.path(), fetcher));
         let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
@@ -1261,18 +1420,22 @@ mod tests {
     async fn refresh_partial_failure_is_stale_not_error() {
         let dir = tempfile::tempdir().unwrap();
         seed_two(dir.path());
-        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest]| {
-            reqs.iter()
-                .map(|r| MarkResult {
-                    id: r.id.clone(),
-                    mid: if r.symbol == "TSLA" {
-                        Err("chain query failed: upstream 500".to_string())
-                    } else {
-                        Ok(Some(2.9))
-                    },
-                    underlying: if r.symbol == "TSLA" { None } else { Some(244.0) },
-                })
-                .collect()
+        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], _lots: &[String]| {
+            MarkBatch {
+                marks: reqs
+                    .iter()
+                    .map(|r| MarkResult {
+                        id: r.id.clone(),
+                        mid: if r.symbol == "TSLA" {
+                            Err("chain query failed: upstream 500".to_string())
+                        } else {
+                            Ok(Some(2.9))
+                        },
+                        underlying: if r.symbol == "TSLA" { None } else { Some(244.0) },
+                    })
+                    .collect(),
+                spots: Default::default(),
+            }
         });
         let app = crate::api::build_router(test_state(dir.path(), fetcher));
         let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
@@ -1305,18 +1468,22 @@ mod tests {
     async fn refresh_missing_chain_data_is_stale() {
         let dir = tempfile::tempdir().unwrap();
         seed_two(dir.path());
-        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest]| {
-            reqs.iter()
-                .map(|r| MarkResult {
-                    id: r.id.clone(),
-                    mid: if r.symbol == "TSLA" {
-                        Ok(None)
-                    } else {
-                        Ok(Some(0.0)) // garbage quote — rejected
-                    },
-                    underlying: None,
-                })
-                .collect()
+        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], _lots: &[String]| {
+            MarkBatch {
+                marks: reqs
+                    .iter()
+                    .map(|r| MarkResult {
+                        id: r.id.clone(),
+                        mid: if r.symbol == "TSLA" {
+                            Ok(None)
+                        } else {
+                            Ok(Some(0.0)) // garbage quote — rejected
+                        },
+                        underlying: None,
+                    })
+                    .collect(),
+                spots: Default::default(),
+            }
         });
         let app = crate::api::build_router(test_state(dir.path(), fetcher));
         let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
@@ -1338,8 +1505,17 @@ mod tests {
     #[tokio::test]
     async fn feature_acceptance_wheel_lifecycle() {
         let dir = tempfile::tempdir().unwrap();
-        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest]| {
-            reqs.iter()
+        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], lots: &[String]| {
+            // Phase 1 (no lots yet): the put refresh — GOOG at 344.20.
+            // Phase 2 (the lot exists): the call refresh — GOOG at 370.00
+            // rides the spots map the lot prices from.
+            let spots: std::collections::BTreeMap<String, f64> = if lots.is_empty() {
+                Default::default()
+            } else {
+                [("GOOG".to_string(), 370.00)].into_iter().collect()
+            };
+            let marks = reqs
+                .iter()
                 .map(|r| {
                     let (mid, spot) = if (r.strike - 360.0).abs() < f64::EPSILON {
                         (0.30, 370.00)
@@ -1352,7 +1528,8 @@ mod tests {
                         underlying: Some(spot),
                     }
                 })
-                .collect()
+                .collect();
+            MarkBatch { marks, spots }
         });
 
         // Fresh ledger: nothing held anywhere, cash never set.
@@ -1474,8 +1651,8 @@ mod tests {
         let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
         assert_eq!(status, StatusCode::OK, "refresh 2: {v}");
         assert_eq!(
-            v["refresh"]["ok"].as_array().unwrap().len(), 1,
-            "only the call is an option request"
+            v["refresh"]["ok"].as_array().unwrap().len(), 2,
+            "the call prices from its chain, the lot from the spot map"
         );
         let call_view = &v["calls"][0]["view"];
         let vs_strike = call_view["spot_pct_vs_strike"].as_f64().unwrap();
@@ -1524,5 +1701,198 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(files, vec!["test-uid.json".to_string()], "one document per uid");
+    }
+
+    /// R5: the handler prepares ONE fetch for all three kinds — option
+    /// requests carry their side, lot symbols ride along for the spot map,
+    /// and lot symbols never become chain-query requests.
+    #[tokio::test]
+    async fn refresh_prepares_side_carrying_requests_and_lot_symbols() {
+        let dir = tempfile::tempdir().unwrap();
+        write_ledger(
+            &dir.path().join("holdings"),
+            "test-uid",
+            &HoldingsDocument {
+                schema_version: LEDGER_SCHEMA_VERSION,
+                positions: vec![market_int_core::holdings::Holding {
+                    id: "p-goog".to_string(),
+                    symbol: "GOOG".to_string(),
+                    strike: 350.0,
+                    expiry: NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+                    premium: 1.0,
+                    contracts: 1,
+                    sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                    mark: None,
+                }],
+                calls: vec![market_int_core::holdings::CallHolding {
+                    id: "c-aapl".to_string(),
+                    symbol: "AAPL".to_string(),
+                    strike: 240.0,
+                    expiry: NaiveDate::from_ymd_opt(2026, 9, 18).unwrap(),
+                    premium: 2.0,
+                    contracts: 1,
+                    sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                    mark: None,
+                }],
+                lots: vec![market_int_core::holdings::ShareLot {
+                    id: "l-lofa".to_string(),
+                    symbol: "LOFA".to_string(),
+                    shares: 100,
+                    basis_per_share: 20.0,
+                    acquired: NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+                    mark: None,
+                }],
+                cash: None,
+            },
+        )
+        .unwrap();
+
+        let seen: Arc<std::sync::Mutex<Option<(Vec<String>, Vec<String>)>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let fetcher: MarkFetcher = {
+            let seen = seen.clone();
+            Arc::new(move |reqs: &[MarkRequest], lots: &[String]| {
+                *seen.lock().unwrap() = Some((
+                    reqs.iter()
+                        .map(|r| format!("{}:{:?}", r.symbol, r.side))
+                        .collect(),
+                    lots.to_vec(),
+                ));
+                MarkBatch {
+                    marks: Vec::new(),
+                    spots: Default::default(),
+                }
+            })
+        };
+        let app = crate::api::build_router(test_state(dir.path(), fetcher));
+        let (status, _) = call(app, "POST", "/api/holdings/refresh", None).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (requests, lots) = seen.lock().unwrap().take().expect("fetcher called");
+        assert!(requests.contains(&"GOOG:Put".to_string()), "{requests:?}");
+        assert!(requests.contains(&"AAPL:Call".to_string()), "{requests:?}");
+        assert_eq!(
+            requests.len(), 2,
+            "lot symbols never become chain queries: {requests:?}"
+        );
+        assert_eq!(lots, vec!["LOFA".to_string()]);
+    }
+
+    /// R5: merging a MarkBatch — option marks land by id (put AND call),
+    /// lots price from `spots` as SpotMarks stamped now, and a lot whose
+    /// symbol is absent from `spots` is stale, keeping its previous
+    /// SpotMark.
+    #[tokio::test]
+    async fn refresh_merges_batch_marks_and_spots() {
+        let dir = tempfile::tempdir().unwrap();
+        let frozen = frozen_today();
+        write_ledger(
+            &dir.path().join("holdings"),
+            "test-uid",
+            &HoldingsDocument {
+                schema_version: LEDGER_SCHEMA_VERSION,
+                positions: vec![market_int_core::holdings::Holding {
+                    id: "p1".to_string(),
+                    symbol: "GOOG".to_string(),
+                    strike: 350.0,
+                    expiry: NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+                    premium: 1.0,
+                    contracts: 1,
+                    sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                    mark: Some(market_int_core::holdings::Mark {
+                        mid: 0.9,
+                        as_of: frozen - chrono::Duration::hours(2),
+                        underlying_price: None,
+                    }),
+                }],
+                calls: vec![market_int_core::holdings::CallHolding {
+                    id: "c1".to_string(),
+                    symbol: "GOOG".to_string(),
+                    strike: 360.0,
+                    expiry: NaiveDate::from_ymd_opt(2026, 9, 18).unwrap(),
+                    premium: 1.2,
+                    contracts: 2,
+                    sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                    mark: None,
+                }],
+                lots: vec![
+                    market_int_core::holdings::ShareLot {
+                        id: "l-goog".to_string(),
+                        symbol: "GOOG".to_string(),
+                        shares: 200,
+                        basis_per_share: 349.0,
+                        acquired: NaiveDate::from_ymd_opt(2026, 9, 8).unwrap(),
+                        mark: Some(market_int_core::holdings::SpotMark {
+                            spot: 344.20,
+                            as_of: frozen - chrono::Duration::hours(2),
+                        }),
+                    },
+                    market_int_core::holdings::ShareLot {
+                        id: "l-nope".to_string(),
+                        symbol: "NOPE".to_string(),
+                        shares: 100,
+                        basis_per_share: 100.0,
+                        acquired: NaiveDate::from_ymd_opt(2026, 9, 8).unwrap(),
+                        mark: Some(market_int_core::holdings::SpotMark {
+                            spot: 100.0,
+                            as_of: frozen - chrono::Duration::hours(2),
+                        }),
+                    },
+                ],
+                cash: None,
+            },
+        )
+        .unwrap();
+
+        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], _lots: &[String]| {
+            MarkBatch {
+                marks: reqs
+                    .iter()
+                    .map(|r| MarkResult {
+                        id: r.id.clone(),
+                        mid: Ok(Some(if r.id == "p1" { 0.5 } else { 0.3 })),
+                        underlying: Some(370.0),
+                    })
+                    .collect(),
+                spots: [("GOOG".to_string(), 370.0)].into_iter().collect(),
+            }
+        });
+        let app = crate::api::build_router(test_state(dir.path(), fetcher));
+        let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+
+        // ok spans the kinds that priced: both options plus the GOOG lot;
+        // the NOPE lot is stale with a reason.
+        let ok = v["refresh"]["ok"].as_array().unwrap();
+        assert!(ok.contains(&json!("p1")) && ok.contains(&json!("c1")) && ok.contains(&json!("l-goog")), "{ok:?}");
+        let stale = v["refresh"]["stale"].as_array().unwrap();
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0]["id"], "l-nope");
+        assert!(stale[0]["reason"].as_str().unwrap().contains("NOPE"));
+
+        // Marks landed by id; SpotMark stamped at the frozen `now`.
+        let lots = v["lots"].as_array().unwrap();
+        let goog = lots.iter().find(|l| l["id"] == "l-goog").unwrap();
+        assert_eq!(goog["mark"]["spot"], 370.0);
+        assert_eq!(
+            goog["mark"]["as_of"],
+            frozen.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "SpotMark as_of is the refresh's now"
+        );
+        assert_eq!(goog["view"]["value"], 74000.0);
+        let nope = lots.iter().find(|l| l["id"] == "l-nope").unwrap();
+        assert_eq!(
+            nope["mark"]["spot"], 100.0,
+            "absent from spots — previous SpotMark kept"
+        );
+        let calls = v["calls"].as_array().unwrap();
+        assert_eq!(calls[0]["mark"]["mid"], 0.3, "call mark landed by id");
+
+        // Persisted, not just echoed.
+        let file = std::fs::read_to_string(dir.path().join("holdings/test-uid.json")).unwrap();
+        assert!(file.contains("\"spot\": 370.0"), "{file}");
+        assert!(file.contains("\"mid\": 0.5"), "{file}");
+        assert!(file.contains("\"mid\": 0.3"), "{file}");
+        assert!(file.contains("\"spot\": 100.0"), "{file}");
     }
 }
