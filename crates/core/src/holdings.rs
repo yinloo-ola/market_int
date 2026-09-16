@@ -42,6 +42,24 @@ pub struct Mark {
     pub underlying_price: Option<f64>,
 }
 
+/// One open short-covered-call position. Field-for-field the same shape as
+/// `Holding` (sibling arrays in one ledger document); the ITM danger
+/// direction (spot ABOVE strike for calls) is a rendering concern, never
+/// the math.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CallHolding {
+    pub id: String,
+    pub symbol: String,
+    pub strike: f64,
+    pub expiry: NaiveDate,
+    pub premium: f64,
+    pub contracts: u32,
+    pub sold: NaiveDate,
+    /// Latest Tiger mid mark; `None` until the first refresh succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<Mark>,
+}
+
 /// The close decision for one holding, as rendered on the card.
 /// `Option` fields are `None` exactly when no mark exists yet.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -88,82 +106,152 @@ fn is_weekend(d: NaiveDate) -> bool {
 
 impl Holding {
     pub fn validate(&self) -> Result<(), String> {
-        if self.symbol.trim().is_empty() {
-            return Err("symbol is required".to_string());
-        }
-        if !(self.strike.is_finite() && self.strike > 0.0) {
-            return Err("strike must be > 0".to_string());
-        }
-        if !(self.premium.is_finite() && self.premium > 0.0) {
-            return Err("premium must be > 0".to_string());
-        }
-        if self.contracts == 0 {
-            return Err("contracts must be at least 1".to_string());
-        }
-        if self.expiry <= self.sold {
-            return Err("expiry must be after the sell date".to_string());
-        }
-        // Span bound: no real put lives past ~2 years (LEAPS). Also a CPU
-        // guard — every view() walks the sold→expiry span per request.
-        if (self.expiry - self.sold).num_days() > MAX_HOLDING_SPAN_DAYS {
-            return Err(format!(
-                "expiry is more than {MAX_HOLDING_SPAN_DAYS} days out"
-            ));
-        }
-        Ok(())
+        validate_option_leg(
+            &self.symbol,
+            self.strike,
+            self.premium,
+            self.contracts,
+            self.sold,
+            self.expiry,
+        )
     }
 
     /// The close-decision view as of `today` (ET calendar date).
     pub fn view(&self, today: NaiveDate) -> HoldingView {
-        let days_total = working_days_after(self.sold, self.expiry);
-        let anchor = today.min(self.expiry);
-        let days_elapsed = working_days_after(self.sold, anchor).min(days_total);
-        // Day 0 earns a full day's target.
-        let target_pct = if days_total > 0 {
-            days_elapsed.max(1) as f64 / days_total as f64
-        } else {
-            0.0
-        };
+        pace_view(
+            self.strike,
+            self.premium,
+            self.contracts,
+            self.sold,
+            self.expiry,
+            self.mark.as_ref(),
+            today,
+        )
+    }
+}
 
-        let Some(mark) = &self.mark else {
-            return HoldingView {
-                pl_dollars: None,
-                pl_pct: None,
-                pace_per_day_dollars: None,
-                pace_per_day_pct: None,
-                days_elapsed,
-                days_total,
-                target_pct,
-                pace_met: false,
-                spot_pct_vs_strike: None,
-            };
-        };
-        let spot_pct_vs_strike = mark
-            .underlying_price
-            .map(|spot| (spot - self.strike) / self.strike);
+impl CallHolding {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_option_leg(
+            &self.symbol,
+            self.strike,
+            self.premium,
+            self.contracts,
+            self.sold,
+            self.expiry,
+        )
+    }
 
-        let pl_per_share = self.premium - mark.mid;
-        let pl_dollars = pl_per_share * 100.0 * self.contracts as f64;
-        let pl_pct = pl_per_share / self.premium;
-        let (pace_per_day_dollars, pace_per_day_pct) = if days_elapsed > 0 {
-            (
-                Some(pl_dollars / days_elapsed as f64),
-                Some(pl_pct / days_elapsed as f64),
-            )
-        } else {
-            (None, None)
-        };
-        HoldingView {
-            pl_dollars: Some(pl_dollars),
-            pl_pct: Some(pl_pct),
-            pace_per_day_dollars,
-            pace_per_day_pct,
+    /// The close-decision view as of `today` (ET calendar date).
+    pub fn view(&self, today: NaiveDate) -> HoldingView {
+        pace_view(
+            self.strike,
+            self.premium,
+            self.contracts,
+            self.sold,
+            self.expiry,
+            self.mark.as_ref(),
+            today,
+        )
+    }
+}
+
+/// The contract rules both option kinds share — identical fields, identical
+/// bounds (R1: `CallHolding::validate` applies the identical rules).
+fn validate_option_leg(
+    symbol: &str,
+    strike: f64,
+    premium: f64,
+    contracts: u32,
+    sold: NaiveDate,
+    expiry: NaiveDate,
+) -> Result<(), String> {
+    if symbol.trim().is_empty() {
+        return Err("symbol is required".to_string());
+    }
+    if !(strike.is_finite() && strike > 0.0) {
+        return Err("strike must be > 0".to_string());
+    }
+    if !(premium.is_finite() && premium > 0.0) {
+        return Err("premium must be > 0".to_string());
+    }
+    if contracts == 0 {
+        return Err("contracts must be at least 1".to_string());
+    }
+    if expiry <= sold {
+        return Err("expiry must be after the sell date".to_string());
+    }
+    // Span bound: no real put lives past ~2 years (LEAPS). Also a CPU
+    // guard — every view() walks the sold→expiry span per request.
+    if (expiry - sold).num_days() > MAX_HOLDING_SPAN_DAYS {
+        return Err(format!(
+            "expiry is more than {MAX_HOLDING_SPAN_DAYS} days out"
+        ));
+    }
+    Ok(())
+}
+
+/// The pace computation exists once (R1): working days, the 1-day floor,
+/// per-day pace, `pace_met`. `Holding::view` and `CallHolding::view` both
+/// delegate; `spot_pct_vs_strike` keeps one formula for both — the danger
+/// direction (below strike for puts, above for calls) is rendering.
+fn pace_view(
+    strike: f64,
+    premium: f64,
+    contracts: u32,
+    sold: NaiveDate,
+    expiry: NaiveDate,
+    mark: Option<&Mark>,
+    today: NaiveDate,
+) -> HoldingView {
+    let days_total = working_days_after(sold, expiry);
+    let anchor = today.min(expiry);
+    let days_elapsed = working_days_after(sold, anchor).min(days_total);
+    // Day 0 earns a full day's target.
+    let target_pct = if days_total > 0 {
+        days_elapsed.max(1) as f64 / days_total as f64
+    } else {
+        0.0
+    };
+
+    let Some(mark) = mark else {
+        return HoldingView {
+            pl_dollars: None,
+            pl_pct: None,
+            pace_per_day_dollars: None,
+            pace_per_day_pct: None,
             days_elapsed,
             days_total,
             target_pct,
-            pace_met: pl_pct >= target_pct,
-            spot_pct_vs_strike,
-        }
+            pace_met: false,
+            spot_pct_vs_strike: None,
+        };
+    };
+    let spot_pct_vs_strike = mark
+        .underlying_price
+        .map(|spot| (spot - strike) / strike);
+
+    let pl_per_share = premium - mark.mid;
+    let pl_dollars = pl_per_share * 100.0 * contracts as f64;
+    let pl_pct = pl_per_share / premium;
+    let (pace_per_day_dollars, pace_per_day_pct) = if days_elapsed > 0 {
+        (
+            Some(pl_dollars / days_elapsed as f64),
+            Some(pl_pct / days_elapsed as f64),
+        )
+    } else {
+        (None, None)
+    };
+    HoldingView {
+        pl_dollars: Some(pl_dollars),
+        pl_pct: Some(pl_pct),
+        pace_per_day_dollars,
+        pace_per_day_pct,
+        days_elapsed,
+        days_total,
+        target_pct,
+        pace_met: pl_pct >= target_pct,
+        spot_pct_vs_strike,
     }
 }
 
@@ -339,5 +427,95 @@ mod tests {
         assert!(h.validate().is_err(), "span > 730 days rejected");
         h.expiry = NaiveDate::from_ymd_opt(2028, 8, 30).unwrap();
         h.validate().unwrap();
+    }
+
+    /// R1: the wheel's covered-call ledger type — same shape, same rules,
+    /// one shared pace implementation.
+    mod call_holding {
+        use super::*;
+
+        fn call_holding(sold: NaiveDate, expiry: NaiveDate, mark_mid: Option<f64>) -> CallHolding {
+            CallHolding {
+                id: "c1".to_string(),
+                symbol: "GOOG".to_string(),
+                strike: 350.0,
+                expiry,
+                premium: 1.0,
+                contracts: 1,
+                sold,
+                mark: mark_mid.map(|mid| Mark {
+                    mid,
+                    as_of: Utc::now(),
+                    underlying_price: None,
+                }),
+            }
+        }
+
+        fn dates() -> (NaiveDate, NaiveDate, NaiveDate) {
+            (
+                NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 9, 8).unwrap(),
+            )
+        }
+
+        /// Pinning assertion: one pace implementation, two callers — a
+        /// CallHolding and a Holding with identical field values produce
+        /// identical HoldingViews.
+        #[test]
+        fn call_view_equals_put_view_field_for_field() {
+            let (sold, expiry, today) = dates();
+            let mut put = holding(sold, expiry, Some(0.5));
+            let mut call_h = call_holding(sold, expiry, Some(0.5));
+            assert_eq!(put.view(today), call_h.view(today));
+
+            put.mark = None;
+            call_h.mark = None;
+            assert_eq!(put.view(today), call_h.view(today), "also mark-less");
+        }
+
+        /// Identical validate() rules: the same six rejections.
+        #[test]
+        fn validation_rejects_the_same_bad_fields() {
+            let (sold, expiry, _) = dates();
+            let mut call_h = call_holding(sold, expiry, None);
+            call_h.validate().unwrap();
+
+            call_h.strike = 0.0;
+            assert!(call_h.validate().is_err());
+            call_h.strike = 350.0;
+
+            call_h.premium = -1.0;
+            assert!(call_h.validate().is_err());
+            call_h.premium = 1.0;
+
+            call_h.contracts = 0;
+            assert!(call_h.validate().is_err());
+            call_h.contracts = 1;
+
+            call_h.expiry = call_h.sold;
+            assert!(call_h.validate().is_err(), "expiry must be after sell date");
+            call_h.expiry = NaiveDate::from_ymd_opt(2028, 9, 4).unwrap();
+            assert!(call_h.validate().is_err(), "span > 730 days rejected");
+            call_h.expiry = expiry;
+
+            call_h.symbol = "  ".to_string();
+            assert!(call_h.validate().is_err());
+        }
+
+        /// Without a mark: pace_met false and the P&L fields are None — but
+        /// days_elapsed/days_total/target_pct still compute.
+        #[test]
+        fn no_mark_never_flags_but_day_math_runs() {
+            let (sold, expiry, today) = dates();
+            let call_h = call_holding(sold, expiry, None);
+            let v = call_h.view(today);
+            assert!(!v.pace_met);
+            assert_eq!(v.pl_dollars, None);
+            assert_eq!(v.pl_pct, None);
+            assert_eq!(v.days_elapsed, 2);
+            assert_eq!(v.days_total, 5);
+            assert_eq!(v.target_pct, 0.4);
+        }
     }
 }
