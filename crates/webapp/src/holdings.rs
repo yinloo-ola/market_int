@@ -702,6 +702,15 @@ async fn add_lot(st: crate::api::AppState, uid: String, v: &serde_json::Value) -
         return error_response(StatusCode::BAD_REQUEST, &reason);
     }
 
+    // R8: `assigned_from` makes this an assignment — the SAME
+    // read-modify-write records the lot AND removes the referenced put.
+    // Unknown id → 404 before any write, ledger byte-unchanged. No
+    // external calls happen inside this window.
+    let assigned_from = v
+        .get("assigned_from")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+
     let mut doc = match read_ledger_off_thread(st.holdings_dir.clone(), uid.clone()).await {
         Ok(d) => d,
         Err(err) => {
@@ -711,6 +720,16 @@ async fn add_lot(st: crate::api::AppState, uid: String, v: &serde_json::Value) -
             )
         }
     };
+    if let Some(put_id) = &assigned_from {
+        let before = doc.positions.len();
+        doc.positions.retain(|p| p.id != *put_id);
+        if doc.positions.len() == before {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "no such position for assigned_from",
+            );
+        }
+    }
     if ledger_entry_count(&doc) >= MAX_POSITIONS_PER_LEDGER {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -2518,5 +2537,116 @@ mod tests {
         assert_eq!(nope["mark"]["spot"], 100.0, "previous SpotMark kept");
         let p1 = v["positions"][0].clone();
         assert_eq!(p1["mark"]["mid"], 0.9, "previous mark kept");
+    }
+
+    /// R8: assignment — the lot records and the put disappears in ONE
+    /// rewrite (the put is only gone when the lot is recorded).
+    #[tokio::test]
+    async fn assignment_records_lot_and_removes_put() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = HoldingsDocument::default();
+        doc.positions.push(market_int_core::holdings::Holding {
+            id: "p1".to_string(),
+            symbol: "GOOG".to_string(),
+            strike: 350.0,
+            expiry: NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+            premium: 1.0,
+            contracts: 2,
+            sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+            mark: Some(market_int_core::holdings::Mark {
+                mid: 0.5,
+                as_of: frozen_today(),
+                underlying_price: Some(344.2),
+            }),
+        });
+        write_ledger(&dir.path().join("holdings"), "test-uid", &doc).unwrap();
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "lot", "symbol": "GOOG", "shares": 200,
+                "basis_per_share": 349.0, "acquired": "2026-09-08",
+                "assigned_from": "p1"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{v}");
+        assert_eq!(v["lot"]["shares"], 200);
+
+        // One request later: the put is gone, the lot is present.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["positions"].as_array().unwrap().len(), 0, "put gone");
+        let lots = v["lots"].as_array().unwrap();
+        assert_eq!(lots.len(), 1);
+        assert_eq!(lots[0]["basis_per_share"], 349.0);
+
+        // The persisted document agrees — no orphan put.
+        let file =
+            std::fs::read_to_string(dir.path().join("holdings/test-uid.json")).unwrap();
+        assert!(!file.contains("\"p1\""), "orphan put survived: {file}");
+        assert!(file.contains("\"shares\": 200"), "{file}");
+    }
+
+    /// R8: `assigned_from` naming no existing put is a 404 with the ledger
+    /// byte-unchanged; the same body without it is a plain lot add.
+    #[tokio::test]
+    async fn assignment_unknown_put_is_404_without_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = HoldingsDocument::default();
+        doc.positions.push(market_int_core::holdings::Holding {
+            id: "p1".to_string(),
+            symbol: "GOOG".to_string(),
+            strike: 350.0,
+            expiry: NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+            premium: 1.0,
+            contracts: 2,
+            sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+            mark: None,
+        });
+        write_ledger(&dir.path().join("holdings"), "test-uid", &doc).unwrap();
+        let ledger_path = dir.path().join("holdings/test-uid.json");
+        let before = std::fs::read(&ledger_path).unwrap();
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "lot", "symbol": "GOOG", "shares": 200,
+                "basis_per_share": 349.0, "acquired": "2026-09-08",
+                "assigned_from": "h-nope"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+        assert_eq!(
+            std::fs::read(&ledger_path).unwrap(),
+            before,
+            "ledger byte-unchanged"
+        );
+
+        // Without assigned_from: plain add, put untouched.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "lot", "symbol": "GOOG", "shares": 200,
+                "basis_per_share": 349.0, "acquired": "2026-09-08"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{v}");
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(v["positions"].as_array().unwrap().len(), 1, "put untouched");
+        assert_eq!(v["lots"].as_array().unwrap().len(), 1);
     }
 }
