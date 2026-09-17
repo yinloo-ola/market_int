@@ -1,17 +1,44 @@
-/* Holdings panel — the currently-holding puts ledger (2026-09-11-holdings),
-   variant B ("urgency cards") distilled from the approved prototype.
-   The server owns every number: positions arrive with their mark and the
-   computed pace view (crates/core/src/holdings.rs); this component renders
-   them and drives the four /api/holdings routes via the api.js seam.
-   Only the outcome dialog's realized-P&L preview is computed here — it needs
-   the close price the user is typing, which the server has not seen. */
+/* Holdings panel — the full wheel ledger (2026-09-17-wheel-holdings),
+   variant C ("wheel rail") from the approved prototype. A sticky rail
+   (cash strip → PATCH, wheel stats, lot rows) beside one merged urgency
+   list of puts and calls, with every dialog anchored inline under the
+   position that opened it.
+   The server owns every number: entries arrive with their mark and the
+   computed view (crates/core/src/holdings.rs); lots carry value/P&L/
+   capacity/covered; the cash strip renders cash/reserved/free verbatim
+   from GET — and after an edit, from the PATCH response. The only
+   client-side computations are the form prefills the design pins
+   (assignment: shares = contracts×100, basis = strike − premium; sell
+   call: contracts = floor(shares/100)) and the close dialog's realized-
+   P&L preview, which needs the price the user is typing. */
 
-import { For, Show, createResource, createSignal } from "solid-js";
+import { For, Show, createSignal, onMount } from "solid-js";
 
-import { addHolding, deleteHolding, getHoldings, refreshHoldings } from "../api";
+import {
+  addHolding,
+  calledAway,
+  deleteHolding,
+  getHoldings,
+  patchCash,
+  refreshHoldings,
+} from "../api";
 
-const money = (v) => (v < 0 ? "-$" : "$") + Math.abs(v).toFixed(2);
+const money = (v) =>
+  (v < 0 ? "-$" : "$") +
+  Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
+const money2 = (v) => (v < 0 ? "-$" : "$") + Math.abs(v).toFixed(2);
 const pct = (v, dp = 0) => `${(v * 100).toFixed(dp)}%`;
+
+/* ET calendar date, as the production holdings math uses — never
+   toISOString for local dates (the GMT+8 bug caught in the prototype). */
+const todayET = () =>
+  new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+const plusDays = (iso, n) => {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d + n).toLocaleDateString("en-CA", {
+    timeZone: "America/New_York",
+  });
+};
 
 function ageText(rfc3339) {
   if (!rfc3339) return "";
@@ -19,152 +46,688 @@ function ageText(rfc3339) {
   const m = Math.floor(secs / 60);
   if (m < 1) return "just now";
   if (m < 60) return `${m} min ago`;
-  const h = Math.floor(m / 60);
-  return `about ${h} h ago`;
+  return `about ${Math.floor(m / 60)} h ago`;
 }
 
-function AddForm(props) {
-  // Local-date ISO (never toISOString: it shifts a day for UTC-positive
-  // offsets — the GMT+8 bug caught in the prototype).
-  const isoLocal = (d) =>
-    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
-      d.getDate()
-    ).padStart(2, "0")}`;
-  const today = () => isoLocal(new Date());
-  const in7 = () => isoLocal(new Date(Date.now() + 7 * 86_400_000));
-  const [open, setOpen] = createSignal(false);
+function MiniBar(props) {
+  const fill = () =>
+    props.v.pl_pct == null ? 0 : Math.max(0, Math.min(100, props.v.pl_pct * 100));
+  return (
+    <div class="holdings-bar">
+      <div class="holdings-bar-fill" style={{ width: `${fill()}%` }} />
+      <div
+        class="holdings-bar-mark"
+        style={{ left: `${Math.min(100, props.v.target_pct * 100)}%` }}
+      />
+    </div>
+  );
+}
+
+/* ── rail ──────────────────────────────────────────────────────── */
+
+function CashEditor(props) {
+  const [val, setVal] = createSignal(
+    props.cash == null ? "" : String(props.cash)
+  );
+  const valid = () => Number.isFinite(Number(val())) && Number(val()) >= 0;
+  return (
+    <span class="hp-cash-editor">
+      <input
+        inputmode="decimal"
+        placeholder="150000"
+        value={val()}
+        onInput={(e) => setVal(e.target.value)}
+      />
+      <button
+        type="button"
+        class="btn btn-primary"
+        disabled={!valid() || props.busy?.()}
+        onClick={() => props.onSave(Number(val()))}
+      >
+        save
+      </button>
+    </span>
+  );
+}
+
+function CashStrip(props) {
+  const [editing, setEditing] = createSignal(false);
+  const neverSet = () => props.cash == null;
+  return (
+    <div class="hp-rail-block">
+      <div class="hp-rail-label">free to sell puts</div>
+      <div class="hp-rail-big">
+        {props.free == null ? "—" : money(props.free)}
+      </div>
+      <div class="hp-rail-sub">
+        {props.cash == null ? "—" : money(props.cash)} cash −{" "}
+        {money(props.reserved)} reserved
+      </div>
+      <Show
+        when={!editing()}
+        fallback={
+          <CashEditor
+            cash={props.cash}
+            busy={props.busy}
+            onDone={() => setEditing(false)}
+            onSave={async (n) => {
+              const res = await props.onSaveCash(n);
+              if (res) setEditing(false);
+            }}
+          />
+        }
+      >
+        <button
+          type="button"
+          class="btn-ghost hp-cash-edit"
+          onClick={() => setEditing(true)}
+        >
+          {neverSet() ? "set cash" : "edit cash"}
+        </button>
+      </Show>
+    </div>
+  );
+}
+
+function LotRailRow(props) {
+  const l = props.lot;
+  const v = () => l.view;
+  return (
+    <div class="hp-slot">
+      <div class="hp-lot-row">
+        <div class="hp-lot-row-top">
+          <span>
+            {l.shares} sh {l.symbol}
+          </span>
+          <b>{v().spot == null ? "—" : money2(v().spot)}</b>
+        </div>
+        <div class="hp-lot-row-sub">
+          <span>
+            bought {money2(l.basis_per_share)} · {l.acquired}
+          </span>
+          <b class={(v().pl_dollars ?? 0) >= 0 ? "holdings-pos" : "holdings-neg"}>
+            <Show when={v().pl_dollars != null} fallback="—">
+              {`${money(v().pl_dollars)} (${(v().pl_pct ?? 0) >= 0 ? "+" : ""}${pct(v().pl_pct, 1)})`}
+            </Show>
+          </b>
+        </div>
+        <div class="hp-lot-row-meta">
+          <i>last {ageText(l.mark?.as_of) || "—"}</i>
+          <i>
+            covered {v().covered}/{v().capacity}
+          </i>
+        </div>
+      </div>
+      <Show when={props.dialogFor("sellCall", l.id)} keyed>
+        {(d) => <SellCallForm lot={d.lot} onDone={props.onDialogDone} onSell={props.onSellCall} />}
+      </Show>
+    </div>
+  );
+}
+
+/* ── list rows ─────────────────────────────────────────────────── */
+
+function OptionRow(props) {
+  const x = props.x; // { p, v }
+  const itm = () => x.v.spot_pct_vs_strike != null && x.v.spot_pct_vs_strike > 0;
+  const spotDanger = () =>
+    x.p.kind === "call" ? x.v.spot_pct_vs_strike > 0 : x.v.spot_pct_vs_strike < 0;
+  return (
+    <div class="hp-slot">
+      <div class="hp-list-row" classList={{ "hp-row-met": x.v.pace_met }}>
+        <span class="hp-list-pos">
+          <span class="hp-kind" data-kind={x.p.kind}>
+            {x.p.kind.toUpperCase()}
+          </span>
+          <b>
+            {x.p.symbol} {x.p.strike}
+            {x.p.kind === "put" ? "P" : "C"} ×{x.p.contracts}
+          </b>
+          <i>
+            exp {x.p.expiry} · {x.v.days_elapsed}/{x.v.days_total} wd
+          </i>
+        </span>
+        <span class={x.v.pl_pct >= 0 ? "holdings-pos" : "holdings-neg"}>
+          {x.v.pl_pct == null ? "—" : `${x.v.pl_pct >= 0 ? "+" : ""}${pct(x.v.pl_pct, 1)}`}
+        </span>
+        <span class="hp-list-pace">
+          <MiniBar v={x.v} />
+          <i>target {pct(x.v.target_pct)}</i>
+        </span>
+        <span class="hp-list-status">
+          <Show when={x.v.pace_met} fallback={<span class="chip normal">holding</span>}>
+            <span class="chip high">buy back?</span>
+          </Show>
+          <Show when={x.p.kind === "call" && itm()}>
+            <span class="chip high">ITM — called away?</span>
+          </Show>
+        </span>
+        <button
+          type="button"
+          class="btn-ghost holdings-close-btn"
+          onClick={() => props.onClose(x)}
+        >
+          close…
+        </button>
+        {/* Full stats line — sold at / now mid + age / spot vs strike
+            (danger-colored in the kind's ITM direction) / close captures. */}
+        <div class="holdings-card-stats hp-list-stats">
+          <div>
+            <span>sold at</span>
+            <b>{money2(x.p.premium)}</b>
+          </div>
+          <div>
+            <span>now (mid)</span>
+            <b>{x.p.mark == null ? "—" : x.p.mark.mid.toFixed(2)}</b>
+            <i>{x.p.mark == null ? "unpriced" : ageText(x.p.mark.as_of)}</i>
+          </div>
+          <div>
+            <span>spot</span>
+            <Show when={x.p.mark?.underlying_price != null} fallback={<b>—</b>}>
+              <b>{x.p.mark.underlying_price.toFixed(2)}</b>
+              <i class={spotDanger() && x.v.spot_pct_vs_strike != null ? "holdings-neg" : "holdings-pos"}>
+                {x.v.spot_pct_vs_strike == null
+                  ? ""
+                  : `${x.v.spot_pct_vs_strike >= 0 ? "+" : ""}${pct(x.v.spot_pct_vs_strike, 1)} vs strike`}
+              </i>
+            </Show>
+          </div>
+          <div>
+            <span>close captures</span>
+            <b class={(x.v.pl_dollars ?? 0) >= 0 ? "holdings-pos" : "holdings-neg"}>
+              {x.v.pl_dollars == null ? "—" : money2(x.v.pl_dollars)}
+            </b>
+          </div>
+        </div>
+      </div>
+      <Show when={props.dialogFor(x.p.kind, x.p.id)} keyed>
+        {(d) => <ClosePanel d={d} {...props.dialogActions} />}
+      </Show>
+    </div>
+  );
+}
+
+/* ── forms ─────────────────────────────────────────────────────── */
+
+function AddPutForm(props) {
   const [f, setF] = createSignal({
     symbol: "",
     strike: "",
     premium: "",
     contracts: "1",
-    sold: today(),
-    expiry: in7(),
+    sold: todayET(),
+    expiry: plusDays(todayET(), 7),
   });
   const set = (k) => (e) => setF({ ...f(), [k]: e.target.value });
-  const submit = async (e) => {
-    e.preventDefault();
-    if (props.busy?.()) return;
-    if (!f().symbol) return;
-    if (![f().strike, f().premium, f().contracts].every((x) => Number(x) > 0)) {
-      return;
-    }
-    await props.onAdd({
-      symbol: f().symbol,
-      strike: Number(f().strike),
-      premium: Number(f().premium),
-      contracts: Number(f().contracts),
-      sold: f().sold,
-      expiry: f().expiry,
-    });
-    setF({ ...f(), symbol: "", strike: "", premium: "" });
-    setOpen(false);
-  };
+  const valid = () =>
+    f().symbol.trim() &&
+    [f().strike, f().premium, f().contracts].every((x) => Number(x) > 0) &&
+    f().expiry > f().sold &&
+    f().sold <= todayET();
   return (
-    <Show
-      when={open()}
-      fallback={
-        <button type="button" class="btn" disabled={props.busy?.()} onClick={() => setOpen(true)}>
-          + New position
-        </button>
-      }
+    <form
+      class="holdings-add"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!valid() || props.busy?.()) return;
+        props.onAdd({
+          symbol: f().symbol.trim().toUpperCase(),
+          strike: Number(f().strike),
+          premium: Number(f().premium),
+          contracts: Math.trunc(Number(f().contracts)),
+          sold: f().sold,
+          expiry: f().expiry,
+        });
+      }}
     >
-      <form class="holdings-add" onSubmit={submit}>
-        <label>
-          symbol <input placeholder="SYMBOL" value={f().symbol} onInput={set("symbol")} />
-        </label>
+      <label>
+        symbol <input placeholder="SYMBOL" value={f().symbol} onInput={set("symbol")} />
+      </label>
+      <label>
+        strike
+        <input inputmode="decimal" placeholder="e.g. 350.00" value={f().strike} onInput={set("strike")} />
+      </label>
+      <label>
+        premium
+        <input inputmode="decimal" placeholder="e.g. 1.00" value={f().premium} onInput={set("premium")} />
+      </label>
+      <label>
+        contracts <input inputmode="numeric" value={f().contracts} onInput={set("contracts")} />
+      </label>
+      <label>
+        sold <input type="date" value={f().sold} onInput={set("sold")} />
+      </label>
+      <label>
+        expiry <input type="date" value={f().expiry} onInput={set("expiry")} />
+      </label>
+      <button type="submit" class="btn btn-primary" disabled={!valid() || props.busy?.()}>
+        Sell put
+      </button>
+      <button type="button" class="btn" onClick={props.onDone}>
+        Cancel
+      </button>
+    </form>
+  );
+}
+
+/* Free-field covered call — coverage is display-only (no enforcement). */
+function AddCallForm(props) {
+  const [f, setF] = createSignal({
+    symbol: "",
+    strike: "",
+    premium: "",
+    contracts: "1",
+    sold: todayET(),
+    expiry: plusDays(todayET(), 7),
+  });
+  const set = (k) => (e) => setF({ ...f(), [k]: e.target.value });
+  const valid = () =>
+    f().symbol.trim() &&
+    [f().strike, f().premium, f().contracts].every((x) => Number(x) > 0) &&
+    f().expiry > f().sold &&
+    f().sold <= todayET();
+  return (
+    <form
+      class="holdings-add"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!valid() || props.busy?.()) return;
+        props.onAdd({
+          kind: "call",
+          symbol: f().symbol.trim().toUpperCase(),
+          strike: Number(f().strike),
+          premium: Number(f().premium),
+          contracts: Math.trunc(Number(f().contracts)),
+          sold: f().sold,
+          expiry: f().expiry,
+        });
+      }}
+    >
+      <label>
+        symbol <input placeholder="SYMBOL" value={f().symbol} onInput={set("symbol")} />
+      </label>
+      <label>
+        strike
+        <input inputmode="decimal" placeholder="e.g. 355.00" value={f().strike} onInput={set("strike")} />
+      </label>
+      <label>
+        premium
+        <input inputmode="decimal" placeholder="e.g. 1.80" value={f().premium} onInput={set("premium")} />
+      </label>
+      <label>
+        contracts <input inputmode="numeric" value={f().contracts} onInput={set("contracts")} />
+      </label>
+      <label>
+        sold <input type="date" value={f().sold} onInput={set("sold")} />
+      </label>
+      <label>
+        expiry <input type="date" value={f().expiry} onInput={set("expiry")} />
+      </label>
+      <button type="submit" class="btn btn-primary" disabled={!valid() || props.busy?.()}>
+        Sell call
+      </button>
+      <button type="button" class="btn" onClick={props.onDone}>
+        Cancel
+      </button>
+      <div class="hp-dialog-note">
+        coverage is shown per lot — recorded even if it exceeds held shares
+      </div>
+    </form>
+  );
+}
+
+function AddLotForm(props) {
+  const [f, setF] = createSignal({
+    symbol: "",
+    shares: "",
+    basis_per_share: "",
+    acquired: todayET(),
+  });
+  const set = (k) => (e) => setF({ ...f(), [k]: e.target.value });
+  const valid = () =>
+    f().symbol.trim() && Number(f().shares) > 0 && Number(f().basis_per_share) > 0;
+  return (
+    <form
+      class="holdings-add"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!valid() || props.busy?.()) return;
+        props.onAdd({
+          kind: "lot",
+          symbol: f().symbol.trim().toUpperCase(),
+          shares: Math.trunc(Number(f().shares)),
+          basis_per_share: Number(f().basis_per_share),
+          acquired: f().acquired,
+        });
+      }}
+    >
+      <label>
+        symbol <input placeholder="SYMBOL" value={f().symbol} onInput={set("symbol")} />
+      </label>
+      <label>
+        shares <input inputmode="numeric" placeholder="e.g. 100" value={f().shares} onInput={set("shares")} />
+      </label>
+      <label>
+        basis / share
+        <input inputmode="decimal" placeholder="e.g. 349.00" value={f().basis_per_share} onInput={set("basis_per_share")} />
+      </label>
+      <label>
+        acquired <input type="date" value={f().acquired} onInput={set("acquired")} />
+      </label>
+      <button type="submit" class="btn btn-primary" disabled={!valid() || props.busy?.()}>
+        Record lot
+      </button>
+      <button type="button" class="btn" onClick={props.onDone}>
+        Cancel
+      </button>
+    </form>
+  );
+}
+
+/* The lot-anchored sell: contracts prefilled floor(shares/100), editable
+   down (the server's capacity is the bound; coverage is display-only). */
+function SellCallForm(props) {
+  const lot = props.lot;
+  const capacity = () => Math.floor(lot.shares / 100);
+  const [f, setF] = createSignal({
+    strike: "",
+    premium: "",
+    contracts: String(capacity()),
+    expiry: plusDays(todayET(), 7),
+  });
+  const set = (k) => (e) => setF({ ...f(), [k]: e.target.value });
+  const valid = () =>
+    Number(f().strike) > 0 &&
+    Number(f().premium) > 0 &&
+    Number(f().contracts) >= 1 &&
+    Number(f().contracts) <= capacity() &&
+    f().expiry > todayET();
+  return (
+    <div class="holdings-outcome">
+      <div class="holdings-outcome-head">
+        Sell covered call · {lot.shares} sh {lot.symbol}
+      </div>
+      <form
+        class="holdings-add"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!valid() || props.busy?.()) return;
+          props.onSell(lot, {
+            kind: "call",
+            symbol: lot.symbol,
+            strike: Number(f().strike),
+            premium: Number(f().premium),
+            contracts: Math.trunc(Number(f().contracts)),
+            sold: todayET(),
+            expiry: f().expiry,
+          });
+        }}
+      >
         <label>
           strike
-          {/* text + inputmode, not type=number: number inputs sanitize the
-              in-progress "." on every keystroke, so decimals can't be typed. */}
-          <input inputmode="decimal" placeholder="e.g. 350.00" value={f().strike} onInput={set("strike")} />
+          <input inputmode="decimal" placeholder="e.g. 360.00" value={f().strike} onInput={set("strike")} />
         </label>
         <label>
           premium
-          <input inputmode="decimal" placeholder="e.g. 1.00" value={f().premium} onInput={set("premium")} />
+          <input inputmode="decimal" placeholder="e.g. 1.20" value={f().premium} onInput={set("premium")} />
         </label>
         <label>
           contracts <input inputmode="numeric" value={f().contracts} onInput={set("contracts")} />
         </label>
         <label>
-          sold <input type="date" value={f().sold} onInput={set("sold")} />
-        </label>
-        <label>
           expiry <input type="date" value={f().expiry} onInput={set("expiry")} />
         </label>
-        <button type="submit" class="btn btn-primary" disabled={props.busy?.()}>Add</button>
-        <button type="button" class="btn" onClick={() => setOpen(false)}>Cancel</button>
+        <button type="submit" class="btn btn-primary" disabled={!valid() || props.busy?.()}>
+          Sell call
+        </button>
+        <button type="button" class="btn" onClick={props.onDone}>
+          Cancel
+        </button>
       </form>
-    </Show>
+    </div>
   );
 }
 
-function OutcomeDialog(props) {
+/* ── close panels (inline, under the position that opened them) ── */
+
+function PutCloseDialog(props) {
+  const pos = props.d.pos;
   const [outcome, setOutcome] = createSignal("bought-back");
-  const [price, setPrice] = createSignal(props.position.mark?.mid?.toFixed(2) ?? "");
+  const [price, setPrice] = createSignal(pos.mark?.mid?.toFixed(2) ?? "");
   // Realized P&L preview — the one client-side computation (see file header).
   const realized = () => {
-    const p = props.position;
+    if (outcome() === "expired") return pos.premium * 100 * pos.contracts;
     const close = Number(price());
-    if (outcome() === "expired") return p.premium * 100 * p.contracts;
     if (!Number.isFinite(close)) return null;
-    if (outcome() === "assigned") {
-      return (p.strike - close + p.premium) * 100 * p.contracts;
-    }
-    return (p.premium - close) * 100 * p.contracts;
+    if (outcome() === "assigned")
+      return (pos.strike - close + pos.premium) * 100 * pos.contracts;
+    return (pos.premium - close) * 100 * pos.contracts;
   };
   return (
     <div class="holdings-outcome">
       <div class="holdings-outcome-head">
-        Close {props.position.symbol} {props.position.strike} ×{props.position.contracts}
+        Close {pos.symbol} {pos.strike}P ×{pos.contracts}
       </div>
       <div class="holdings-outcome-row">
         <label>
-          <input type="radio" checked={outcome() === "bought-back"} onChange={() => setOutcome("bought-back")} />
+          <input
+            type="radio"
+            checked={outcome() === "bought-back"}
+            onChange={() => setOutcome("bought-back")}
+          />
           bought back
         </label>
         <label>
-          <input type="radio" checked={outcome() === "expired"} onChange={() => setOutcome("expired")} />
+          <input
+            type="radio"
+            checked={outcome() === "expired"}
+            onChange={() => setOutcome("expired")}
+          />
           expired worthless
         </label>
         <label>
-          <input type="radio" checked={outcome() === "assigned"} onChange={() => setOutcome("assigned")} />
+          <input
+            type="radio"
+            checked={outcome() === "assigned"}
+            onChange={() => setOutcome("assigned")}
+          />
           assigned
         </label>
       </div>
       <Show when={outcome() !== "expired"}>
         <label class="holdings-outcome-price">
-          close price/share
+          {outcome() === "assigned" ? "share price at assignment" : "close price/share"}
           <input inputmode="decimal" value={price()} onInput={(e) => setPrice(e.target.value)} />
         </label>
       </Show>
       <div class="holdings-outcome-realized">
         realized:{" "}
         <Show when={realized() !== null} fallback="—">
-          <b class={realized() >= 0 ? "holdings-pos" : "holdings-neg"}>{money(realized())}</b>
+          <b class={realized() >= 0 ? "holdings-pos" : "holdings-neg"}>
+            {money2(realized())}
+          </b>
         </Show>
       </div>
       <div class="holdings-outcome-actions">
-        <button type="button" class="btn" onClick={props.onClose}>Cancel</button>
+        <button type="button" class="btn" onClick={props.onDone}>
+          Cancel
+        </button>
         <button
           type="button"
           class="btn btn-primary"
-          disabled={props.busy?.()}
-          onClick={() => props.onConfirm(outcome(), outcome() === "expired" ? null : Number(price()))}
+          disabled={props.busy?.() || (outcome() !== "expired" && !Number.isFinite(Number(price())))}
+          onClick={() =>
+            props.onConfirmPut(pos, outcome(), outcome() === "expired" ? null : Number(price()))
+          }
         >
           Confirm
         </button>
       </div>
+      <Show when={outcome() === "assigned"}>
+        <div class="hp-dialog-note">
+          confirming creates a share lot prefilled at basis = strike − premium
+        </div>
+      </Show>
     </div>
   );
 }
 
+/* Stage 2 of the assigned flow: the prefilled lot form. Cancelling here
+   (or anywhere before it) sends no request — the put stays. */
+function AssignedLotForm(props) {
+  const [f, setF] = createSignal({ ...props.d.prefill });
+  const set = (k) => (e) => setF({ ...f(), [k]: e.target.value });
+  const valid = () =>
+    f().symbol.trim() && Number(f().shares) > 0 && Number(f().basis_per_share) > 0;
+  return (
+    <div class="holdings-outcome">
+      <div class="holdings-outcome-head">Record assigned shares</div>
+      <form
+        class="holdings-add"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!valid() || props.busy?.()) return;
+          props.onAssign(
+            props.d.pos,
+            {
+              kind: "lot",
+              symbol: f().symbol.trim().toUpperCase(),
+              shares: Math.trunc(Number(f().shares)),
+              basis_per_share: Number(f().basis_per_share),
+              acquired: f().acquired,
+              assigned_from: props.d.pos.id,
+            },
+          );
+        }}
+      >
+        <label>
+          symbol <input value={f().symbol} onInput={set("symbol")} />
+        </label>
+        <label>
+          shares <input inputmode="numeric" value={f().shares} onInput={set("shares")} />
+        </label>
+        <label>
+          basis / share
+          <input inputmode="decimal" value={f().basis_per_share} onInput={set("basis_per_share")} />
+        </label>
+        <label>
+          acquired <input type="date" value={f().acquired} onInput={set("acquired")} />
+        </label>
+        <button type="submit" class="btn btn-primary" disabled={!valid() || props.busy?.()}>
+          Record lot
+        </button>
+        <button type="button" class="btn" onClick={props.onDone}>
+          Cancel
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function CallCloseDialog(props) {
+  const pos = props.d.pos;
+  const [outcome, setOutcome] = createSignal("bought-back");
+  const [price, setPrice] = createSignal(pos.mark?.mid?.toFixed(2) ?? "");
+  const realized = () => {
+    if (outcome() === "expired") return pos.premium * 100 * pos.contracts;
+    const close = Number(price());
+    if (!Number.isFinite(close)) return null;
+    if (outcome() === "called-away")
+      return (pos.strike - close + pos.premium) * 100 * pos.contracts;
+    return (pos.premium - close) * 100 * pos.contracts;
+  };
+  return (
+    <div class="holdings-outcome">
+      <div class="holdings-outcome-head">
+        Close {pos.symbol} {pos.strike}C ×{pos.contracts}
+      </div>
+      <div class="holdings-outcome-row">
+        <label>
+          <input
+            type="radio"
+            checked={outcome() === "bought-back"}
+            onChange={() => setOutcome("bought-back")}
+          />
+          bought back
+        </label>
+        <label>
+          <input
+            type="radio"
+            checked={outcome() === "expired"}
+            onChange={() => setOutcome("expired")}
+          />
+          expired worthless
+        </label>
+        <label>
+          <input
+            type="radio"
+            checked={outcome() === "called-away"}
+            onChange={() => setOutcome("called-away")}
+          />
+          called away
+        </label>
+      </div>
+      <Show when={outcome() !== "expired"}>
+        <label class="holdings-outcome-price">
+          {outcome() === "called-away" ? "share price at call" : "close price/share"}
+          <input inputmode="decimal" value={price()} onInput={(e) => setPrice(e.target.value)} />
+        </label>
+      </Show>
+      <div class="holdings-outcome-realized">
+        realized:{" "}
+        <Show when={realized() !== null} fallback="—">
+          <b class={realized() >= 0 ? "holdings-pos" : "holdings-neg"}>
+            {money2(realized())}
+          </b>
+        </Show>
+      </div>
+      <div class="holdings-outcome-actions">
+        <button type="button" class="btn" onClick={props.onDone}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="btn btn-primary"
+          disabled={props.busy?.() || (outcome() !== "expired" && !Number.isFinite(Number(price())))}
+          onClick={() =>
+            props.onConfirmCall(pos, outcome(), outcome() === "expired" ? null : Number(price()))
+          }
+        >
+          Confirm
+        </button>
+      </div>
+      <Show when={outcome() === "called-away"}>
+        <div class="hp-dialog-note">
+          confirming auto-reduces the {pos.symbol} lot by {pos.contracts * 100} sh
+        </div>
+      </Show>
+    </div>
+  );
+}
+
+function ClosePanel(props) {
+  return props.d.type === "put" ? (
+    props.d.stage === "lot" ? (
+      <AssignedLotForm d={props.d} busy={props.busy} onDone={props.onDone} onAssign={props.onAssign} />
+    ) : (
+      <PutCloseDialog d={props.d} busy={props.busy} onDone={props.onDone} onConfirmPut={props.onConfirmPut} />
+    )
+  ) : (
+    <CallCloseDialog d={props.d} busy={props.busy} onDone={props.onDone} onConfirmCall={props.onConfirmCall} />
+  );
+}
+
+/* ── the panel ─────────────────────────────────────────────────── */
+
 export default function HoldingsPanel() {
-  const [ledger, { refetch }] = createResource(getHoldings);
+  const [ledger, setLedger] = createSignal(null);
   const [notice, setNotice] = createSignal("");
-  const [closing, setClosing] = createSignal(null);
+  // The one open panel: {type:'put'|'call'|'sellCall'|'addPut'|'addCall'
+  // |'addLot', pos?|lot?, stage?, prefill?} — or null. Exactly one panel
+  // can exist in the DOM.
+  const [dialog, setDialog] = createSignal(null);
   // In-flight guard: a double-clicked Add/Refresh/Confirm must not double-
-  // submit (review finding — the prototype ignored it).
+  // submit (review finding honored from the 2026-09-11 panel).
   const [busy, setBusy] = createSignal(false);
 
   const flash = (msg) => {
@@ -172,162 +735,289 @@ export default function HoldingsPanel() {
     setTimeout(() => setNotice(""), 4000);
   };
 
-  // Most ahead-of-pace first; unpriced positions sink to the bottom.
-  const sorted = () =>
-    [...(ledger()?.positions ?? [])]
-      .map((p) => ({ p, v: p.view }))
-      .sort((a, b) => {
-        const key = (x) => (x.v.pl_pct == null ? -Infinity : x.v.pl_pct - x.v.target_pct);
-        return key(b) - key(a);
-      });
+  const load = async () => {
+    try {
+      setLedger(await getHoldings());
+    } catch (err) {
+      flash(`Holdings API error: ${err.message}`);
+    }
+  };
+  onMount(load);
+
+  const puts = () => ledger()?.positions ?? [];
+  const calls = () => ledger()?.calls ?? [];
+  const lots = () => ledger()?.lots ?? [];
+
+  // The server payload has no `kind` field — the array an entry came from
+  // IS its kind (sibling arrays); tag it here for the row's chip/dialog.
+  const putsV = () => puts().map((p) => ({ p: { ...p, kind: "put" }, v: p.view }));
+  const callsV = () =>
+    calls().map((c) => ({ p: { ...c, kind: "call" }, v: c.view }));
+  const urgencyKey = (x) =>
+    x.v.pl_pct == null ? -Infinity : x.v.pl_pct - x.v.target_pct;
+  const merged = () =>
+    [...putsV(), ...callsV()].sort((a, b) => urgencyKey(b) - urgencyKey(a));
+
+  const dialogFor = (type, id) => {
+    const d = dialog();
+    if (!d || d.type !== type) return null;
+    const anchor = d.pos?.id ?? d.lot?.id;
+    return anchor === id ? d : null;
+  };
+
+  const run = async (fn) => {
+    if (busy()) return null;
+    setBusy(true);
+    try {
+      return await fn();
+    } catch (err) {
+      flash(err.message);
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const onRefresh = async () => {
-    if (busy()) return;
-    setBusy(true);
-    try {
-      const res = await refreshHoldings();
-      const stale = res.refresh?.stale ?? [];
-      flash(
-        stale.length
-          ? `Marks refreshed — ${stale.length} position(s) unpriced (kept last mark).`
-          : "Marks refreshed."
-      );
-    } catch (err) {
-      flash(`Refresh failed: ${err.message}`);
-    } finally {
-      setBusy(false);
-    }
-    await refetch();
+    const res = await run(() => refreshHoldings());
+    if (!res) return;
+    const stale = res.refresh?.stale ?? [];
+    flash(
+      stale.length
+        ? `Marks refreshed — ${stale.length} entry(ies) unpriced (kept last mark).`
+        : "Marks refreshed."
+    );
+    await load();
   };
 
-  const onAdd = async (fields) => {
-    if (busy()) return;
-    setBusy(true);
-    try {
-      const res = await addHolding(fields);
-      flash(`Added ${res.position.symbol} ${res.position.strike} — press Refresh marks to price it.`);
-    } catch (err) {
-      flash(`Add failed: ${err.message}`);
-    } finally {
-      setBusy(false);
-    }
-    await refetch();
+  const onAdd = async (fields, label) => {
+    const res = await run(() => addHolding(fields));
+    if (!res) return;
+    flash(label);
+    setDialog(null);
+    await load();
   };
 
-  const onClose = async (id, outcome, closePrice) => {
-    if (busy()) return;
-    setBusy(true);
-    try {
-      await deleteHolding(id);
-      flash(
-        outcome === "expired"
-          ? "Position removed (expired worthless — premium kept)."
-          : "Position removed."
-      );
-    } catch (err) {
-      flash(`Close failed: ${err.message}`);
-    } finally {
-      setBusy(false);
+  /* Assigned stage 2: POST kind:"lot" with assigned_from — the server
+     removes the put in the same rewrite. Cancelling the form never got
+     here, so the put remains. */
+  const onAssign = async (pos, fields) => {
+    const res = await run(() => addHolding(fields));
+    if (!res) return;
+    flash(
+      `Assigned — recorded ${fields.shares} sh ${fields.symbol} at $${fields.basis_per_share.toFixed(2)} basis.`
+    );
+    setDialog(null);
+    await load();
+  };
+
+  const onConfirmPut = async (pos, outcome, closePrice) => {
+    if (outcome === "assigned") {
+      // Stage 2: reveal the prefilled lot form (shares = contracts×100,
+      // basis = strike − premium) under the same position.
+      setDialog({
+        type: "put",
+        pos,
+        stage: "lot",
+        prefill: {
+          symbol: pos.symbol,
+          shares: pos.contracts * 100,
+          basis_per_share: +(pos.strike - pos.premium).toFixed(2),
+          acquired: todayET(),
+        },
+      });
+      return;
     }
-    setClosing(null);
-    await refetch();
+    const res = await run(() => deleteHolding(pos.id));
+    if (!res) return;
+    flash(
+      outcome === "expired"
+        ? "Expired worthless — premium kept, position removed."
+        : "Bought back — position removed."
+    );
+    setDialog(null);
+    await load();
+  };
+
+  const onConfirmCall = async (pos, outcome, closePrice) => {
+    if (outcome === "called-away") {
+      const res = await run(() => calledAway(pos.id));
+      if (!res) return;
+      flash(
+        res.reduced
+          ? `Called away — ${pos.symbol} lot reduced by ${pos.contracts * 100} sh.`
+          : `Called away — call removed. ${res.reason ?? ""}`
+      );
+      setDialog(null);
+      await load();
+      return;
+    }
+    const res = await run(() => deleteHolding(pos.id));
+    if (!res) return;
+    flash(
+      outcome === "expired"
+        ? "Expired worthless — premium kept, position removed."
+        : "Bought back — position removed."
+    );
+    setDialog(null);
+    await load();
+  };
+
+  /* The strip re-renders from the PATCH response's derived numbers —
+     never from client math. */
+  const onSaveCash = async (n) => {
+    const res = await run(() => patchCash(n));
+    if (!res) return false;
+    setLedger((cur) => ({
+      ...(cur ?? {}),
+      cash: res.cash,
+      cash_reserved: res.cash_reserved,
+      cash_free: res.cash_free,
+    }));
+    flash(`Cash set to ${money(res.cash)} — ${money(res.cash_free)} free.`);
+    return true;
+  };
+
+  const dialogActions = {
+    busy,
+    onDone: () => setDialog(null),
+    onConfirmPut,
+    onConfirmCall,
+    onAssign,
   };
 
   return (
-    <div class="holdings-panel">
-      <div class="holdings-toolbar">
-        <AddForm onAdd={onAdd} busy={busy} />
-        <button type="button" class="btn holdings-refresh" disabled={busy()} onClick={onRefresh}>
-          ⟳<span class="holdings-refresh-label"> Refresh marks</span>
-        </button>
-      </div>
-      <Show when={notice()}>
-        <div class="holdings-notice">{notice()}</div>
-      </Show>
-      <Show when={ledger.error} fallback={null}>
-        <div class="error-banner">Holdings API error: {ledger.error.message}</div>
-      </Show>
-      <Show
-        when={sorted().length > 0}
-        fallback={<div class="empty-panel">No open positions — press “+ New position” to record one.</div>}
-      >
-        <div class="holdings-cards">
-          <For each={sorted()}>
-            {({ p, v }) => (
-              <div class="holdings-card" classList={{ "holdings-card-met": v.pace_met }}>
-                <div class="holdings-card-head">
-                  <b>{p.symbol} {p.strike}P ×{p.contracts}</b>
-                  <span class="holdings-age">
-                    exp {p.expiry} · {v.days_elapsed}/{v.days_total} wd
-                  </span>
-                </div>
-                <div class="holdings-card-big">
-                  <span class={v.pl_pct >= 0 ? "holdings-pos" : "holdings-neg"}>
-                    {v.pl_pct == null ? "—" : `${v.pl_pct >= 0 ? "+" : ""}${pct(v.pl_pct, 1)}`}
-                  </span>
-                  <span class="holdings-card-target">target {pct(v.target_pct)}</span>
-                </div>
-                <div class="holdings-bar">
-                  <div
-                    class="holdings-bar-fill"
-                    style={{ width: `${v.pl_pct == null ? 0 : Math.max(0, Math.min(100, v.pl_pct * 100))}%` }}
-                  />
-                  <div class="holdings-bar-mark" style={{ left: `${Math.min(100, v.target_pct * 100)}%` }} />
-                </div>
-                <div class="holdings-card-stats">
-                  <div>
-                    <span>sold at</span>
-                    <b>{money(p.premium)}</b>
-                  </div>
-                  <div>
-                    <span>now (mid)</span>
-                    <b>{p.mark == null ? "—" : p.mark.mid.toFixed(2)}</b>
-                    <Show when={p.mark != null}>
-                      <i>{ageText(p.mark.as_of)}</i>
-                    </Show>
-                    <Show when={p.mark == null}>
-                      <i>unpriced</i>
-                    </Show>
-                  </div>
-                  <div>
-                    <span>spot</span>
-                    <Show when={p.mark?.underlying_price != null} fallback={<b>—</b>}>
-                      <b>{p.mark.underlying_price.toFixed(2)}</b>
-                      <i
-                        class={v.spot_pct_vs_strike < 0 ? "holdings-neg" : "holdings-pos"}
-                      >
-                        {`${v.spot_pct_vs_strike >= 0 ? "+" : ""}${pct(v.spot_pct_vs_strike, 1)} vs strike`}
-                      </i>
-                    </Show>
-                  </div>
-                  <div>
-                    <span>close captures</span>
-                    <b class={v.pl_dollars >= 0 ? "holdings-pos" : "holdings-neg"}>
-                      {v.pl_dollars == null ? "—" : money(v.pl_dollars)}
-                    </b>
-                  </div>
-                </div>
-                <div class="holdings-card-actions">
-                  <Show when={v.pace_met} fallback={<span class="chip normal">holding</span>}>
-                    <span class="chip high">buy back?</span>
-                  </Show>
-                  <button type="button" class="btn-ghost holdings-close-btn" onClick={() => setClosing(p)}>
-                    close…
-                  </button>
-                </div>
-              </div>
+    <div class="holdings-panel hp-wheel">
+      <aside class="hp-rail">
+        <CashStrip
+          cash={ledger()?.cash ?? null}
+          reserved={ledger()?.cash_reserved ?? 0}
+          free={ledger()?.cash_free ?? null}
+          busy={busy}
+          onSaveCash={onSaveCash}
+        />
+        <div class="hp-rail-block">
+          <div class="hp-rail-label">the wheel</div>
+          <div class="hp-rail-row">
+            <span>open puts</span>
+            <b>{puts().length}</b>
+          </div>
+          <div class="hp-rail-row">
+            <span>open covered calls</span>
+            <b>{calls().length}</b>
+          </div>
+          <div class="hp-rail-row">
+            <span>share lots</span>
+            <b>{lots().length}</b>
+          </div>
+          <div class="hp-rail-row">
+            <span>shares held</span>
+            <b>{lots().reduce((n, l) => n + l.shares, 0)}</b>
+          </div>
+        </div>
+        <div class="hp-rail-block">
+          <div class="hp-rail-label">lots</div>
+          <Show
+            when={lots().length > 0}
+            fallback={<div class="hp-hint">No recorded lots — assignments land here.</div>}
+          >
+            <For each={lots()}>
+              {(l) => (
+                <LotRailRow
+                  lot={l}
+                  dialogFor={dialogFor}
+                  busy={busy}
+                  onDialogDone={() => setDialog(null)}
+                  onSellCall={(lot, fields) =>
+                    onAdd(fields, `Sold ${fields.symbol} ${fields.strike}C ×${fields.contracts} — Refresh marks to price.`)
+                  }
+                />
+              )}
+            </For>
+          </Show>
+          <button
+            type="button"
+            class="btn-ghost hp-cash-edit"
+            onClick={() => setDialog({ type: "addLot" })}
+          >
+            + New lot
+          </button>
+          <Show when={dialog()?.type === "addLot"} keyed>
+            <AddLotForm
+              busy={busy}
+              onDone={() => setDialog(null)}
+              onAdd={(f) => onAdd(f, `Recorded ${f.shares} sh ${f.symbol}.`)}
+            />
+          </Show>
+        </div>
+      </aside>
+
+      <div class="hp-list">
+        <div class="hp-toolbar-row">
+          <button type="button" class="btn" onClick={() => setDialog({ type: "addPut" })}>
+            + Sell put
+          </button>
+          <button type="button" class="btn" onClick={() => setDialog({ type: "addCall" })}>
+            + Sell call
+          </button>
+          <button
+            type="button"
+            class="btn holdings-refresh"
+            disabled={busy()}
+            onClick={onRefresh}
+          >
+            ⟳<span class="holdings-refresh-label"> Refresh marks</span>
+          </button>
+        </div>
+        <Show when={notice()}>
+          <div class="holdings-notice">{notice()}</div>
+        </Show>
+        <Show when={dialog()?.type === "addPut"} keyed>
+          <AddPutForm
+            busy={busy}
+            onDone={() => setDialog(null)}
+            onAdd={(f) =>
+              onAdd(f, `Sold ${f.symbol} ${f.strike}P ×${f.contracts} — press Refresh marks to price it.`)
+            }
+          />
+        </Show>
+        <Show when={dialog()?.type === "addCall"} keyed>
+          <AddCallForm
+            busy={busy}
+            onDone={() => setDialog(null)}
+            onAdd={(f) =>
+              onAdd(f, `Sold ${f.symbol} ${f.strike}C ×${f.contracts} — Refresh marks to price.`)
+            }
+          />
+        </Show>
+
+        <Show
+          when={puts().length + calls().length > 0}
+          fallback={
+            <div class="empty-panel">
+              No open positions — press “+ Sell put” to record one.
+            </div>
+          }
+        >
+          <div class="hp-list-row hp-list-head">
+            <span>position</span>
+            <span>P&L</span>
+            <span>pace</span>
+            <span>status</span>
+            <span />
+          </div>
+          <For each={merged()}>
+            {(x) => (
+              <OptionRow
+                x={x}
+                dialogFor={dialogFor}
+                dialogActions={dialogActions}
+                onClose={(x2) => setDialog({ type: x2.p.kind, pos: x2.p })}
+              />
             )}
           </For>
-        </div>
-      </Show>
-      <Show when={closing()}>
-        <OutcomeDialog
-          position={closing()}
-          busy={busy}
-          onClose={() => setClosing(null)}
-          onConfirm={(outcome, price) => onClose(closing().id, outcome, price)}
-        />
-      </Show>
+        </Show>
+      </div>
     </div>
   );
 }

@@ -209,7 +209,7 @@ scoring.reset();
 await tick();
 ok("reset restores production view", qa("#root " + rowsSel).length === 1);
 
-// ── holdings panel (2026-09-11-holdings, variant B) ──
+// ── holdings panel (2026-09-17-wheel-holdings, variant C) ──
 // Mount against a mocked /api/holdings (server owns the pace math — the
 // panel renders the view verbatim), then drive add + outcome flows through
 // captured fetch calls.
@@ -248,6 +248,11 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
       return jsonRes({
         schema_version: 1,
         positions: didAdd ? [POSITION, POSITION_VIEWLESS] : [POSITION],
+        calls: [],
+        lots: [],
+        cash: null,
+        cash_reserved: 35000,
+        cash_free: null,
       });
     }
     if (path === "/api/holdings" && method === "POST") return jsonRes({ position: POSITION_VIEWLESS });
@@ -281,20 +286,20 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
   render(() => <HP />, div);
   await tick();
 
-  ok("holdings card renders title with contract count", (q("#holdings-root")?.textContent ?? "").includes("GOOG 350P ×1"));
-  ok("holdings card shows the premium anchor", (q("#holdings-root")?.textContent ?? "").includes("$1.00"));
+  ok("holdings row renders title with contract count", (q("#holdings-root")?.textContent ?? "").includes("GOOG 350P ×1"));
+  ok("holdings row shows the premium anchor", (q("#holdings-root")?.textContent ?? "").includes("$1.00"));
   ok("pace bar tick sits at the server target", (q(".holdings-bar-mark")?.style?.left ?? "") === "40%");
-  ok("pace-met card carries the buy-back chip", (q("#holdings-root")?.textContent ?? "").includes("buy back?"));
+  ok("pace-met row carries the buy-back chip", (q("#holdings-root")?.textContent ?? "").includes("buy back?"));
   ok("mark age is visible", (q("#holdings-root")?.textContent ?? "").includes("ago"));
 
   // R6: SPOT cell — price, % vs strike, danger color when below the strike.
   const spotCell = qa(".holdings-card-stats div").find((d) => d.querySelector("span")?.textContent === "spot");
   ok("spot cell renders price and % vs strike", !!spotCell && spotCell.textContent.includes("331.20") && spotCell.textContent.includes("-5.4% vs strike"));
   ok("spot below strike is danger-colored", !!spotCell?.querySelector("i.holdings-neg"));
-  ok("stat strip has four cells", qa(".holdings-card .holdings-card-stats > div").length >= 4);
+  ok("stat strip has four cells", qa(".hp-list-stats > div").length >= 4);
 
   // Add form: decimals survive the round trip to the POST body.
-  qa(".holdings-toolbar button").find((b) => b.textContent.includes("New position"))?.click();
+  qa(".hp-toolbar-row button").find((b) => b.textContent.includes("Sell put"))?.click();
   await tick();
   const setVal = (el, v) => {
     el.value = v;
@@ -304,14 +309,14 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
   setVal(rootEl.querySelector('.holdings-add input[placeholder="SYMBOL"]'), "AMD");
   setVal(rootEl.querySelector('.holdings-add input[placeholder="e.g. 350.00"]'), "417.50");
   setVal(rootEl.querySelector('.holdings-add input[placeholder="e.g. 1.00"]'), "3.75");
-  qa(".holdings-add button").find((b) => b.textContent === "Add")?.click();
+  qa(".holdings-add button").find((b) => b.textContent === "Sell put")?.click();
   await tick();
   const addCall = calls.find(([, m, b]) => m === "POST" && b?.symbol === "AMD");
   ok("add POST carries the typed decimals", !!addCall && addCall[2].strike === 417.5 && addCall[2].premium === 3.75);
-  ok("unpriced card renders the empty-mark state", (q("#holdings-root")?.textContent ?? "").includes("unpriced"));
+  ok("unpriced row renders the empty-mark state", (q("#holdings-root")?.textContent ?? "").includes("unpriced"));
 
-  // Outcome flow: open the dialog on the priced card, confirm bought-back.
-  qa(".holdings-card")
+  // Outcome flow: open the dialog on the priced row, confirm bought-back.
+  qa(".hp-list-row")
     .find((c) => c.textContent.includes("GOOG"))
     ?.querySelector(".holdings-close-btn")
     ?.click();
@@ -330,24 +335,24 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
   );
 
   // Reference-example values, verbatim from the design doc scenario.
-  const googCard = qa(".holdings-card").find((c) => c.textContent.includes("GOOG"));
-  ok("reference card shows +50.0%", !!googCard && googCard.textContent.includes("+50.0%"));
-  ok("reference card shows target 40%", !!googCard && googCard.textContent.includes("target 40%"));
-  ok("reference card shows 2/5 working days", !!googCard && googCard.textContent.includes("2/5 wd"));
-  ok("reference card shows NOW mid 0.50", !!googCard && googCard.textContent.includes("0.50"));
-  ok("reference card shows CLOSE CAPTURES $50.00", !!googCard && googCard.textContent.includes("$50.00"));
+  const googRow = qa(".hp-list-row").find((c) => c.textContent.includes("GOOG"));
+  ok("reference row shows +50.0%", !!googRow && googRow.textContent.includes("+50.0%"));
+  ok("reference row shows target 40%", !!googRow && googRow.textContent.includes("target 40%"));
+  ok("reference row shows 2/5 working days", !!googRow && googRow.textContent.includes("2/5 wd"));
+  ok("reference row shows NOW mid 0.50", !!googRow && googRow.textContent.includes("0.50"));
+  ok("reference row shows CLOSE CAPTURES $50.00", !!googRow && googRow.textContent.includes("$50.00"));
 
   // Empty submit is blocked (no numbers ⇒ no POST, form stays open).
   const postsBefore = calls.filter(([p, m]) => p === "/api/holdings" && m === "POST").length;
-  qa(".holdings-toolbar button").find((b) => b.textContent.includes("New position"))?.click();
+  qa(".hp-toolbar-row button").find((b) => b.textContent.includes("Sell put"))?.click();
   await tick();
-  qa(".holdings-add button").find((b) => b.textContent === "Add")?.click();
+  qa(".holdings-add button").find((b) => b.textContent === "Sell put")?.click();
   await tick();
   const postsAfter = calls.filter(([p, m]) => p === "/api/holdings" && m === "POST").length;
   ok("empty numeric fields block submit", postsAfter === postsBefore && !!q(".holdings-add"));
 
   // Refresh marks: POST goes out, the notice confirms, the ledger refetches.
-  qa(".holdings-toolbar button").find((b) => b.textContent.includes("Refresh marks"))?.click();
+  qa(".hp-toolbar-row button").find((b) => b.textContent.includes("Refresh marks"))?.click();
   await tick();
   ok(
     "refresh POSTs and the notice confirms",

@@ -1334,3 +1334,131 @@ details.adjust .hint-custom { color: var(--accent); }
   .holdings-add input { max-width: none; width: 100%; }
   .holdings-add .btn, .holdings-add .btn-primary { grid-column: 1 / -1; }
 }
+
+/* ── Wheel holdings (2026-09-17-wheel-holdings, variant C "wheel rail") ─
+   Sticky rail (cash strip, wheel stats, lot rows) beside one merged
+   urgency list; dialogs anchor inline under the position that opened
+   them. Below 900px the rail stacks above the list (user decision). */
+.hp-wheel {
+  display: grid;
+  grid-template-columns: 16rem 1fr;
+  gap: 1.1rem;
+  align-items: start;
+}
+.hp-rail { display: flex; flex-direction: column; gap: 0.7rem; position: sticky; top: 0; }
+.hp-rail-block {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.7rem 0.9rem;
+}
+.hp-rail-label {
+  font-size: 0.68rem;
+  opacity: 0.6;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.3rem;
+}
+.hp-rail-big { font-size: 1.6rem; font-weight: 700; color: var(--ok); }
+.hp-rail-sub { font-size: 0.72rem; opacity: 0.6; margin-top: 0.15rem; }
+.hp-rail-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.22rem 0;
+  font-size: 0.82rem;
+}
+.hp-lot-row { padding: 0.28rem 0; border-bottom: 1px solid var(--border); }
+.hp-lot-row-top { display: flex; justify-content: space-between; gap: 0.6rem; font-size: 0.85rem; }
+.hp-lot-row-top b { font-variant-numeric: tabular-nums; }
+.hp-lot-row-sub {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  font-size: 0.72rem;
+  opacity: 0.78;
+  margin-top: 0.1rem;
+}
+.hp-lot-row-sub b { font-variant-numeric: tabular-nums; }
+.hp-lot-row-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  font-size: 0.68rem;
+  opacity: 0.55;
+  margin-top: 0.1rem;
+}
+.hp-lot-row-meta i { font-style: normal; }
+.hp-toolbar-row { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.4rem; }
+.hp-hint { font-size: 0.8rem; opacity: 0.6; padding: 0.4rem 0; }
+.hp-list { display: flex; flex-direction: column; gap: 0.35rem; }
+.hp-list-row {
+  display: grid;
+  grid-template-columns: minmax(14rem, 1.4fr) 5rem minmax(9rem, 1fr) 8rem auto;
+  gap: 0.8rem;
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.55rem 0.8rem;
+}
+.hp-list-row.hp-row-met { border-color: var(--ok); }
+.hp-list-head {
+  background: transparent;
+  border: 0;
+  padding: 0.1rem 0.8rem;
+  font-size: 0.68rem;
+  opacity: 0.55;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.hp-list-pos { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+.hp-list-pos i,
+.hp-list-pace i { font-style: normal; font-size: 0.72rem; opacity: 0.6; }
+.hp-kind {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  border-radius: 5px;
+  padding: 0.1rem 0.35rem;
+}
+.hp-kind[data-kind="put"] { background: rgba(96, 165, 250, 0.18); color: #7fb5f5; }
+.hp-kind[data-kind="call"] { background: rgba(251, 191, 36, 0.16); color: #e8b84a; }
+.hp-list-pace .holdings-bar { min-width: 7rem; }
+.hp-slot { display: flex; flex-direction: column; gap: 0.45rem; min-width: 0; }
+.hp-list-status { display: flex; flex-direction: column; gap: 0.25rem; align-items: flex-start; }
+.hp-list-stats { grid-column: 1 / -1; margin-top: 0.15rem; }
+.hp-cash-edit { margin-left: auto; font-size: 0.75rem; }
+.hp-cash-editor { margin-left: auto; display: flex; gap: 0.35rem; align-items: center; }
+.hp-cash-editor input {
+  width: 9rem;
+  font: inherit;
+  padding: 0.25rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: inherit;
+}
+.hp-dialog-note {
+  font-size: 0.72rem;
+  opacity: 0.65;
+  margin-top: 0.5rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.4rem;
+}
+@media (max-width: 900px) {
+  /* The rail stacks above the list (user decision); rows keep their
+     stacked layout below 720px. */
+  .hp-wheel { grid-template-columns: 1fr; }
+  .hp-rail { position: static; }
+}
+@media (max-width: 720px) {
+  .hp-list-row.hp-list-head { display: none; }
+  .hp-list-row { display: flex; flex-direction: column; align-items: stretch; gap: 0.45rem; }
+  .hp-list-pos { justify-content: space-between; }
+  .hp-list-pace { display: flex; flex-direction: column; gap: 0.15rem; }
+  .hp-list-status { flex-direction: row; flex-wrap: wrap; }
+  .hp-list-row .holdings-close-btn { align-self: flex-end; }
+  .hp-cash-editor { margin-left: 0; }
+  .hp-cash-editor input { width: 7rem; }
+}

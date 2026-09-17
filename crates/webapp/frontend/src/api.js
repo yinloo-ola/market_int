@@ -137,3 +137,31 @@ export async function refreshHoldings() {
   if (!res.ok) throw new Error(v?.error ?? `POST /api/holdings/refresh -> ${res.status}`);
   return v;
 }
+
+/// Wheel holdings (2026-09-17-wheel-holdings): set the manual cash balance.
+/// The response carries the server-derived reserved/free — callers re-render
+/// the strip from it, never from client math.
+export async function patchCash(cash) {
+  const res = await authorizedFetch("/api/holdings/cash", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cash }),
+  });
+  const v = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(v?.error ?? `PATCH /api/holdings/cash -> ${res.status}`);
+  return v;
+}
+
+/// The call was assigned: one server rewrite removes the call and FIFO-
+/// reduces the covering lot. `reduced: false` + `reason` means no single
+/// lot covered it — the call is gone regardless (a 200 outcome, not an error).
+export async function calledAway(callId) {
+  const res = await authorizedFetch("/api/holdings/called-away", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ call_id: callId }),
+  });
+  const v = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(v?.error ?? `POST /api/holdings/called-away -> ${res.status}`);
+  return v;
+}
