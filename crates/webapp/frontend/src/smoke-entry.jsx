@@ -359,6 +359,175 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
     calls.some(([p, m]) => p === "/api/holdings/refresh" && m === "POST") &&
       (q(".holdings-notice")?.textContent ?? "").includes("Marks refreshed")
   );
+
+  // ── variant-C additions (R11): rail cash strip, kind chips + stats line,
+  // ITM chip, inline close panel placement, assignment + sell-call
+  // prefills, form validation before submit. Fresh mount with a full-wheel
+  // fixture (put + ITM call + lot); cash starts unset to exercise the
+  // first-set flow.
+  {
+    const CALL_ITM = {
+      id: "c1", symbol: "GOOG", strike: 360, premium: 1.2, contracts: 2,
+      sold: "2026-09-04", expiry: "2026-09-11",
+      mark: { mid: 0.3, as_of: "2026-09-08T19:00:00Z", underlying_price: 370.0 },
+      view: {
+        pl_dollars: 180.0, pl_pct: 0.75, pace_per_day_dollars: 90.0,
+        pace_per_day_pct: 0.375, days_elapsed: 2, days_total: 5,
+        target_pct: 0.4, pace_met: true, spot_pct_vs_strike: (370 - 360) / 360,
+      },
+    };
+    const LOT = {
+      id: "l1", symbol: "GOOG", shares: 200, basis_per_share: 349.0,
+      acquired: "2026-09-08", mark: { spot: 370.0, as_of: "2026-09-08T19:00:00Z" },
+      view: {
+        value: 74000.0, pl_dollars: 4200.0, pl_pct: 4200 / 69800,
+        capacity: 2, covered: 2, spot: 370.0,
+        spot_as_of: "2026-09-08T19:00:00Z", age_days: 0,
+      },
+    };
+    let cashState = null; // document cash: null until first PATCH
+    const calls2 = [];
+    globalThis.fetch = async (path, opts = {}) => {
+      const method = opts.method ?? "GET";
+      calls2.push([String(path), method, opts.body ? JSON.parse(opts.body) : null]);
+      if (path === "/api/holdings" && method === "GET") {
+        return jsonRes({
+          schema_version: 1,
+          positions: [POSITION],
+          calls: [CALL_ITM],
+          lots: [LOT],
+          cash: cashState,
+          cash_reserved: 70000,
+          cash_free: cashState == null ? null : cashState - 70000,
+        });
+      }
+      if (path === "/api/holdings/cash" && method === "PATCH") {
+        cashState = JSON.parse(opts.body).cash;
+        return jsonRes({ cash: cashState, cash_reserved: 70000, cash_free: cashState - 70000 });
+      }
+      if (path === "/api/holdings" && method === "POST") return jsonRes({ lot: LOT });
+      return new Response("not found", { status: 404 });
+    };
+    const div2 = document.createElement("div");
+    div2.id = "holdings-root-2";
+    document.body.appendChild(div2);
+    render(() => <HP />, div2);
+    await tick();
+
+    // Rail: reserved derives even with cash unset; free renders as "—"
+    // with a "set cash" affordance until the first PATCH.
+    const rail0 = q("#holdings-root-2 .hp-rail")?.textContent ?? "";
+    ok("rail renders reserved while cash is unset", rail0.includes("$70,000"));
+    ok("rail free is an honest — while cash is unset", rail0.includes("—"));
+    ok("rail offers the set-cash affordance", (q("#holdings-root-2 .hp-cash-edit")?.textContent ?? "") === "set cash");
+    q("#holdings-root-2 .hp-cash-edit").click();
+    await tick();
+    setVal(q("#holdings-root-2 .hp-cash-editor input"), "150000");
+    qa("#holdings-root-2 .hp-cash-editor button").find((b) => b.textContent === "save")?.click();
+    await tick();
+    ok(
+      "cash edit PATCHes and the strip re-renders from the response",
+      calls2.some(([p, m]) => m === "PATCH" && p === "/api/holdings/cash") &&
+        (q("#holdings-root-2 .hp-rail")?.textContent ?? "").includes("$80,000") &&
+        (q("#holdings-root-2 .hp-rail")?.textContent ?? "").includes("$150,000")
+    );
+
+    // Merged list: kind chips + full stats line; the ITM call carries the
+    // called-away chip; the lot row reports covered 2/2.
+    const kinds = qa("#holdings-root-2 .hp-kind").map((k) => k.textContent.trim()).sort();
+    ok("merged rows carry kind chips", kinds.join(",") === "CALL,PUT");
+    const itmRow = qa("#holdings-root-2 .hp-list-row").find((r) => r.textContent.includes("360C"));
+    ok("ITM call shows the called-away chip", !!itmRow && itmRow.textContent.includes("ITM — called away?"));
+    const spotDiv = qa("#holdings-root-2 .hp-list-stats div").find((d) => d.querySelector("span")?.textContent === "spot");
+    ok("ITM vs-strike figure is danger-colored", !!spotDiv?.querySelector("i.holdings-neg") && spotDiv.textContent.includes("+2.8% vs strike"));
+    ok("lot rail row reports covered 2/2", (q("#holdings-root-2 .hp-rail")?.textContent ?? "").includes("covered 2/2"));
+
+    // Inline close panel: opens directly beneath the clicked position and
+    // is the ONLY panel in the DOM.
+    const putSlot = qa("#holdings-root-2 .hp-slot").find((s) => s.textContent.includes("350P"));
+    putSlot.querySelector(".holdings-close-btn").click();
+    await tick();
+    ok("close panel renders inside the clicked position's slot", !!putSlot.querySelector(".holdings-outcome"));
+    ok("only one panel exists in the DOM", qa("#holdings-root-2 .holdings-outcome").length === 1);
+
+    // Assignment: choose assigned + price → the prefilled lot form appears
+    // in the SAME slot (shares = contracts×100, basis = strike − premium);
+    // recording POSTs kind:"lot" with assigned_from.
+    const radios = qa(`${"#holdings-root-2"} .holdings-outcome input[type="radio"]`);
+    radios.find((r) => r.nextSibling?.textContent?.includes("assigned"))?.click();
+    await tick();
+    setVal(q(`${"#holdings-root-2"} .holdings-outcome input[inputmode="decimal"]`), "340");
+    qa("#holdings-root-2 .holdings-outcome button").find((b) => b.textContent === "Confirm")?.click();
+    await tick();
+    const lotForm = putSlot.querySelector(".holdings-outcome");
+    ok("assigned flow reveals the prefilled lot form under the put", !!lotForm && lotForm.textContent.includes("Record assigned shares"));
+    const sharesVal = lotForm?.querySelector('input[inputmode="numeric"]')?.value;
+    const basisVal = lotForm?.querySelector('input[inputmode="decimal"]')?.value;
+    ok("prefill pins shares = contracts×100 and basis = strike − premium", sharesVal === "100" && Number(basisVal) === 349);
+    lotForm.querySelector('button[type="submit"]').click();
+    await tick();
+    const assignPost = calls2.find(([, m, b]) => m === "POST" && b?.assigned_from != null);
+    ok(
+      "recording POSTs kind lot with assigned_from",
+      !!assignPost && assignPost[2].kind === "lot" && assignPost[2].assigned_from === "h1" &&
+        assignPost[2].shares === 100 && assignPost[2].basis_per_share === 349
+    );
+
+    // Lot-anchored sell call: contracts prefilled floor(200/100), the free
+    // Sell call form blocks an empty submit.
+    qa("#holdings-root-2 .hp-rail button")
+      .find((b) => b.textContent.includes("sell call…"))
+      ?.click();
+    await tick();
+    ok(
+      "sell-call prefill is floor(shares/100)",
+      q("#holdings-root-2 .hp-rail .holdings-outcome input[inputmode='numeric']")?.value === "2"
+    );
+    const postsBefore2 = calls2.filter(([p, m]) => p === "/api/holdings" && m === "POST").length;
+    qa("#holdings-root-2 .hp-rail .holdings-outcome button")
+      .find((b) => b.textContent === "Sell call")
+      ?.click();
+    await tick();
+    ok(
+      "sell-call form validates before submit",
+      calls2.filter(([p, m]) => p === "/api/holdings" && m === "POST").length === postsBefore2 &&
+        !!q("#holdings-root-2 .hp-rail .holdings-outcome")
+    );
+    qa("#holdings-root-2 .hp-rail .holdings-outcome button")
+      .find((b) => b.textContent === "Cancel")
+      ?.click();
+    await tick();
+    const sellCallForm = qa("#holdings-root-2 .hp-rail button")
+      .find((b) => b.textContent.includes("sell call…"));
+    sellCallForm?.click();
+    await tick();
+    setVal(q("#holdings-root-2 .hp-rail .holdings-outcome input[placeholder='e.g. 360.00']"), "380");
+    setVal(q("#holdings-root-2 .hp-rail .holdings-outcome input[placeholder='e.g. 1.20']"), "1.50");
+    qa("#holdings-root-2 .hp-rail .holdings-outcome button")
+      .find((b) => b.textContent === "Sell call")
+      ?.click();
+    await tick();
+    const sellPost = calls2.find(([, m, b]) => m === "POST" && b?.kind === "call");
+    ok(
+      "valid sell call submits kind call from the lot",
+      !!sellPost && sellPost[2].symbol === "GOOG" && sellPost[2].contracts === 2 && sellPost[2].strike === 380
+    );
+
+    // Free-field Sell call form (toolbar): empty submit is blocked.
+    const postsBefore3 = calls2.filter(([p, m]) => p === "/api/holdings" && m === "POST").length;
+    qa("#holdings-root-2 .hp-toolbar-row button")
+      .find((b) => b.textContent.includes("Sell call"))
+      ?.click();
+    await tick();
+    qa("#holdings-root-2 .holdings-add button")
+      .find((b) => b.textContent === "Sell call")
+      ?.click();
+    await tick();
+    ok(
+      "free sell-call form validates before submit",
+      calls2.filter(([p, m]) => p === "/api/holdings" && m === "POST").length === postsBefore3
+    );
+  }
 }
 
 // Tab-strip persistence: the Holdings tab lives in the same strip as the

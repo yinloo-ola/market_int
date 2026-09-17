@@ -158,6 +158,15 @@ function LotRailRow(props) {
           </i>
         </div>
       </div>
+      <Show when={v().capacity > 0}>
+        <button
+          type="button"
+          class="btn-ghost holdings-close-btn"
+          onClick={() => props.onSellDialog(l)}
+        >
+          sell call…
+        </button>
+      </Show>
       <Show when={props.dialogFor("sellCall", l.id)} keyed>
         {(d) => <SellCallForm lot={d.lot} onDone={props.onDialogDone} onSell={props.onSellCall} />}
       </Show>
@@ -927,6 +936,7 @@ export default function HoldingsPanel() {
                   lot={l}
                   dialogFor={dialogFor}
                   busy={busy}
+                  onSellDialog={(lot) => setDialog({ type: "sellCall", lot })}
                   onDialogDone={() => setDialog(null)}
                   onSellCall={(lot, fields) =>
                     onAdd(fields, `Sold ${fields.symbol} ${fields.strike}C ×${fields.contracts} — Refresh marks to price.`)
