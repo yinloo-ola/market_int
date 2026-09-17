@@ -846,6 +846,72 @@ pub(crate) async fn holdings_patch_cash(
     .into_response()
 }
 
+/// `POST /api/holdings/called-away` — the call was assigned: remove it and
+/// reduce the covering lot by `contracts × 100` shares (FIFO, core
+/// `apply_called_away`) in ONE rewrite (R9). No covering lot is a 200
+/// outcome, not an error — the shares were called away regardless, so the
+/// call still disappears; the response says `reduced: false` with a reason.
+pub(crate) async fn holdings_called_away(
+    State(st): State<crate::api::AppState>,
+    req: Request,
+) -> Response {
+    let uid = uid_of(&req);
+    let bytes = match axum::body::to_bytes(req.into_body(), 16 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "unreadable body"),
+    };
+    let v: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "body is not JSON"),
+    };
+    let Some(call_id) = v.get("call_id").and_then(|x| x.as_str()).map(|s| s.to_string()) else {
+        return error_response(StatusCode::BAD_REQUEST, "missing call_id");
+    };
+
+    let mut doc = match read_ledger_off_thread(st.holdings_dir.clone(), uid.clone()).await {
+        Ok(d) => d,
+        Err(err) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("ledger read failed: {err}"),
+            )
+        }
+    };
+    let Some(call_h) = doc.calls.iter().find(|c| c.id == call_id) else {
+        return error_response(StatusCode::NOT_FOUND, "no such call");
+    };
+    let (symbol, contracts) = (call_h.symbol.clone(), call_h.contracts);
+    let need = contracts as u64 * 100;
+
+    // One rewrite: the call goes and the FIFO reduction applies together.
+    let reduction =
+        market_int_core::holdings::apply_called_away(&doc.lots, &symbol, contracts);
+    doc.calls.retain(|c| c.id != call_id);
+    let (reduced, reason) = match reduction {
+        Some(lots) => {
+            doc.lots = lots;
+            (true, None)
+        }
+        None => (
+            false,
+            Some(format!(
+                "no lot of {symbol} covers {need} shares — shares were called away, but no held lot was reduced"
+            )),
+        ),
+    };
+    if let Err(err) = write_ledger_off_thread(st.holdings_dir.clone(), uid, doc).await {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("ledger write failed: {err}"),
+        );
+    }
+    let mut body = json!({ "called_away": true, "reduced": reduced });
+    if let Some(reason) = reason {
+        body["reason"] = json!(reason);
+    }
+    Json(body).into_response()
+}
+
 /// `POST /api/holdings/refresh` — mark every open option (puts AND calls,
 /// each queried on its own chain side) and price every lot from the same
 /// pass's spot map (R5). One entry's fetch failure never fails the
@@ -2648,5 +2714,122 @@ mod tests {
         let (status, v) = call(app, "GET", "/api/holdings", None).await;
         assert_eq!(v["positions"].as_array().unwrap().len(), 1, "put untouched");
         assert_eq!(v["lots"].as_array().unwrap().len(), 1);
+    }
+
+    fn fifo_fixture() -> HoldingsDocument {
+        let mut doc = HoldingsDocument::default();
+        doc.calls.push(market_int_core::holdings::CallHolding {
+            id: "c1".to_string(),
+            symbol: "GOOG".to_string(),
+            strike: 360.0,
+            expiry: NaiveDate::from_ymd_opt(2026, 9, 18).unwrap(),
+            premium: 1.2,
+            contracts: 1,
+            sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+            mark: Some(market_int_core::holdings::Mark {
+                mid: 3.0,
+                as_of: frozen_today(),
+                underlying_price: Some(370.0),
+            }),
+        });
+        doc.lots.push(market_int_core::holdings::ShareLot {
+            id: "l-old".to_string(),
+            symbol: "GOOG".to_string(),
+            shares: 200,
+            basis_per_share: 349.0,
+            acquired: NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+            mark: None,
+        });
+        doc.lots.push(market_int_core::holdings::ShareLot {
+            id: "l-new".to_string(),
+            symbol: "GOOG".to_string(),
+            shares: 100,
+            basis_per_share: 349.0,
+            acquired: NaiveDate::from_ymd_opt(2026, 9, 5).unwrap(),
+            mark: None,
+        });
+        doc
+    }
+
+    /// R9: called away — the call is removed and the earliest-acquired
+    /// covering lot is reduced by contracts × 100, all in one rewrite.
+    #[tokio::test]
+    async fn called_away_reduces_fifo_and_removes_call() {
+        let dir = tempfile::tempdir().unwrap();
+        write_ledger(&dir.path().join("holdings"), "test-uid", &fifo_fixture()).unwrap();
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings/called-away",
+            Some(json!({"call_id": "c1"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["called_away"], true);
+        assert_eq!(v["reduced"], true);
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(v["calls"].as_array().unwrap().len(), 0, "call gone");
+        let lots = v["lots"].as_array().unwrap();
+        let l_old = lots.iter().find(|l| l["id"] == "l-old").unwrap();
+        assert_eq!(l_old["shares"], 100, "FIFO: earliest lot reduced");
+        assert_eq!(lots.len(), 2, "l-new untouched");
+    }
+
+    /// R9: no covering lot is a 200 outcome, not an error — the call is
+    /// still removed and the lots stay untouched.
+    #[tokio::test]
+    async fn called_away_without_covering_lot_still_removes_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = fifo_fixture();
+        doc.calls[0].contracts = 3; // need 300 > any lot's shares
+        write_ledger(&dir.path().join("holdings"), "test-uid", &doc).unwrap();
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings/called-away",
+            Some(json!({"call_id": "c1"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["called_away"], true);
+        assert_eq!(v["reduced"], false);
+        assert!(v["reason"].as_str().is_some(), "says what happened: {v}");
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(v["calls"].as_array().unwrap().len(), 0, "call still removed");
+        let lots = v["lots"].as_array().unwrap();
+        assert_eq!(lots[0]["shares"], 200, "lots untouched");
+        assert_eq!(lots[1]["shares"], 100, "lots untouched");
+    }
+
+    /// R9: an unknown call_id is a 404 with the ledger byte-unchanged.
+    #[tokio::test]
+    async fn called_away_unknown_call_is_404_without_write() {
+        let dir = tempfile::tempdir().unwrap();
+        write_ledger(&dir.path().join("holdings"), "test-uid", &fifo_fixture()).unwrap();
+        let ledger_path = dir.path().join("holdings/test-uid.json");
+        let before = std::fs::read(&ledger_path).unwrap();
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings/called-away",
+            Some(json!({"call_id": "h-nope"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+        assert_eq!(
+            std::fs::read(&ledger_path).unwrap(),
+            before,
+            "ledger byte-unchanged"
+        );
     }
 }

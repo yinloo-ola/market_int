@@ -141,6 +141,34 @@ pub fn free_cash(cash: f64, puts: &[Holding]) -> f64 {
     cash - reserved_cash(puts)
 }
 
+/// R9: the called-away FIFO reduction. Among `lots` of `symbol` that can
+/// cover `contracts × 100` shares, the **earliest `acquired`** is reduced
+/// (ties broken by id for determinism); a lot reduced to 0 shares is
+/// dropped. `None` = no single lot covers the need — the caller still
+/// removes the call, it just doesn't reduce shares. Pure so the route is
+/// one read-modify-write.
+pub fn apply_called_away(lots: &[ShareLot], symbol: &str, contracts: u32) -> Option<Vec<ShareLot>> {
+    let need = contracts as u64 * 100;
+    let chosen = lots
+        .iter()
+        .filter(|l| l.symbol == symbol && l.shares as u64 >= need)
+        .min_by(|a, b| (a.acquired, &a.id).cmp(&(b.acquired, &b.id)))?;
+    Some(
+        lots.iter()
+            .map(|l| {
+                if l.id == chosen.id {
+                    let mut reduced = l.clone();
+                    reduced.shares -= need as u32;
+                    reduced
+                } else {
+                    l.clone()
+                }
+            })
+            .filter(|l| l.shares > 0)
+            .collect(),
+    )
+}
+
 impl Holding {
     pub fn validate(&self) -> Result<(), String> {
         validate_option_leg(
@@ -756,6 +784,68 @@ mod tests {
         fn empty_book_reserves_nothing() {
             assert_eq!(reserved_cash(&[]), 0.0);
             assert_eq!(free_cash(50_000.0, &[]), 50_000.0);
+        }
+    }
+
+    /// R9: the called-away FIFO reduction.
+    mod called_away {
+        use super::*;
+
+        fn lot(id: &str, shares: u32, acquired: NaiveDate) -> ShareLot {
+            ShareLot {
+                id: id.to_string(),
+                symbol: "GOOG".to_string(),
+                shares,
+                basis_per_share: 349.0,
+                acquired,
+                mark: None,
+            }
+        }
+
+        /// The design doc's example: a ×1 call on GOOG with lots of 200
+        /// (Sep 1) and 100 (Sep 5) — the Sep 1 lot drops to 100.
+        #[test]
+        fn fifo_reduces_earliest_lot() {
+            let lots = vec![
+                lot("l-old", 200, NaiveDate::from_ymd_opt(2026, 9, 1).unwrap()),
+                lot("l-new", 100, NaiveDate::from_ymd_opt(2026, 9, 5).unwrap()),
+            ];
+            let out = apply_called_away(&lots, "GOOG", 1).unwrap();
+            assert_eq!(out.len(), 2);
+            assert_eq!(out[0].id, "l-old");
+            assert_eq!(out[0].shares, 100, "earliest lot reduced");
+            assert_eq!(out[1].id, "l-new");
+            assert_eq!(out[1].shares, 100, "untouched");
+        }
+
+        /// Equal acquired dates break the tie by id, deterministically.
+        #[test]
+        fn tie_breaks_by_id() {
+            let d = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+            let lots = vec![lot("l-y", 200, d), lot("l-x", 200, d)];
+            let out = apply_called_away(&lots, "GOOG", 1).unwrap();
+            let reduced: Vec<_> = out.iter().filter(|l| l.id == "l-x").collect();
+            assert_eq!(reduced[0].shares, 100, "l-x chosen over l-y");
+            assert_eq!(out.iter().find(|l| l.id == "l-y").unwrap().shares, 200);
+        }
+
+        /// A lot reduced to 0 shares disappears.
+        #[test]
+        fn emptied_lot_is_removed() {
+            let d = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+            let lots = vec![lot("l-a", 200, d)];
+            let out = apply_called_away(&lots, "GOOG", 2).unwrap();
+            assert!(out.is_empty(), "200 − 200 drops the lot: {out:?}");
+        }
+
+        /// No single lot covers the need → None (call still removed
+        /// handler-side, shares untouched).
+        #[test]
+        fn uncovered_is_none() {
+            let d = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+            let lots = vec![lot("l-a", 100, d), lot("l-b", 150, d)];
+            assert_eq!(apply_called_away(&lots, "GOOG", 3), None, "need 300 > any lot");
+            assert_eq!(apply_called_away(&lots, "AAPL", 1), None, "wrong symbol");
         }
     }
 }

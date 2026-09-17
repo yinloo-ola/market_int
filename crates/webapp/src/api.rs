@@ -87,6 +87,10 @@ pub fn build_router(state: AppState) -> axum::Router {
             axum::routing::patch(crate::holdings::holdings_patch_cash),
         )
         .route(
+            "/api/holdings/called-away",
+            axum::routing::post(crate::holdings::holdings_called_away),
+        )
+        .route(
             "/api/holdings/{id}",
             axum::routing::delete(crate::holdings::holdings_delete),
         )
