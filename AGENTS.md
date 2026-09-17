@@ -17,8 +17,10 @@ frontend build.
 **Workspace layout (three-crate virtual workspace, 2026-08):**
 
 - `crates/core/` — package `market_int_core` (lib): domain types, scoring,
-  stores, Tiger client, metrics, pipeline, holdings (currently-holding-put
-  ledger math: 1-day-floor pace rule, working-day counting). **Telegram-free by construction** —
+  stores, Tiger client, metrics, pipeline, holdings (wheel ledger math:
+  puts + covered calls + share lots + cash — shared pace rule
+  (`pace_view`/`validate_option_leg`), lot views, reserved/free cash,
+  FIFO `apply_called_away`). **Telegram-free by construction** —
   the webapp depends only on core, so it cannot link publishing code.
   - `src/model.rs` — domain types, `QuotesError`, scoring
     (`calculate_put_score`, `calculate_put_chain_score`,
@@ -48,8 +50,13 @@ frontend build.
 - `crates/webapp/` — package `market_int_webapp`: axum server
   (`api.rs` /api/latest, `run.rs` POST /api/run + SSE progress,
   `auth.rs` Firebase token gate, `result.rs` frozen last-run JSON document,
-  `holdings.rs` per-user put ledger (/api/holdings CRUD + Tiger mark
-  refresh, JSON document per Firebase UID under /data/webapp/holdings/),
+  `holdings.rs` per-user wheel ledger (puts + covered calls + share lots +
+  cash: /api/holdings CRUD with `kind` dispatch, PATCH cash, DELETE
+  everywhere, POST refresh via the `MarkBatch{marks, spots}` seam
+  (per-side chain queries + lot-symbol spot map), single-rewrite
+  assignment (`assigned_from`) and called-away FIFO reduction; schema
+  stays v1 by additive serde defaults — docs/adr/0002; JSON document per
+  Firebase UID under /data/webapp/holdings/),
   `assets.rs` embedded frontend) + vite/Solid frontend under `frontend/`
   (see `crates/webapp/README.md`).
 
@@ -104,7 +111,7 @@ reads it anymore).
 
 - Run everything: `cargo test` (workspace root runs all three members).
 - One member: `cargo test -p market_int_core`.
-- Tests live in 20 `#[cfg(test)]` modules (230 tests as of 2026-09): core
+- Tests live in 20 `#[cfg(test)]` modules (263 tests as of 2026-09): core
   `model, metrics, greeks, regime, sectors, maxdrop, trend, option, holdings,
   pipeline, store/earnings, store/trend, tiger/api_caller`; cli `backtest,
   publish`; webapp `result, api, auth, run, holdings`. (AGENTS.md's earlier "all tests in

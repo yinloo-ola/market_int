@@ -15,6 +15,7 @@ Retire rules that no longer apply during finalizing.
 ## Tool Usage
 
 - The workflow guard commits the **entire working tree** on `git commit`, not just staged paths. Before committing, `git restore` or stash unrelated changes, and always verify with `git show --stat HEAD` that only the intended files landed.
+- A directory-wide `git add <dir>` sweeps **untracked neighbors** in that tree into the commit. When unrelated untracked work exists (prototypes, local scratch), enumerate files explicitly and confirm with `git show --stat HEAD` — an "uncommitted by design" file once rode into a backend commit this way.
 - For portable bulk in-place edits (e.g., stripping a uniform argument suffix from many call sites), use `perl -i -pe 's/.../.../g'`. macOS `sed -i` requires an empty backup arg (`-i ''`) and otherwise silently mis-parses the command.
 - Before documenting a count (presets, configs, table rows), measure it (`grep -c` / `awk`) — stale counts in prose are common and erode trust in the docs.
 
@@ -26,16 +27,20 @@ Retire rules that no longer apply during finalizing.
   `inputmode="decimal"` and parse at submit.
 - Never format a local calendar date with `toISOString()` — it renders the
   UTC-shifted day (wrong for any UTC-offset viewer around midnight). Build
-  YYYY-MM-DD from the local `getFullYear/getMonth/getDate` components.
+  YYYY-MM-DD from the local `getFullYear/getMonth/getDate` components. The
+  same trap applies to **date arithmetic**: `new Date(y, m-1, d+n)` builds
+  in the viewer's timezone and then formatting it in another timezone
+  shifts the day. Do calendar arithmetic timezone-neutral (e.g. `Date.UTC`
+  at noon) and format in the target zone.
+- A timeout that clears shared UI state (a flash message, a toast) must
+  `clearTimeout` its predecessor and be cancelled on unmount — overlapping
+  triggers let the elder timer wipe the younger message early.
 
 ## Architecture Rules
 
 - When the same logic exists in two places (e.g., a production scorer and a research/backtest copy), add a **pinning regression test** asserting they produce identical output on a shared input vector. It catches divergence the moment either side is edited — far cheaper than de-duplicating the implementations.
 - A pure refactor (removing already-unused parameters, reordering) legitimately produces **zero** test reds — that is correct, not suspicious. "Zero reds is suspicious" applies to *behavior*-changing edits, not signature cleanups where call sites are merely updated for compilation.
 - When you can make one module mirror another **by calling it** (e.g. a backtest preset delegating to the shipped production scorer) instead of replicating the formula, prefer delegation — it removes the duplicate a pin would guard, so there is nothing to drift. Pinning is the fallback when delegation isn't possible (different layer, language, or perf constraint).
-
-## Architecture Rules
-
 - Keep the "research baseline" and the "production mirror" configs distinct and named honestly. A backtest `control` that diverges from production scoring will mislead anyone who reads its results as the live strategy's performance — always provide an explicit, pinned mirror.
 - A function parameter that is accepted but ignored is a **false contract**. Prefix it `_` immediately; if full removal's cascade is large, schedule removal as its own task rather than leaving the false seam in place.
 - When a hard cutoff (e.g., a max-value reject) and a continuous score dimension encode the same idea (e.g., "danger"), pick **one**. Keeping both lets them disagree silently and discards the cases where they disagree for good reasons (e.g., a high value that a continuous model correctly rates as safe).
@@ -49,3 +54,16 @@ Retire rules that no longer apply during finalizing.
   pre-call snapshot (it clobbers concurrent mutations) and should not hold a
   lock across the call. Re-read after the call and merge by identity; keep
   locks scoped to the fast read-modify-write only.
+- A state transition that touches **two collections in one document**
+  (record X and remove Y) must be **one** server-side read-modify-write —
+  never two requests the client stitches. Paired calls make half-applied
+  states reachable after any failure between them.
+- When a whole-document last-writer-wins store starts encoding economic
+  **transitions** (not just state), a lost update becomes an economic event
+  (a position resurrected, shares un-reduced). Revisit the concurrency
+  model (per-key serialization) before such mutations meet multi-device
+  use — not after.
+- A scripted seam proves your code's **shape**, not the external API's
+  **semantics**. Before trusting a new query mode in production, probe the
+  real endpoint once with the actual parameters: a server-side filter can
+  return empty rows for exactly the cases the feature exists to surface.
