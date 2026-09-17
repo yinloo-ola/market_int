@@ -4,8 +4,8 @@ Design: docs/plans/2026-09-17-wheel-holdings/wheel-holdings-design.md
 Branch: 2026-09-17-wheel-holdings
 Setup: done
 Started: 2026-09-16T23:09:51Z
-Last updated: 2026-09-17T03:05:00Z
-Feature phase: ship-paused
+Last updated: 2026-09-17T05:30:00Z
+Feature phase: done
 
 ## Requirements
 | # | Done | Requirement | Per-req ceremony | Commit |
