@@ -1447,18 +1447,18 @@ details.adjust .hint-custom { color: var(--accent); }
   padding-top: 0.4rem;
 }
 @media (max-width: 900px) {
-  /* The rail stacks above the list (user decision); rows keep their
-     stacked layout below 720px. */
+  /* The rail stacks above the list, and the list rows stack (both per the
+     R10 criterion); further compaction happens below 720px. */
   .hp-wheel { grid-template-columns: 1fr; }
   .hp-rail { position: static; }
-}
-@media (max-width: 720px) {
   .hp-list-row.hp-list-head { display: none; }
   .hp-list-row { display: flex; flex-direction: column; align-items: stretch; gap: 0.45rem; }
   .hp-list-pos { justify-content: space-between; }
   .hp-list-pace { display: flex; flex-direction: column; gap: 0.15rem; }
   .hp-list-status { flex-direction: row; flex-wrap: wrap; }
   .hp-list-row .holdings-close-btn { align-self: flex-end; }
+}
+@media (max-width: 720px) {
   .hp-cash-editor { margin-left: 0; }
   .hp-cash-editor input { width: 7rem; }
 }

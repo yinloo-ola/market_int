@@ -392,8 +392,21 @@ async fn write_ledger_off_thread(
         .expect("spawn_blocking write_ledger")
 }
 
-fn position_json(h: &Holding, today: chrono::NaiveDate) -> serde_json::Value {
-    let mark = h.mark.as_ref().map(|m| {
+/// The option entry shape shared by positions and calls (identical fields
+/// since R1 — one renderer, two thin wrappers, no drift surface).
+#[allow(clippy::too_many_arguments)]
+fn option_json(
+    id: &str,
+    symbol: &str,
+    strike: f64,
+    expiry: chrono::NaiveDate,
+    premium: f64,
+    contracts: u32,
+    sold: chrono::NaiveDate,
+    mark: Option<&market_int_core::holdings::Mark>,
+    view: market_int_core::holdings::HoldingView,
+) -> serde_json::Value {
+    let mark = mark.map(|m| {
         json!({
             "mid": m.mid,
             "as_of": m.as_of.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -401,39 +414,46 @@ fn position_json(h: &Holding, today: chrono::NaiveDate) -> serde_json::Value {
         })
     });
     json!({
-        "id": h.id,
-        "symbol": h.symbol,
-        "strike": h.strike,
-        "expiry": h.expiry.to_string(),
-        "premium": h.premium,
-        "contracts": h.contracts,
-        "sold": h.sold.to_string(),
+        "id": id,
+        "symbol": symbol,
+        "strike": strike,
+        "expiry": expiry.to_string(),
+        "premium": premium,
+        "contracts": contracts,
+        "sold": sold.to_string(),
         "mark": mark,
-        "view": h.view(today),
+        "view": view,
     })
 }
 
+fn position_json(h: &Holding, today: chrono::NaiveDate) -> serde_json::Value {
+    option_json(
+        &h.id,
+        &h.symbol,
+        h.strike,
+        h.expiry,
+        h.premium,
+        h.contracts,
+        h.sold,
+        h.mark.as_ref(),
+        h.view(today),
+    )
+}
+
 /// Calls render with the identical option shape (sibling arrays, same
-/// fields — R1).
+/// fields — R1): the shared `option_json` renderer.
 fn call_json(c: &market_int_core::holdings::CallHolding, today: chrono::NaiveDate) -> serde_json::Value {
-    let mark = c.mark.as_ref().map(|m| {
-        json!({
-            "mid": m.mid,
-            "as_of": m.as_of.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            "underlying_price": m.underlying_price,
-        })
-    });
-    json!({
-        "id": c.id,
-        "symbol": c.symbol,
-        "strike": c.strike,
-        "expiry": c.expiry.to_string(),
-        "premium": c.premium,
-        "contracts": c.contracts,
-        "sold": c.sold.to_string(),
-        "mark": mark,
-        "view": c.view(today),
-    })
+    option_json(
+        &c.id,
+        &c.symbol,
+        c.strike,
+        c.expiry,
+        c.premium,
+        c.contracts,
+        c.sold,
+        c.mark.as_ref(),
+        c.view(today),
+    )
 }
 
 /// Covered-call contracts covering a lot's symbol — the covered count the
@@ -528,12 +548,15 @@ fn ledger_entry_count(doc: &HoldingsDocument) -> usize {
     doc.positions.len() + doc.calls.len() + doc.lots.len()
 }
 
+/// Mutation bodies are tiny JSON documents; the bound is generous.
+const MAX_BODY_BYTES: usize = 16 * 1024;
+
 /// `POST /api/holdings` — add to the caller's ledger. `kind` selects the
 /// array: `"put"` (the default — deployed clients never send it),
 /// `"call"`, or `"lot"` (R6).
 pub(crate) async fn holdings_add(State(st): State<crate::api::AppState>, req: Request) -> Response {
     let uid = uid_of(&req);
-    let bytes = match axum::body::to_bytes(req.into_body(), 16 * 1024).await {
+    let bytes = match axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "unreadable body"),
     };
@@ -601,7 +624,7 @@ async fn add_option_leg(
         // Server-generated id: process sequence on top of the clock stamp
         // (NEXT_SEQ precedent). Unique across ALL arrays — the id prefix
         // and clock stamp are shared by every kind.
-        id: format!("h{}-{}", (st.clock)().timestamp_millis(), next_position_seq()),
+        id: format!("h{}-{}", (st.clock)().timestamp_millis(), next_entry_seq()),
         symbol,
         strike,
         expiry,
@@ -691,7 +714,7 @@ async fn add_lot(st: crate::api::AppState, uid: String, v: &serde_json::Value) -
     }
 
     let lot = market_int_core::holdings::ShareLot {
-        id: format!("h{}-{}", (st.clock)().timestamp_millis(), next_position_seq()),
+        id: format!("h{}-{}", (st.clock)().timestamp_millis(), next_entry_seq()),
         symbol,
         shares,
         basis_per_share,
@@ -721,14 +744,24 @@ async fn add_lot(st: crate::api::AppState, uid: String, v: &serde_json::Value) -
         }
     };
     if let Some(put_id) = &assigned_from {
-        let before = doc.positions.len();
-        doc.positions.retain(|p| p.id != *put_id);
-        if doc.positions.len() == before {
+        let Some(put) = doc.positions.iter().find(|p| p.id == *put_id) else {
             return error_response(
                 StatusCode::NOT_FOUND,
                 "no such position for assigned_from",
             );
+        };
+        // An assignment records the shares the put actually delivered —
+        // a GOOG put can never become an AAPL lot.
+        if put.symbol != lot.symbol {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "assigned_from put is for {} — the lot must record the same symbol",
+                    put.symbol
+                ),
+            );
         }
+        doc.positions.retain(|p| p.id != *put_id);
     }
     if ledger_entry_count(&doc) >= MAX_POSITIONS_PER_LEDGER {
         return error_response(
@@ -737,6 +770,9 @@ async fn add_lot(st: crate::api::AppState, uid: String, v: &serde_json::Value) -
         );
     }
     doc.lots.push(lot.clone());
+    // Covered count from the post-mutation document — the 201 reflects the
+    // real coverage, not a placeholder.
+    let covered = covered_contracts(&doc, &lot.symbol);
     if let Err(err) = write_ledger_off_thread(st.holdings_dir.clone(), uid, doc).await {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -745,13 +781,13 @@ async fn add_lot(st: crate::api::AppState, uid: String, v: &serde_json::Value) -
     }
     (
         StatusCode::CREATED,
-        Json(json!({ "lot": lot_json(&lot, today_et(st.clock), 0) })),
+        Json(json!({ "lot": lot_json(&lot, today_et(st.clock), covered) })),
     )
         .into_response()
 }
 
 /// Per-process sequence for server-generated ids (NEXT_SEQ precedent).
-fn next_position_seq() -> u64 {
+fn next_entry_seq() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     NEXT.fetch_add(1, Ordering::Relaxed)
@@ -788,7 +824,7 @@ pub(crate) async fn holdings_delete(
         false
     };
     if !removed {
-        return error_response(StatusCode::NOT_FOUND, "no such position");
+        return error_response(StatusCode::NOT_FOUND, "no such holding");
     }
     if let Err(err) = write_ledger_off_thread(st.holdings_dir.clone(), uid, doc).await {
         return error_response(
@@ -807,7 +843,7 @@ pub(crate) async fn holdings_patch_cash(
     req: Request,
 ) -> Response {
     let uid = uid_of(&req);
-    let bytes = match axum::body::to_bytes(req.into_body(), 16 * 1024).await {
+    let bytes = match axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "unreadable body"),
     };
@@ -856,7 +892,7 @@ pub(crate) async fn holdings_called_away(
     req: Request,
 ) -> Response {
     let uid = uid_of(&req);
-    let bytes = match axum::body::to_bytes(req.into_body(), 16 * 1024).await {
+    let bytes = match axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "unreadable body"),
     };
@@ -1058,11 +1094,17 @@ pub(crate) async fn holdings_refresh(
         }
     }
 
-    if let Err(err) = write_ledger_off_thread(st.holdings_dir.clone(), uid, doc.clone()).await {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("ledger write failed: {err}"),
-        );
+    // A pass that priced nothing changed nothing — skip the rewrite, so a
+    // refresh of an empty (or all-stale) book never creates or rewrites
+    // the file (GET's no-create property).
+    if !ok.is_empty() {
+        if let Err(err) = write_ledger_off_thread(st.holdings_dir.clone(), uid, doc.clone()).await
+        {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("ledger write failed: {err}"),
+            );
+        }
     }
     let mut body = ledger_json(&doc, today_et(st.clock));
     if let serde_json::Value::Object(map) = &mut body {
@@ -2695,6 +2737,26 @@ mod tests {
             std::fs::read(&ledger_path).unwrap(),
             before,
             "ledger byte-unchanged"
+        );
+
+        // A put can only be assigned into a lot of its own symbol.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "lot", "symbol": "AAPL", "shares": 200,
+                "basis_per_share": 349.0, "acquired": "2026-09-08",
+                "assigned_from": "p1"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "symbol mismatch: {v}");
+        assert_eq!(
+            std::fs::read(&ledger_path).unwrap(),
+            before,
+            "mismatch leaves the ledger byte-unchanged"
         );
 
         // Without assigned_from: plain add, put untouched.

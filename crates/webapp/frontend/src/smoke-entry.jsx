@@ -236,6 +236,25 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
       spot_pct_vs_strike: (331.2 - 350) / 350,
     },
   };
+  const POSITION_VIEWLESS = {
+    ...POSITION,
+    id: "h2",
+    symbol: "AMD",
+    strike: 417.5,
+    premium: 3.75,
+    mark: null,
+    view: {
+      pl_dollars: null,
+      pl_pct: null,
+      pace_per_day_dollars: null,
+      pace_per_day_pct: null,
+      days_elapsed: 2,
+      days_total: 5,
+      target_pct: 0.4,
+      pace_met: false,
+      spot_pct_vs_strike: null,
+    },
+  };
   const calls = [];
   const jsonRes = (v) =>
     new Response(JSON.stringify(v), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -259,25 +278,6 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
     if (path === "/api/holdings/refresh") return jsonRes({ schema_version: 1, positions: [POSITION], refresh: { ok: ["h1"], stale: [] } });
     if (String(path).startsWith("/api/holdings/")) return jsonRes({ removed: String(path).split("/").pop() });
     return new Response("not found", { status: 404 });
-  };
-  const POSITION_VIEWLESS = {
-    ...POSITION,
-    id: "h2",
-    symbol: "AMD",
-    strike: 417.5,
-    premium: 3.75,
-    mark: null,
-    view: {
-      pl_dollars: null,
-      pl_pct: null,
-      pace_per_day_dollars: null,
-      pace_per_day_pct: null,
-      days_elapsed: 2,
-      days_total: 5,
-      target_pct: 0.4,
-      pace_met: false,
-      spot_pct_vs_strike: null,
-    },
   };
 
   const div = document.createElement("div");

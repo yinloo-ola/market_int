@@ -164,7 +164,9 @@ pub fn apply_called_away(lots: &[ShareLot], symbol: &str, contracts: u32) -> Opt
                     l.clone()
                 }
             })
-            .filter(|l| l.shares > 0)
+            // Drop the reduced lot when it empties; lots we weren't asked
+            // to touch are never removed, even if data made them 0.
+            .filter(|l| !(l.id == chosen.id && l.shares == 0))
             .collect(),
     )
 }
@@ -763,14 +765,6 @@ mod tests {
             let puts = vec![put(420.0, 1), put(350.0, 2), put(230.0, 1)];
             assert_eq!(reserved_cash(&puts), 135_000.0);
             assert_eq!(free_cash(148_000.0, &puts), 13_000.0);
-        }
-
-        /// Calls and lots never reserve — the functions take only the puts
-        /// slice, so a mixed book cannot change the answer by construction.
-        #[test]
-        fn only_puts_count() {
-            let puts = vec![put(420.0, 1), put(350.0, 2), put(230.0, 1)];
-            assert_eq!(reserved_cash(&puts), 135_000.0);
         }
 
         /// Free cash goes negative honestly — no clamping.

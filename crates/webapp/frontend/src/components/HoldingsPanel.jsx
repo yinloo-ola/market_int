@@ -12,7 +12,7 @@
    call: contracts = floor(shares/100)) and the close dialog's realized-
    P&L preview, which needs the price the user is typing. */
 
-import { For, Show, createSignal, onMount } from "solid-js";
+import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 
 import {
   addHolding,
@@ -33,9 +33,12 @@ const pct = (v, dp = 0) => `${(v * 100).toFixed(dp)}%`;
    toISOString for local dates (the GMT+8 bug caught in the prototype). */
 const todayET = () =>
   new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+/* Noon-UTC arithmetic so the shifted calendar date is the same instant no
+   matter the viewer's offset, then formatted in ET — the naive
+   `new Date(y, m-1, d+n)` re-introduced the GMT+8 off-by-one here. */
 const plusDays = (iso, n) => {
   const [y, m, d] = iso.split("-").map(Number);
-  return new Date(y, m - 1, d + n).toLocaleDateString("en-CA", {
+  return new Date(Date.UTC(y, m - 1, d + n, 12)).toLocaleDateString("en-CA", {
     timeZone: "America/New_York",
   });
 };
@@ -109,7 +112,6 @@ function CashStrip(props) {
           <CashEditor
             cash={props.cash}
             busy={props.busy}
-            onDone={() => setEditing(false)}
             onSave={async (n) => {
               const res = await props.onSaveCash(n);
               if (res) setEditing(false);
@@ -258,7 +260,11 @@ function OptionRow(props) {
 
 /* ── forms ─────────────────────────────────────────────────────── */
 
-function AddPutForm(props) {
+/* Free-field option sell — one form for both sides (kind-less = put, the
+   deployed clients' shape). Only the placeholders, the submitted kind,
+   and the call's coverage footnote differ. */
+function OptionForm(props) {
+  const kind = props.kind;
   const [f, setF] = createSignal({
     symbol: "",
     strike: "",
@@ -280,6 +286,7 @@ function AddPutForm(props) {
         e.preventDefault();
         if (!valid() || props.busy?.()) return;
         props.onAdd({
+          ...(kind === "call" ? { kind: "call" } : {}),
           symbol: f().symbol.trim().toUpperCase(),
           strike: Number(f().strike),
           premium: Number(f().premium),
@@ -294,11 +301,21 @@ function AddPutForm(props) {
       </label>
       <label>
         strike
-        <input inputmode="decimal" placeholder="e.g. 350.00" value={f().strike} onInput={set("strike")} />
+        <input
+          inputmode="decimal"
+          placeholder={kind === "call" ? "e.g. 355.00" : "e.g. 350.00"}
+          value={f().strike}
+          onInput={set("strike")}
+        />
       </label>
       <label>
         premium
-        <input inputmode="decimal" placeholder="e.g. 1.00" value={f().premium} onInput={set("premium")} />
+        <input
+          inputmode="decimal"
+          placeholder={kind === "call" ? "e.g. 1.80" : "e.g. 1.00"}
+          value={f().premium}
+          onInput={set("premium")}
+        />
       </label>
       <label>
         contracts <input inputmode="numeric" value={f().contracts} onInput={set("contracts")} />
@@ -310,77 +327,16 @@ function AddPutForm(props) {
         expiry <input type="date" value={f().expiry} onInput={set("expiry")} />
       </label>
       <button type="submit" class="btn btn-primary" disabled={!valid() || props.busy?.()}>
-        Sell put
+        {kind === "call" ? "Sell call" : "Sell put"}
       </button>
       <button type="button" class="btn" onClick={props.onDone}>
         Cancel
       </button>
-    </form>
-  );
-}
-
-/* Free-field covered call — coverage is display-only (no enforcement). */
-function AddCallForm(props) {
-  const [f, setF] = createSignal({
-    symbol: "",
-    strike: "",
-    premium: "",
-    contracts: "1",
-    sold: todayET(),
-    expiry: plusDays(todayET(), 7),
-  });
-  const set = (k) => (e) => setF({ ...f(), [k]: e.target.value });
-  const valid = () =>
-    f().symbol.trim() &&
-    [f().strike, f().premium, f().contracts].every((x) => Number(x) > 0) &&
-    f().expiry > f().sold &&
-    f().sold <= todayET();
-  return (
-    <form
-      class="holdings-add"
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (!valid() || props.busy?.()) return;
-        props.onAdd({
-          kind: "call",
-          symbol: f().symbol.trim().toUpperCase(),
-          strike: Number(f().strike),
-          premium: Number(f().premium),
-          contracts: Math.trunc(Number(f().contracts)),
-          sold: f().sold,
-          expiry: f().expiry,
-        });
-      }}
-    >
-      <label>
-        symbol <input placeholder="SYMBOL" value={f().symbol} onInput={set("symbol")} />
-      </label>
-      <label>
-        strike
-        <input inputmode="decimal" placeholder="e.g. 355.00" value={f().strike} onInput={set("strike")} />
-      </label>
-      <label>
-        premium
-        <input inputmode="decimal" placeholder="e.g. 1.80" value={f().premium} onInput={set("premium")} />
-      </label>
-      <label>
-        contracts <input inputmode="numeric" value={f().contracts} onInput={set("contracts")} />
-      </label>
-      <label>
-        sold <input type="date" value={f().sold} onInput={set("sold")} />
-      </label>
-      <label>
-        expiry <input type="date" value={f().expiry} onInput={set("expiry")} />
-      </label>
-      <button type="submit" class="btn btn-primary" disabled={!valid() || props.busy?.()}>
-        Sell call
-      </button>
-      <button type="button" class="btn" onClick={props.onDone}>
-        Cancel
-      </button>
-      <div class="hp-dialog-note">
-        coverage is shown per lot — recorded even if it exceeds held shares
-      </div>
+      <Show when={kind === "call"}>
+        <div class="hp-dialog-note">
+          coverage is shown per lot — recorded even if it exceeds held shares
+        </div>
+      </Show>
     </form>
   );
 }
@@ -731,6 +687,16 @@ function ClosePanel(props) {
 export default function HoldingsPanel() {
   const [ledger, setLedger] = createSignal(null);
   const [notice, setNotice] = createSignal("");
+  let flashTimer;
+  // One timer at a time: an overlapping flash must not let the previous
+  // timer wipe the newer message early (and nothing fires after unmount).
+  const flash = (msg) => {
+    setNotice(msg);
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => setNotice(""), 4000);
+  };
+  onCleanup(() => clearTimeout(flashTimer));
+
   // The one open panel: {type:'put'|'call'|'sellCall'|'addPut'|'addCall'
   // |'addLot', pos?|lot?, stage?, prefill?} — or null. Exactly one panel
   // can exist in the DOM.
@@ -738,11 +704,6 @@ export default function HoldingsPanel() {
   // In-flight guard: a double-clicked Add/Refresh/Confirm must not double-
   // submit (review finding honored from the 2026-09-11 panel).
   const [busy, setBusy] = createSignal(false);
-
-  const flash = (msg) => {
-    setNotice(msg);
-    setTimeout(() => setNotice(""), 4000);
-  };
 
   const load = async () => {
     try {
@@ -983,7 +944,8 @@ export default function HoldingsPanel() {
           <div class="holdings-notice">{notice()}</div>
         </Show>
         <Show when={dialog()?.type === "addPut"} keyed>
-          <AddPutForm
+          <OptionForm
+            kind="put"
             busy={busy}
             onDone={() => setDialog(null)}
             onAdd={(f) =>
@@ -992,7 +954,8 @@ export default function HoldingsPanel() {
           />
         </Show>
         <Show when={dialog()?.type === "addCall"} keyed>
-          <AddCallForm
+          <OptionForm
+            kind="call"
             busy={busy}
             onDone={() => setDialog(null)}
             onAdd={(f) =>
