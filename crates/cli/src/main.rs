@@ -35,27 +35,69 @@ async fn query_and_log_option_chain(
     requester: &Requester,
     symbol_list: &[&str],
     expiration_date_ny: &chrono::DateTime<chrono_tz::Tz>,
+    side: &OptionChainSide,
+    strike: Option<f64>,
+    underlying: Option<f64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Create a simple HashMap with underlying prices for the test symbols
+    let symbol = symbol_list[0];
+
+    // With a --strike probe, mirror the production refresh: one kline pass
+    // supplies the real last close (it annotates every parsed row). The
+    // legacy band keeps its historical placeholder.
+    let underlying_price = match (underlying, strike) {
+        (Some(v), _) => v,
+        (None, Some(_)) => {
+            let candles = requester
+                .query_stock_quotes(&[symbol], &chrono::Local::now(), 1, "day")
+                .await?;
+            let close = candles
+                .last()
+                .map(|c| c.close)
+                .ok_or_else(|| format!("no candles returned for {symbol}"))?;
+            log::info!("Fetched {symbol} underlying last close: {close}");
+            close
+        }
+        (None, None) => 0.0,
+    };
     let mut underlying_prices: std::collections::HashMap<String, f64> =
         std::collections::HashMap::new();
+    underlying_prices.insert(symbol.to_string(), underlying_price);
 
-    underlying_prices.insert(symbol_list[0].to_string(), 0.0);
+    // Degenerate (strike, strike) = the refresh's "price OUR strike" query
+    // shape (OI minimum 0 there, too); the legacy band stays the example.
+    let (min_strike, max_strike) = strike.map_or((225.0, 235.0), |s| (s, s));
 
-    // Query option chain using the nearest expiration date
+    log::info!(
+        "Chain probe: {symbol} side={:?} strikes [{min_strike}, {max_strike}] underlying={underlying_price}",
+        side
+    );
+
+    // Query option chain
     let option_chain = requester
         .query_option_chain(
-            &[
-                (symbol_list[0], (225.0, 235.0)), // Example symbol with its strike range
-            ],
+            &[(symbol, (min_strike, max_strike))],
             &underlying_prices,
             expiration_date_ny,
-            constants::MIN_OPEN_INTEREST,
-            &OptionChainSide::Put,
+            if strike.is_some() { 0 } else { constants::MIN_OPEN_INTEREST },
+            side,
         )
         .await?;
 
-    log::info!("Successfully queried option chain for {:?}", symbol_list);
+    log::info!(
+        "Chain returned {} row(s) for {:?} strikes [{min_strike}, {max_strike}]",
+        option_chain.len(),
+        symbol
+    );
+    for row in &option_chain {
+        log::info!(
+            "  strike {} mid {} (bid {} / ask {}) oi {:?}",
+            row.strike,
+            row.mid,
+            row.bid,
+            row.ask,
+            row.open_interest
+        );
+    }
 
     // Serialize and log the output as JSON string
     let json_str = serde_json::to_string_pretty(&option_chain)?;
@@ -97,6 +139,20 @@ enum Commands {
     // Test Tiger API
     TestTiger {
         symbols: String,
+        /// Option chain side to query. The holdings refresh sends `call`
+        /// for covered calls — the previously untested path (the request
+        /// always carries `in_the_money: false`).
+        #[arg(long, default_value = "put")]
+        side: String,
+        /// Probe the refresh's degenerate (strike, strike) query at this
+        /// strike. Omitted = the legacy 225–235 example band.
+        #[arg(long)]
+        strike: Option<f64>,
+        /// Underlying last close attached to the rows. With a --strike
+        /// probe this is fetched from Tiger quotes when omitted — the
+        /// production refresh always sends the real close.
+        #[arg(long)]
+        underlying: Option<f64>,
     },
     // Backtest simulation
     Backtest {
@@ -255,9 +311,23 @@ async fn main() {
             }
         }
 
-        Commands::TestTiger { symbols } => {
+        Commands::TestTiger {
+            symbols,
+            side,
+            strike,
+            underlying,
+        } => {
             // Split the comma-separated symbols into a vector
             let symbol_list: Vec<&str> = symbols.split(',').map(|s| s.trim()).collect();
+
+            let side = match side.as_str() {
+                "put" => OptionChainSide::Put,
+                "call" => OptionChainSide::Call,
+                other => {
+                    log::error!("unknown side {other:?} (want put|call)");
+                    return;
+                }
+            };
 
             // Initialize Tiger API requester
             let mut requester = match tiger::api_caller::Requester::new().await {
@@ -298,8 +368,15 @@ async fn main() {
             log::info!("Using nearest expiration date: {:?}", nearest_expiration);
 
             // Query and log option chain data
-            if let Err(err) =
-                query_and_log_option_chain(&requester, &symbol_list, &nearest_expiration).await
+            if let Err(err) = query_and_log_option_chain(
+                &requester,
+                &symbol_list,
+                &nearest_expiration,
+                &side,
+                strike,
+                underlying,
+            )
+            .await
             {
                 log::error!("Error querying option chain: {}", err);
             }
