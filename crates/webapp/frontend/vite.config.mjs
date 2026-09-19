@@ -9,6 +9,10 @@ export default defineConfig({
     proxy: {
       "/api": "http://127.0.0.1:8080",
     },
+    // Tunnel/phone previews (VITE_PREVIEW_USER flow): cloudflared quick
+    // tunnels get a random *.trycloudflare.com host per run, so allow the
+    // suffix rather than one hostname.
+    allowedHosts: [".trycloudflare.com"],
   },
   build: {
     outDir: "dist",
