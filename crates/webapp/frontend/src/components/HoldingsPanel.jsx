@@ -725,8 +725,6 @@ export default function HoldingsPanel() {
     calls().map((c) => ({ p: { ...c, kind: "call" }, v: c.view }));
   const urgencyKey = (x) =>
     x.v.pl_pct == null ? -Infinity : x.v.pl_pct - x.v.target_pct;
-  const merged = () =>
-    [...putsV(), ...callsV()].sort((a, b) => urgencyKey(b) - urgencyKey(a));
 
   const dialogFor = (type, id) => {
     const d = dialog();
