@@ -18,6 +18,15 @@ Retire rules that no longer apply during finalizing.
 - A directory-wide `git add <dir>` sweeps **untracked neighbors** in that tree into the commit. When unrelated untracked work exists (prototypes, local scratch), enumerate files explicitly and confirm with `git show --stat HEAD` — an "uncommitted by design" file once rode into a backend commit this way.
 - For portable bulk in-place edits (e.g., stripping a uniform argument suffix from many call sites), use `perl -i -pe 's/.../.../g'`. macOS `sed -i` requires an empty backup arg (`-i ''`) and otherwise silently mis-parses the command.
 - Before documenting a count (presets, configs, table rows), measure it (`grep -c` / `awk`) — stale counts in prose are common and erode trust in the docs.
+- In an auth-bypass preview flow, the **server derives its own data key**
+  when auth is off (e.g. a fixed local identity) — seed data for *that*
+  identity, not the client-side bypass identity; the two diverge silently
+  and the preview shows an empty store.
+- Prototype UI **where it will be judged**: a dev-gated `?variant=`
+  switch inside the real page answers look-and-feel questions with real
+  data and density; a standalone mock leaves even the requester unsure
+  which artifact is authoritative. Fold the winner in, strip the
+  scaffolding, keep the full variant set on a throwaway branch.
 
 ## Frontend Patterns
 
@@ -35,6 +44,14 @@ Retire rules that no longer apply during finalizing.
 - A timeout that clears shared UI state (a flash message, a toast) must
   `clearTimeout` its predecessor and be cancelled on unmount — overlapping
   triggers let the elder timer wipe the younger message early.
+- When mocking `fetch` in a harness, default the method
+  (`opts.method ?? "GET"`) — real callers omit it for GETs, so a `?? ""`
+  default silently 404s every unannotated request while the first render
+  still works.
+- Dev servers that validate Host headers (vite 6+ `server.allowedHosts`)
+  reject tunnel hostnames; allow-list the tunnel provider's domain
+  suffix — quick tunnels randomize the hostname per run, so a single
+  host entry never matches.
 
 ## Architecture Rules
 
