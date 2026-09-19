@@ -1,8 +1,8 @@
-/* Holdings panel — the full wheel ledger (2026-09-17-wheel-holdings),
-   variant C ("wheel rail") from the approved prototype. A sticky rail
-   (cash strip → PATCH, wheel stats, lot rows) beside one merged urgency
-   list of puts and calls, with every dialog anchored inline under the
-   position that opened it.
+/* Holdings panel — the full wheel ledger, side-rail sub-tabs layout
+   (2026-09-19-holdings-subtabs, variant B from the approved prototype).
+   LOTS | PUTS | CALLS as tile buttons in a sticky rail (a horizontal tile
+   strip below 900px) beside the active pane column; the cash strip,
+   Refresh marks and the flash notice stay reachable from every tab.
    The server owns every number: entries arrive with their mark and the
    computed view (crates/core/src/holdings.rs); lots carry value/P&L/
    capacity/covered; the cash strip renders cash/reserved/free verbatim
@@ -856,41 +856,59 @@ export default function HoldingsPanel() {
     onAssign,
   };
 
-  return (
-    <div class="holdings-panel hp-wheel">
-      <aside class="hp-rail">
-        <CashStrip
-          cash={ledger()?.cash ?? null}
-          reserved={ledger()?.cash_reserved ?? 0}
-          free={ledger()?.cash_free ?? null}
-          busy={busy}
-          onSaveCash={onSaveCash}
-        />
-        <div class="hp-rail-block">
-          <div class="hp-rail-label">the wheel</div>
-          <div class="hp-rail-row">
-            <span>open puts</span>
-            <b>{puts().length}</b>
-          </div>
-          <div class="hp-rail-row">
-            <span>open covered calls</span>
-            <b>{calls().length}</b>
-          </div>
-          <div class="hp-rail-row">
-            <span>share lots</span>
-            <b>{lots().length}</b>
-          </div>
-          <div class="hp-rail-row">
-            <span>shares held</span>
-            <b>{lots().reduce((n, l) => n + l.shares, 0)}</b>
-          </div>
-        </div>
-        <div class="hp-rail-block">
-          <div class="hp-rail-label">lots</div>
-          <Show
-            when={lots().length > 0}
-            fallback={<div class="hp-hint">No recorded lots — assignments land here.</div>}
-          >
+  /* ── side-rail sub-tabs (2026-09-19-holdings-subtabs, variant B) ──
+     LOTS | PUTS | CALLS as tile buttons in a sticky rail beside the
+     active pane column; the cash strip, Refresh marks and the flash
+     notice stay reachable from every tab. A client-side re-arrangement
+     of the same GET document — the rows, forms and dialogs below are
+     the shared components above, verbatim. */
+
+  const [pane, setPane] = createSignal("lots"); // LOTS | PUTS | CALLS
+
+  const paneDefs = () => [
+    {
+      id: "lots",
+      label: "Lots",
+      count: lots().length,
+      sub: `${lots().reduce((n, l) => n + l.shares, 0)} sh held`,
+    },
+    {
+      id: "puts",
+      label: "Puts",
+      count: puts().length,
+      sub: `${puts().filter((p) => p.view.pace_met).length} pace-met`,
+    },
+    {
+      id: "calls",
+      label: "Calls",
+      count: calls().length,
+      sub: `${calls().filter((c) => c.view.spot_pct_vs_strike > 0).length} ITM`,
+    },
+  ];
+  /* Per-pane urgency order — same key the merged list ranked with. */
+  const putsSorted = () =>
+    [...putsV()].sort((a, b) => urgencyKey(b) - urgencyKey(a));
+  const callsSorted = () =>
+    [...callsV()].sort((a, b) => urgencyKey(b) - urgencyKey(a));
+
+  const paneAdd = {
+    lots: { label: "+ New lot", type: "addLot" },
+    puts: { label: "+ Sell put", type: "addPut" },
+    calls: { label: "+ Sell call", type: "addCall" },
+  };
+  const paneEmpty = {
+    lots: "No recorded lots — assignments land here.",
+    puts: "No open puts — press “+ Sell put” to record one.",
+    calls: "No open calls — press “+ Sell call” to record one.",
+  };
+  const paneRows = (id) => {
+    if (id === "lots")
+      return (
+        <Show
+          when={lots().length > 0}
+          fallback={<div class="empty-panel">{paneEmpty.lots}</div>}
+        >
+          <div class="hp-list">
             <For each={lots()}>
               {(l) => (
                 <LotRailRow
@@ -900,78 +918,24 @@ export default function HoldingsPanel() {
                   onSellDialog={(lot) => setDialog({ type: "sellCall", lot })}
                   onDialogDone={() => setDialog(null)}
                   onSellCall={(lot, fields) =>
-                    onAdd(fields, `Sold ${fields.symbol} ${fields.strike}C ×${fields.contracts} — Refresh marks to price.`)
+                    onAdd(
+                      fields,
+                      `Sold ${fields.symbol} ${fields.strike}C ×${fields.contracts} — Refresh marks to price.`
+                    )
                   }
                 />
               )}
             </For>
-          </Show>
-          <button
-            type="button"
-            class="btn-ghost hp-cash-edit"
-            onClick={() => setDialog({ type: "addLot" })}
-          >
-            + New lot
-          </button>
-          <Show when={dialog()?.type === "addLot"} keyed>
-            <AddLotForm
-              busy={busy}
-              onDone={() => setDialog(null)}
-              onAdd={(f) => onAdd(f, `Recorded ${f.shares} sh ${f.symbol}.`)}
-            />
-          </Show>
-        </div>
-      </aside>
-
-      <div class="hp-list">
-        <div class="hp-toolbar-row">
-          <button type="button" class="btn" onClick={() => setDialog({ type: "addPut" })}>
-            + Sell put
-          </button>
-          <button type="button" class="btn" onClick={() => setDialog({ type: "addCall" })}>
-            + Sell call
-          </button>
-          <button
-            type="button"
-            class="btn holdings-refresh"
-            disabled={busy()}
-            onClick={onRefresh}
-          >
-            ⟳<span class="holdings-refresh-label"> Refresh marks</span>
-          </button>
-        </div>
-        <Show when={notice()}>
-          <div class="holdings-notice">{notice()}</div>
+          </div>
         </Show>
-        <Show when={dialog()?.type === "addPut"} keyed>
-          <OptionForm
-            kind="put"
-            busy={busy}
-            onDone={() => setDialog(null)}
-            onAdd={(f) =>
-              onAdd(f, `Sold ${f.symbol} ${f.strike}P ×${f.contracts} — press Refresh marks to price it.`)
-            }
-          />
-        </Show>
-        <Show when={dialog()?.type === "addCall"} keyed>
-          <OptionForm
-            kind="call"
-            busy={busy}
-            onDone={() => setDialog(null)}
-            onAdd={(f) =>
-              onAdd(f, `Sold ${f.symbol} ${f.strike}C ×${f.contracts} — Refresh marks to price.`)
-            }
-          />
-        </Show>
-
-        <Show
-          when={puts().length + calls().length > 0}
-          fallback={
-            <div class="empty-panel">
-              No open positions — press “+ Sell put” to record one.
-            </div>
-          }
-        >
+      );
+    const rows = id === "puts" ? putsSorted() : callsSorted();
+    return (
+      <Show
+        when={rows.length > 0}
+        fallback={<div class="empty-panel">{paneEmpty[id]}</div>}
+      >
+        <div class="hp-list">
           <div class="hp-list-row hp-list-head">
             <span>position</span>
             <span>P&L</span>
@@ -979,7 +943,7 @@ export default function HoldingsPanel() {
             <span>status</span>
             <span />
           </div>
-          <For each={merged()}>
+          <For each={rows}>
             {(x) => (
               <OptionRow
                 x={x}
@@ -989,7 +953,111 @@ export default function HoldingsPanel() {
               />
             )}
           </For>
-        </Show>
+        </div>
+      </Show>
+    );
+  };
+  const paneForm = (id) => (
+    <Show
+      when={
+        (id === "lots" && dialog()?.type === "addLot") ||
+        (id === "puts" && dialog()?.type === "addPut") ||
+        (id === "calls" && dialog()?.type === "addCall")
+      }
+      keyed
+    >
+      {id === "lots" ? (
+        <AddLotForm
+          busy={busy}
+          onDone={() => setDialog(null)}
+          onAdd={(f) => onAdd(f, `Recorded ${f.shares} sh ${f.symbol}.`)}
+        />
+      ) : (
+        <OptionForm
+          kind={id === "puts" ? "put" : "call"}
+          busy={busy}
+          onDone={() => setDialog(null)}
+          onAdd={(f) =>
+            onAdd(
+              f,
+              `Sold ${f.symbol} ${f.strike}${id === "puts" ? "P" : "C"} ×${f.contracts} — Refresh marks to price.`
+            )
+          }
+        />
+      )}
+    </Show>
+  );
+  const paneToolbar = (id) => (
+    <div class="hp-toolbar-row">
+      <button
+        type="button"
+        class="btn"
+        onClick={() => setDialog({ type: paneAdd[id].type })}
+      >
+        {paneAdd[id].label}
+      </button>
+      <Show when={id === "lots"}>
+        <span class="hp-pane-hint">
+          {lots().reduce((n, l) => n + l.shares, 0)} sh held
+        </span>
+      </Show>
+    </div>
+  );
+  const refreshBtn = () => (
+    <button
+      type="button"
+      class="btn holdings-refresh"
+      disabled={busy()}
+      onClick={onRefresh}
+    >
+      ⟳<span class="holdings-refresh-label"> Refresh marks</span>
+    </button>
+  );
+  const noticeLine = () => (
+    <Show when={notice()}>
+      <div class="holdings-notice">{notice()}</div>
+    </Show>
+  );
+
+  return (
+    <div class="holdings-panel hp-tabs-shell">
+      <div class="hp-tabs-grid">
+        <aside class="hp-tabs-rail">
+          <div class="hp-tabs-brand">Wheel ledger</div>
+          <CashStrip
+            cash={ledger()?.cash ?? null}
+            reserved={ledger()?.cash_reserved ?? 0}
+            free={ledger()?.cash_free ?? null}
+            busy={busy}
+            onSaveCash={onSaveCash}
+          />
+          <For each={paneDefs()}>
+            {(t) => (
+              <button
+                type="button"
+                class="hp-tab-tile"
+                classList={{ active: pane() === t.id }}
+                onClick={() => setPane(t.id)}
+              >
+                <span class="hp-tab-tile-name">{t.label.toUpperCase()}</span>
+                <span class="hp-tab-tile-count">{t.count}</span>
+                <div class="hp-tab-tile-sub">{t.sub}</div>
+              </button>
+            )}
+          </For>
+        </aside>
+        <main class="hp-tabs-main">
+          <div class="hp-pane-head">
+            <span class="hp-pane-title">
+              {paneDefs().find((t) => t.id === pane()).label}
+            </span>
+            {refreshBtn()}
+          </div>
+          {noticeLine()}
+          {paneToolbar(pane())}
+          {paneForm(pane())}
+          {paneRows(pane())}
+        </main>
       </div>
     </div>
   );

@@ -209,10 +209,14 @@ scoring.reset();
 await tick();
 ok("reset restores production view", qa("#root " + rowsSel).length === 1);
 
-// ── holdings panel (2026-09-17-wheel-holdings, variant C) ──
-// Mount against a mocked /api/holdings (server owns the pace math — the
-// panel renders the view verbatim), then drive add + outcome flows through
-// captured fetch calls.
+// ── holdings panel — side-rail sub-tabs (2026-09-19-holdings-subtabs) ──
+// One mount against a MUTABLE mocked /api/holdings (refetches reflect
+// mutations), walking the feature-acceptance scenario end to end: LOTS
+// active by default → set cash → sell call from a lot → PUTS add /
+// refresh / assigned stage-2 / bought-back → CALLS called-away → empty
+// pane — with the cash strip, Refresh marks and notice reachable from
+// every tab (the panel is the server's view verbatim; the mock owns the
+// pace math and the ledger state).
 {
   const HP = (await import("./components/HoldingsPanel")).default;
   const POSITION = {
@@ -236,6 +240,17 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
       spot_pct_vs_strike: (331.2 - 350) / 350,
     },
   };
+  const VIEWLESS_VIEW = {
+    pl_dollars: null,
+    pl_pct: null,
+    pace_per_day_dollars: null,
+    pace_per_day_pct: null,
+    days_elapsed: 2,
+    days_total: 5,
+    target_pct: 0.4,
+    pace_met: false,
+    spot_pct_vs_strike: null,
+  };
   const POSITION_VIEWLESS = {
     ...POSITION,
     id: "h2",
@@ -243,40 +258,120 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
     strike: 417.5,
     premium: 3.75,
     mark: null,
+    view: VIEWLESS_VIEW,
+  };
+  const CALL_ITM = {
+    id: "c1", symbol: "GOOG", strike: 360, premium: 1.2, contracts: 2,
+    sold: "2026-09-04", expiry: "2026-09-11",
+    mark: { mid: 0.3, as_of: "2026-09-08T19:00:00Z", underlying_price: 370.0 },
     view: {
-      pl_dollars: null,
-      pl_pct: null,
-      pace_per_day_dollars: null,
-      pace_per_day_pct: null,
-      days_elapsed: 2,
-      days_total: 5,
-      target_pct: 0.4,
-      pace_met: false,
-      spot_pct_vs_strike: null,
+      pl_dollars: 180.0, pl_pct: 0.75, pace_per_day_dollars: 90.0,
+      pace_per_day_pct: 0.375, days_elapsed: 2, days_total: 5,
+      target_pct: 0.4, pace_met: true, spot_pct_vs_strike: (370 - 360) / 360,
     },
   };
-  const calls = [];
+  const LOT = {
+    id: "l1", symbol: "GOOG", shares: 200, basis_per_share: 349.0,
+    acquired: "2026-09-08", mark: { as_of: "2026-09-08T19:00:00Z" },
+    view: {
+      value: 74000.0, pl_dollars: 4200.0, pl_pct: 4200 / 69800,
+      capacity: 2, covered: 2, spot: 370.0,
+      spot_as_of: "2026-09-08T19:00:00Z", age_days: 0,
+    },
+  };
+
+  // Mutable ledger — mutations rewrite it, every GET reflects it.
+  let positions, openCalls, lotsArr, cashState, seq, addedPutId;
+  const resetLedger = () => {
+    positions = [POSITION];
+    openCalls = [CALL_ITM];
+    lotsArr = [LOT];
+    cashState = null;
+    seq = 0;
+    addedPutId = null;
+  };
+  resetLedger();
+
+  const seen = [];
   const jsonRes = (v) =>
     new Response(JSON.stringify(v), { status: 200, headers: { "Content-Type": "application/json" } });
   globalThis.fetch = async (path, opts = {}) => {
     const method = opts.method ?? "GET";
-    calls.push([String(path), method, opts.body ? JSON.parse(opts.body) : null]);
+    const body = opts.body ? JSON.parse(opts.body) : null;
+    seen.push([String(path), method, body]);
     if (path === "/api/holdings" && method === "GET") {
-      // After the add POST, the new position shows up too (refetch).
-      const didAdd = calls.some(([, m]) => m === "POST");
       return jsonRes({
         schema_version: 1,
-        positions: didAdd ? [POSITION, POSITION_VIEWLESS] : [POSITION],
-        calls: [],
-        lots: [],
-        cash: null,
-        cash_reserved: 35000,
-        cash_free: null,
+        positions,
+        calls: openCalls,
+        lots: lotsArr,
+        cash: cashState,
+        cash_reserved: 70000,
+        cash_free: cashState == null ? null : cashState - 70000,
       });
     }
-    if (path === "/api/holdings" && method === "POST") return jsonRes({ position: POSITION_VIEWLESS });
-    if (path === "/api/holdings/refresh") return jsonRes({ schema_version: 1, positions: [POSITION], refresh: { ok: ["h1"], stale: [] } });
-    if (String(path).startsWith("/api/holdings/")) return jsonRes({ removed: String(path).split("/").pop() });
+    if (path === "/api/holdings" && method === "POST") {
+      if (body?.kind === "lot") {
+        if (body.assigned_from != null)
+          positions = positions.filter((p) => p.id !== body.assigned_from);
+        seq += 1;
+        lotsArr = [
+          ...lotsArr,
+          {
+            id: `lx${seq}`, symbol: body.symbol, shares: body.shares,
+            basis_per_share: body.basis_per_share, acquired: body.acquired,
+            assigned_from: body.assigned_from ?? null, mark: null,
+            view: { spot: null, pl_dollars: null, pl_pct: null, covered: 0, capacity: Math.floor(body.shares / 100) },
+          },
+        ];
+        return jsonRes({ lot: lotsArr[lotsArr.length - 1] });
+      }
+      if (body?.kind === "call") {
+        seq += 1;
+        openCalls = [
+          ...openCalls,
+          { id: `cx${seq}`, symbol: body.symbol, strike: body.strike, premium: body.premium,
+            contracts: body.contracts, sold: body.sold, expiry: body.expiry, mark: null, view: VIEWLESS_VIEW },
+        ];
+        return jsonRes({ position: openCalls[openCalls.length - 1] });
+      }
+      seq += 1;
+      addedPutId = `hx${seq}`;
+      positions = [
+        ...positions,
+        { ...POSITION_VIEWLESS, id: addedPutId, symbol: body.symbol, strike: body.strike,
+          premium: body.premium, contracts: body.contracts, sold: body.sold, expiry: body.expiry },
+      ];
+      return jsonRes({ position: positions[positions.length - 1] });
+    }
+    if (path === "/api/holdings/refresh" && method === "POST")
+      return jsonRes({ schema_version: 1, refresh: { ok: [], stale: [] } });
+    if (path === "/api/holdings/cash" && method === "PATCH") {
+      cashState = body.cash;
+      return jsonRes({ cash: cashState, cash_reserved: 70000, cash_free: cashState - 70000 });
+    }
+    if (path === "/api/holdings/called-away" && method === "POST") {
+      const call = openCalls.find((c) => c.id === body.call_id);
+      openCalls = openCalls.filter((c) => c.id !== body.call_id);
+      let remaining = (call?.contracts ?? 0) * 100;
+      const kept = [];
+      for (const lot of lotsArr) {
+        if (remaining > 0 && lot.symbol === call?.symbol) {
+          const take = Math.min(lot.shares, remaining);
+          remaining -= take;
+          const shares = lot.shares - take;
+          if (shares > 0) kept.push({ ...lot, shares, view: { ...lot.view, shares } });
+        } else kept.push(lot);
+      }
+      lotsArr = kept;
+      return jsonRes({ reduced: true });
+    }
+    if (method === "DELETE" && String(path).startsWith("/api/holdings/")) {
+      const id = String(path).split("/").pop();
+      positions = positions.filter((p) => p.id !== id);
+      openCalls = openCalls.filter((c) => c.id !== id);
+      return jsonRes({ removed: id });
+    }
     return new Response("not found", { status: 404 });
   };
 
@@ -286,248 +381,185 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
   render(() => <HP />, div);
   await tick();
 
-  ok("holdings row renders title with contract count", (q("#holdings-root")?.textContent ?? "").includes("GOOG 350P ×1"));
-  ok("holdings row shows the premium anchor", (q("#holdings-root")?.textContent ?? "").includes("$1.00"));
-  ok("pace bar tick sits at the server target", (q(".holdings-bar-mark")?.style?.left ?? "") === "40%");
-  ok("pace-met row carries the buy-back chip", (q("#holdings-root")?.textContent ?? "").includes("buy back?"));
-  ok("mark age is visible", (q("#holdings-root")?.textContent ?? "").includes("ago"));
-
-  // R6: SPOT cell — price, % vs strike, danger color when below the strike.
-  const spotCell = qa(".holdings-card-stats div").find((d) => d.querySelector("span")?.textContent === "spot");
-  ok("spot cell renders price and % vs strike", !!spotCell && spotCell.textContent.includes("331.20") && spotCell.textContent.includes("-5.4% vs strike"));
-  ok("spot below strike is danger-colored", !!spotCell?.querySelector("i.holdings-neg"));
-  ok("stat strip has four cells", qa(".hp-list-stats > div").length >= 4);
-
-  // Add form: decimals survive the round trip to the POST body.
-  qa(".hp-toolbar-row button").find((b) => b.textContent.includes("Sell put"))?.click();
-  await tick();
+  const rootSel = "#holdings-root";
+  const rootEl = q(rootSel);
   const setVal = (el, v) => {
+    if (!el) return; // red runs report missing layout via FAIL lines, not crashes
     el.value = v;
     el.dispatchEvent(new Event("input", { bubbles: true }));
   };
-  const rootEl = q("#holdings-root");
-  setVal(rootEl.querySelector('.holdings-add input[placeholder="SYMBOL"]'), "AMD");
-  setVal(rootEl.querySelector('.holdings-add input[placeholder="e.g. 350.00"]'), "417.50");
-  setVal(rootEl.querySelector('.holdings-add input[placeholder="e.g. 1.00"]'), "3.75");
-  qa(".holdings-add button").find((b) => b.textContent === "Sell put")?.click();
-  await tick();
-  const addCall = calls.find(([, m, b]) => m === "POST" && b?.symbol === "AMD");
-  ok("add POST carries the typed decimals", !!addCall && addCall[2].strike === 417.5 && addCall[2].premium === 3.75);
-  ok("unpriced row renders the empty-mark state", (q("#holdings-root")?.textContent ?? "").includes("unpriced"));
+  const tiles = () => qa(`${rootSel} .hp-tab-tile`);
+  const tileSel = (i) => tiles()[i];
 
-  // Outcome flow: open the dialog on the priced row, confirm bought-back.
-  qa(".hp-list-row")
-    .find((c) => c.textContent.includes("GOOG"))
-    ?.querySelector(".holdings-close-btn")
-    ?.click();
-  await tick();
-  ok("outcome dialog offers the three outcomes", ["bought back", "expired", "assigned"].every((o) =>
-    (q(".holdings-outcome")?.textContent ?? "").toLowerCase().includes(o)
-  ));
-  ok("outcome dialog previews realized P&L", (q(".holdings-outcome")?.textContent ?? "").includes("$50.00"));
-  qa(".holdings-outcome button")
-    .find((b) => b.textContent === "Confirm")
-    ?.click();
-  await tick();
-  ok(
-    "outcome confirm DELETEs the position",
-    calls.some(([p, m]) => m === "DELETE" && p === "/api/holdings/h1")
-  );
+  // [R3] Tab model: order, default selection, counts + context lines.
+  ok("tiles render in LOTS, PUTS, CALLS order", tiles().map((t) => t.querySelector(".hp-tab-tile-name")?.textContent).join(",") === "LOTS,PUTS,CALLS");
+  ok("LOTS is the active tab on load", !!tileSel(0)?.classList.contains("active") && !tileSel(1)?.classList.contains("active"));
+  ok("tile counts reflect the document", tiles().map((t) => t.querySelector(".hp-tab-tile-count")?.textContent).join(",") === "1,1,1");
+  ok("tile context lines", (tileSel(0)?.textContent ?? "").includes("200 sh held") && (tileSel(1)?.textContent ?? "").includes("1 pace-met") && (tileSel(2)?.textContent ?? "").includes("1 ITM"));
 
-  // Reference-example values, verbatim from the design doc scenario.
-  const googRow = qa(".hp-list-row").find((c) => c.textContent.includes("GOOG"));
+  // [R1] Desktop side-rail: brand + cash strip in the rail, title + refresh in the pane head.
+  ok("rail carries the brand line and the cash strip", (q(`${rootSel} .hp-tabs-brand`)?.textContent ?? "").includes("Wheel ledger") && !!q(`${rootSel} .hp-tabs-rail .hp-rail-block`));
+  ok("pane head carries the active title and Refresh marks", (q(`${rootSel} .hp-pane-title`)?.textContent ?? "").includes("Lots") && !!q(`${rootSel} .hp-pane-head .holdings-refresh`));
+
+  // [R5] Cash strip: honest — while unset, first-set flow PATCHes and
+  // re-renders from the response — all visible from the default LOTS tab.
+  const rail0 = q(`${rootSel} .hp-tabs-rail`)?.textContent ?? "";
+  ok("cash strip renders reserved while cash is unset", rail0.includes("$70,000"));
+  ok("free is an honest — while cash is unset", rail0.includes("—"));
+  ok("set-cash affordance offered", (q(`${rootSel} .hp-cash-edit`)?.textContent ?? "") === "set cash");
+  q(`${rootSel} .hp-cash-edit`)?.click();
+  await tick();
+  setVal(q(`${rootSel} .hp-cash-editor input`), "150000");
+  qa(`${rootSel} .hp-cash-editor button`).find((b) => b.textContent === "save")?.click();
+  await tick();
+  const rail1 = q(`${rootSel} .hp-tabs-rail`)?.textContent ?? "";
+  ok("cash edit PATCHes and re-renders from the response", seen.some(([p, m]) => m === "PATCH" && p === "/api/holdings/cash") && rail1.includes("$80,000") && rail1.includes("$150,000"));
+
+  // [R4 · LOTS] lot row + lot-anchored sell call (prefill floor(shares/100)).
+  ok("lot row reports covered 2/2", (rootEl.textContent ?? "").includes("covered 2/2"));
+  qa(`${rootSel} button`).find((b) => b.textContent.includes("sell call…"))?.click();
+  await tick();
+  ok("sell-call prefill is floor(shares/100)", q(`${rootSel} .holdings-outcome input[inputmode='numeric']`)?.value === "2");
+  const postsBeforeLot = seen.filter(([p, m]) => p === "/api/holdings" && m === "POST").length;
+  qa(`${rootSel} .holdings-outcome button`).find((b) => b.textContent === "Sell call")?.click();
+  await tick();
+  ok("sell-call form validates before submit", seen.filter(([p, m]) => p === "/api/holdings" && m === "POST").length === postsBeforeLot && !!q(`${rootSel} .holdings-outcome`));
+  setVal(q(`${rootSel} .holdings-outcome input[placeholder='e.g. 360.00']`), "380");
+  setVal(q(`${rootSel} .holdings-outcome input[placeholder='e.g. 1.20']`), "1.50");
+  qa(`${rootSel} .holdings-outcome button`).find((b) => b.textContent === "Sell call")?.click();
+  await tick();
+  const sellPost = seen.find(([p, m, b]) => m === "POST" && b?.kind === "call");
+  ok("valid sell call submits kind call from the lot", !!sellPost && sellPost[2].symbol === "GOOG" && sellPost[2].contracts === 2 && sellPost[2].strike === 380);
+  ok("CALLS tile count updates after the sell", tiles().map((t) => t.querySelector(".hp-tab-tile-count")?.textContent).join(",") === "1,1,2");
+
+  // [R4 · PUTS] switch tabs: put rows render per pane (kind-filtered).
+  tileSel(1)?.click();
+  await tick();
+  ok("PUTS tab activates on click", !!tileSel(1)?.classList.contains("active") && !tileSel(0)?.classList.contains("active"));
+  ok("holdings row renders title with contract count", (rootEl.textContent ?? "").includes("GOOG 350P ×1"));
+  ok("holdings row shows the premium anchor", (rootEl.textContent ?? "").includes("$1.00"));
+  ok("pace bar tick sits at the server target", (q(`${rootSel} .holdings-bar-mark`)?.style?.left ?? "") === "40%");
+  ok("pace-met row carries the buy-back chip", (rootEl.textContent ?? "").includes("buy back?"));
+  ok("mark age is visible", (rootEl.textContent ?? "").includes("ago"));
+  const spotCell = qa(`${rootSel} .holdings-card-stats div`).find((d) => d.querySelector("span")?.textContent === "spot");
+  ok("spot cell renders price and % vs strike", !!spotCell && spotCell.textContent.includes("331.20") && spotCell.textContent.includes("-5.4% vs strike"));
+  ok("spot below strike is danger-colored", !!spotCell?.querySelector("i.holdings-neg"));
+  ok("stat strip has four cells", qa(`${rootSel} .hp-list-stats > div`).length >= 4);
+  const googRow = qa(`${rootSel} .hp-list-row`).find((c) => c.textContent.includes("GOOG"));
   ok("reference row shows +50.0%", !!googRow && googRow.textContent.includes("+50.0%"));
   ok("reference row shows target 40%", !!googRow && googRow.textContent.includes("target 40%"));
   ok("reference row shows 2/5 working days", !!googRow && googRow.textContent.includes("2/5 wd"));
   ok("reference row shows NOW mid 0.50", !!googRow && googRow.textContent.includes("0.50"));
   ok("reference row shows CLOSE CAPTURES $50.00", !!googRow && googRow.textContent.includes("$50.00"));
 
-  // Empty submit is blocked (no numbers ⇒ no POST, form stays open).
-  const postsBefore = calls.filter(([p, m]) => p === "/api/holdings" && m === "POST").length;
-  qa(".hp-toolbar-row button").find((b) => b.textContent.includes("Sell put"))?.click();
+  // [R4 · PUTS] pane add button: decimals survive the round trip; empty
+  // submit is blocked (no numbers ⇒ no POST, form stays open).
+  qa(`${rootSel} .hp-toolbar-row button`).find((b) => b.textContent.includes("Sell put"))?.click();
+  await tick();
+  setVal(rootEl.querySelector('.holdings-add input[placeholder="SYMBOL"]'), "AMD");
+  setVal(rootEl.querySelector('.holdings-add input[placeholder="e.g. 350.00"]'), "417.50");
+  setVal(rootEl.querySelector('.holdings-add input[placeholder="e.g. 1.00"]'), "3.75");
+  qa(".holdings-add button").find((b) => b.textContent === "Sell put")?.click();
+  await tick();
+  const addCall = seen.find(([p, m, b]) => m === "POST" && b?.symbol === "AMD" && b?.strike === 417.5);
+  ok("add POST carries the typed decimals", !!addCall && addCall[2].premium === 3.75);
+  ok("unpriced row renders the empty-mark state", (rootEl.textContent ?? "").includes("unpriced"));
+  ok("PUTS tile count updates after the add", tiles().map((t) => t.querySelector(".hp-tab-tile-count")?.textContent).join(",") === "1,2,2");
+  const postsBefore2 = seen.filter(([p, m]) => p === "/api/holdings" && m === "POST").length;
+  qa(`${rootSel} .hp-toolbar-row button`).find((b) => b.textContent.includes("Sell put"))?.click();
   await tick();
   qa(".holdings-add button").find((b) => b.textContent === "Sell put")?.click();
   await tick();
-  const postsAfter = calls.filter(([p, m]) => p === "/api/holdings" && m === "POST").length;
-  ok("empty numeric fields block submit", postsAfter === postsBefore && !!q(".holdings-add"));
-
-  // Refresh marks: POST goes out, the notice confirms, the ledger refetches.
-  qa(".hp-toolbar-row button").find((b) => b.textContent.includes("Refresh marks"))?.click();
+  ok("empty numeric fields block submit", seen.filter(([p, m]) => p === "/api/holdings" && m === "POST").length === postsBefore2 && !!q(".holdings-add"));
+  qa(".holdings-add button").find((b) => b.textContent === "Cancel")?.click();
   await tick();
-  ok(
-    "refresh POSTs and the notice confirms",
-    calls.some(([p, m]) => p === "/api/holdings/refresh" && m === "POST") &&
-      (q(".holdings-notice")?.textContent ?? "").includes("Marks refreshed")
-  );
 
-  // ── variant-C additions (R11): rail cash strip, kind chips + stats line,
-  // ITM chip, inline close panel placement, assignment + sell-call
-  // prefills, form validation before submit. Fresh mount with a full-wheel
-  // fixture (put + ITM call + lot); cash starts unset to exercise the
-  // first-set flow.
-  {
-    const CALL_ITM = {
-      id: "c1", symbol: "GOOG", strike: 360, premium: 1.2, contracts: 2,
-      sold: "2026-09-04", expiry: "2026-09-11",
-      mark: { mid: 0.3, as_of: "2026-09-08T19:00:00Z", underlying_price: 370.0 },
-      view: {
-        pl_dollars: 180.0, pl_pct: 0.75, pace_per_day_dollars: 90.0,
-        pace_per_day_pct: 0.375, days_elapsed: 2, days_total: 5,
-        target_pct: 0.4, pace_met: true, spot_pct_vs_strike: (370 - 360) / 360,
-      },
-    };
-    const LOT = {
-      id: "l1", symbol: "GOOG", shares: 200, basis_per_share: 349.0,
-      acquired: "2026-09-08", mark: { spot: 370.0, as_of: "2026-09-08T19:00:00Z" },
-      view: {
-        value: 74000.0, pl_dollars: 4200.0, pl_pct: 4200 / 69800,
-        capacity: 2, covered: 2, spot: 370.0,
-        spot_as_of: "2026-09-08T19:00:00Z", age_days: 0,
-      },
-    };
-    let cashState = null; // document cash: null until first PATCH
-    const calls2 = [];
-    globalThis.fetch = async (path, opts = {}) => {
-      const method = opts.method ?? "GET";
-      calls2.push([String(path), method, opts.body ? JSON.parse(opts.body) : null]);
-      if (path === "/api/holdings" && method === "GET") {
-        return jsonRes({
-          schema_version: 1,
-          positions: [POSITION],
-          calls: [CALL_ITM],
-          lots: [LOT],
-          cash: cashState,
-          cash_reserved: 70000,
-          cash_free: cashState == null ? null : cashState - 70000,
-        });
-      }
-      if (path === "/api/holdings/cash" && method === "PATCH") {
-        cashState = JSON.parse(opts.body).cash;
-        return jsonRes({ cash: cashState, cash_reserved: 70000, cash_free: cashState - 70000 });
-      }
-      if (path === "/api/holdings" && method === "POST") return jsonRes({ lot: LOT });
-      return new Response("not found", { status: 404 });
-    };
-    const div2 = document.createElement("div");
-    div2.id = "holdings-root-2";
-    document.body.appendChild(div2);
-    render(() => <HP />, div2);
-    await tick();
+  // [R5] Refresh marks from a non-default tab: POST + notice, tab survives
+  // the reload.
+  qa(`${rootSel} button`).find((b) => b.textContent.includes("Refresh marks"))?.click();
+  await tick();
+  ok("refresh POSTs and the notice confirms from PUTS", seen.some(([p, m]) => p === "/api/holdings/refresh" && m === "POST") && (q(`${rootSel} .holdings-notice`)?.textContent ?? "").includes("Marks refreshed"));
+  ok("active tab survives the reload", !!tileSel(1)?.classList.contains("active"));
 
-    // Rail: reserved derives even with cash unset; free renders as "—"
-    // with a "set cash" affordance until the first PATCH.
-    const rail0 = q("#holdings-root-2 .hp-rail")?.textContent ?? "";
-    ok("rail renders reserved while cash is unset", rail0.includes("$70,000"));
-    ok("rail free is an honest — while cash is unset", rail0.includes("—"));
-    ok("rail offers the set-cash affordance", (q("#holdings-root-2 .hp-cash-edit")?.textContent ?? "") === "set cash");
-    q("#holdings-root-2 .hp-cash-edit").click();
-    await tick();
-    setVal(q("#holdings-root-2 .hp-cash-editor input"), "150000");
-    qa("#holdings-root-2 .hp-cash-editor button").find((b) => b.textContent === "save")?.click();
-    await tick();
-    ok(
-      "cash edit PATCHes and the strip re-renders from the response",
-      calls2.some(([p, m]) => m === "PATCH" && p === "/api/holdings/cash") &&
-        (q("#holdings-root-2 .hp-rail")?.textContent ?? "").includes("$80,000") &&
-        (q("#holdings-root-2 .hp-rail")?.textContent ?? "").includes("$150,000")
-    );
+  // [R4 · PUTS] assigned flow: stage-2 prefilled lot form in the same slot;
+  // recording POSTs kind:"lot" with assigned_from and the mock removes the
+  // put — PUTS count drops, LOTS count rises.
+  const putSlot = qa(`${rootSel} .hp-slot`).find((s) => s.textContent.includes("350P"));
+  putSlot?.querySelector(".holdings-close-btn")?.click();
+  await tick();
+  ok("close panel renders inside the clicked position's slot", !!putSlot?.querySelector(".holdings-outcome"));
+  ok("only one panel exists in the DOM", qa(`${rootSel} .holdings-outcome`).length === 1);
+  const radios = qa(`${rootSel} .holdings-outcome input[type="radio"]`);
+  radios.find((r) => r.nextSibling?.textContent?.includes("assigned"))?.click();
+  await tick();
+  setVal(q(`${rootSel} .holdings-outcome input[inputmode="decimal"]`), "340");
+  qa(`${rootSel} .holdings-outcome button`).find((b) => b.textContent === "Confirm")?.click();
+  await tick();
+  const lotForm = putSlot.querySelector(".holdings-outcome");
+  ok("assigned flow reveals the prefilled lot form under the put", !!lotForm && lotForm.textContent.includes("Record assigned shares"));
+  const sharesVal = lotForm?.querySelector('input[inputmode="numeric"]')?.value;
+  const basisVal = lotForm?.querySelector('input[inputmode="decimal"]')?.value;
+  ok("prefill pins shares = contracts×100 and basis = strike − premium", sharesVal === "100" && Number(basisVal) === 349);
+  lotForm?.querySelector('button[type="submit"]')?.click();
+  await tick();
+  const assignPost = seen.find(([p, m, b]) => m === "POST" && b?.assigned_from != null);
+  ok("recording POSTs kind lot with assigned_from", !!assignPost && assignPost[2].kind === "lot" && assignPost[2].assigned_from === "h1" && assignPost[2].shares === 100 && assignPost[2].basis_per_share === 349);
+  ok("tile counts follow the assignment", tiles().map((t) => t.querySelector(".hp-tab-tile-count")?.textContent).join(",") === "2,1,2");
 
-    // Merged list: kind chips + full stats line; the ITM call carries the
-    // called-away chip; the lot row reports covered 2/2.
-    const kinds = qa("#holdings-root-2 .hp-kind").map((k) => k.textContent.trim()).sort();
-    ok("merged rows carry kind chips", kinds.join(",") === "CALL,PUT");
-    const itmRow = qa("#holdings-root-2 .hp-list-row").find((r) => r.textContent.includes("360C"));
-    ok("ITM call shows the called-away chip", !!itmRow && itmRow.textContent.includes("ITM — called away?"));
-    const spotDiv = qa("#holdings-root-2 .hp-list-stats div").find((d) => d.querySelector("span")?.textContent === "spot");
-    ok("ITM vs-strike figure is danger-colored", !!spotDiv?.querySelector("i.holdings-neg") && spotDiv.textContent.includes("+2.8% vs strike"));
-    ok("lot rail row reports covered 2/2", (q("#holdings-root-2 .hp-rail")?.textContent ?? "").includes("covered 2/2"));
+  // [R4 · PUTS] bought-back on the unpriced add: three outcomes offered,
+  // confirm DELETEs the position.
+  qa(`${rootSel} .hp-list-row`)
+    .find((c) => c.textContent.includes("AMD"))
+    ?.querySelector(".holdings-close-btn")
+    ?.click();
+  await tick();
+  ok("outcome dialog offers the three outcomes", ["bought back", "expired", "assigned"].every((o) => (q(`${rootSel} .holdings-outcome`)?.textContent ?? "").toLowerCase().includes(o)));
+  setVal(q(`${rootSel} .holdings-outcome input[inputmode="decimal"]`), "400");
+  qa(`${rootSel} .holdings-outcome button`).find((b) => b.textContent === "Confirm")?.click();
+  await tick();
+  ok("outcome confirm DELETEs the position", seen.some(([p, m]) => m === "DELETE" && p === `/api/holdings/${addedPutId}`));
 
-    // Inline close panel: opens directly beneath the clicked position and
-    // is the ONLY panel in the DOM.
-    const putSlot = qa("#holdings-root-2 .hp-slot").find((s) => s.textContent.includes("350P"));
-    putSlot.querySelector(".holdings-close-btn").click();
-    await tick();
-    ok("close panel renders inside the clicked position's slot", !!putSlot.querySelector(".holdings-outcome"));
-    ok("only one panel exists in the DOM", qa("#holdings-root-2 .holdings-outcome").length === 1);
+  // [R4 · CALLS] ITM chip + danger vs-strike, then called away: the call
+  // leaves, the covering lot is FIFO-reduced (tile + context follow).
+  tileSel(2)?.click();
+  await tick();
+  ok("CALLS tab activates", !!tileSel(2)?.classList.contains("active"));
+  const itmRow = qa(`${rootSel} .hp-list-row`).find((r) => r.textContent.includes("360C"));
+  ok("ITM call shows the called-away chip", !!itmRow && itmRow.textContent.includes("ITM — called away?"));
+  const spotDiv = qa(`${rootSel} .hp-list-stats div`).find((d) => d.querySelector("span")?.textContent === "spot");
+  ok("ITM vs-strike figure is danger-colored", !!spotDiv?.querySelector("i.holdings-neg") && spotDiv.textContent.includes("+2.8% vs strike"));
+  itmRow?.querySelector(".holdings-close-btn")?.click();
+  await tick();
+  const callRadios = qa(`${rootSel} .holdings-outcome input[type="radio"]`);
+  callRadios.find((r) => r.nextSibling?.textContent?.includes("called away"))?.click();
+  await tick();
+  qa(`${rootSel} .holdings-outcome button`).find((b) => b.textContent === "Confirm")?.click();
+  await tick();
+  ok("called-away POSTs the call id", seen.some(([p, m, b]) => m === "POST" && p === "/api/holdings/called-away" && b?.call_id === "c1"));
+  ok("tile counts follow the called-away reduction", tiles().map((t) => t.querySelector(".hp-tab-tile-count")?.textContent).join(",") === "1,0,1");
+  ok("LOTS context reflects the reduced shares", (tileSel(0)?.textContent ?? "").includes("100 sh held"));
 
-    // Assignment: choose assigned + price → the prefilled lot form appears
-    // in the SAME slot (shares = contracts×100, basis = strike − premium);
-    // recording POSTs kind:"lot" with assigned_from.
-    const radios = qa(`${"#holdings-root-2"} .holdings-outcome input[type="radio"]`);
-    radios.find((r) => r.nextSibling?.textContent?.includes("assigned"))?.click();
-    await tick();
-    setVal(q(`${"#holdings-root-2"} .holdings-outcome input[inputmode="decimal"]`), "340");
-    qa("#holdings-root-2 .holdings-outcome button").find((b) => b.textContent === "Confirm")?.click();
-    await tick();
-    const lotForm = putSlot.querySelector(".holdings-outcome");
-    ok("assigned flow reveals the prefilled lot form under the put", !!lotForm && lotForm.textContent.includes("Record assigned shares"));
-    const sharesVal = lotForm?.querySelector('input[inputmode="numeric"]')?.value;
-    const basisVal = lotForm?.querySelector('input[inputmode="decimal"]')?.value;
-    ok("prefill pins shares = contracts×100 and basis = strike − premium", sharesVal === "100" && Number(basisVal) === 349);
-    lotForm.querySelector('button[type="submit"]').click();
-    await tick();
-    const assignPost = calls2.find(([, m, b]) => m === "POST" && b?.assigned_from != null);
-    ok(
-      "recording POSTs kind lot with assigned_from",
-      !!assignPost && assignPost[2].kind === "lot" && assignPost[2].assigned_from === "h1" &&
-        assignPost[2].shares === 100 && assignPost[2].basis_per_share === 349
-    );
+  // [R4] one-dialog rule across tabs: the dialog lives with its pane —
+  // gone when another tab is active, back when the owning tab returns.
+  qa(`${rootSel} .hp-list-row`)
+    .find((r) => r.textContent.includes("380C"))
+    ?.querySelector(".holdings-close-btn")
+    ?.click();
+  await tick();
+  ok("close dialog open on CALLS", qa(`${rootSel} .holdings-outcome`).length === 1);
+  tileSel(1)?.click();
+  await tick();
+  ok("dialog not rendered while another tab is active", qa(`${rootSel} .holdings-outcome`).length === 0);
+  tileSel(2)?.click();
+  await tick();
+  ok("dialog returns with the owning tab", qa(`${rootSel} .holdings-outcome`).length === 1);
+  qa(`${rootSel} .holdings-outcome button`).find((b) => b.textContent === "Cancel")?.click();
+  await tick();
 
-    // Lot-anchored sell call: contracts prefilled floor(200/100), the free
-    // Sell call form blocks an empty submit.
-    qa("#holdings-root-2 .hp-rail button")
-      .find((b) => b.textContent.includes("sell call…"))
-      ?.click();
-    await tick();
-    ok(
-      "sell-call prefill is floor(shares/100)",
-      q("#holdings-root-2 .hp-rail .holdings-outcome input[inputmode='numeric']")?.value === "2"
-    );
-    const postsBefore2 = calls2.filter(([p, m]) => p === "/api/holdings" && m === "POST").length;
-    qa("#holdings-root-2 .hp-rail .holdings-outcome button")
-      .find((b) => b.textContent === "Sell call")
-      ?.click();
-    await tick();
-    ok(
-      "sell-call form validates before submit",
-      calls2.filter(([p, m]) => p === "/api/holdings" && m === "POST").length === postsBefore2 &&
-        !!q("#holdings-root-2 .hp-rail .holdings-outcome")
-    );
-    qa("#holdings-root-2 .hp-rail .holdings-outcome button")
-      .find((b) => b.textContent === "Cancel")
-      ?.click();
-    await tick();
-    const sellCallForm = qa("#holdings-root-2 .hp-rail button")
-      .find((b) => b.textContent.includes("sell call…"));
-    sellCallForm?.click();
-    await tick();
-    setVal(q("#holdings-root-2 .hp-rail .holdings-outcome input[placeholder='e.g. 360.00']"), "380");
-    setVal(q("#holdings-root-2 .hp-rail .holdings-outcome input[placeholder='e.g. 1.20']"), "1.50");
-    qa("#holdings-root-2 .hp-rail .holdings-outcome button")
-      .find((b) => b.textContent === "Sell call")
-      ?.click();
-    await tick();
-    const sellPost = calls2.find(([, m, b]) => m === "POST" && b?.kind === "call");
-    ok(
-      "valid sell call submits kind call from the lot",
-      !!sellPost && sellPost[2].symbol === "GOOG" && sellPost[2].contracts === 2 && sellPost[2].strike === 380
-    );
-
-    // Free-field Sell call form (toolbar): empty submit is blocked.
-    const postsBefore3 = calls2.filter(([p, m]) => p === "/api/holdings" && m === "POST").length;
-    qa("#holdings-root-2 .hp-toolbar-row button")
-      .find((b) => b.textContent.includes("Sell call"))
-      ?.click();
-    await tick();
-    qa("#holdings-root-2 .holdings-add button")
-      .find((b) => b.textContent === "Sell call")
-      ?.click();
-    await tick();
-    ok(
-      "free sell-call form validates before submit",
-      calls2.filter(([p, m]) => p === "/api/holdings" && m === "POST").length === postsBefore3
-    );
-  }
+  // [R4] empty state: both puts are gone — the PUTS pane says so.
+  tileSel(1)?.click();
+  await tick();
+  ok("empty pane shows its per-tab message", (rootEl.textContent ?? "").includes("No open puts"));
 }
 
 // Tab-strip persistence: the Holdings tab lives in the same strip as the
