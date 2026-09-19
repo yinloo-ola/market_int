@@ -1166,7 +1166,6 @@ details.adjust .hint-custom { color: var(--accent); }
    Cards sorted most-ahead-of-pace first; the pace bar (fill vs the amber
    target tick) is the close decision; stat strip anchors it in dollars. */
 
-.holdings-panel { padding: 12px 0; }
 
 
 
@@ -1312,7 +1311,7 @@ details.adjust .hint-custom { color: var(--accent); }
    tab; dialogs anchor inline under the entry that opened them. Below
    900px the rail collapses to a horizontal tile strip (user-approved
    prototype); list rows stack there as before. */
-.hp-tabs-shell { max-width: 1060px; margin: 0 auto; padding: 0 12px 12px; }
+.hp-tabs-shell { padding: 16px 0 0; }
 .hp-tabs-grid {
   display: grid; grid-template-columns: 13rem 1fr;
   gap: 1.1rem; align-items: start;
