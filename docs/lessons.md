@@ -48,6 +48,12 @@ Retire rules that no longer apply during finalizing.
   (`opts.method ?? "GET"`) — real callers omit it for GETs, so a `?? ""`
   default silently 404s every unannotated request while the first render
   still works.
+- A harness mock must return shapes **faithful enough that newly-asserted
+  UI actually renders** — an under-specified mock crashes the render (not
+  the assertion), so a long-green suite hides the gap until the first real
+  DOM check fails with a confusing "reading property of undefined" far
+  from the true cause. When a mock builds server-shaped objects, mirror
+  every field the rendered components touch.
 - Dev servers that validate Host headers (vite 6+ `server.allowedHosts`)
   reject tunnel hostnames; allow-list the tunnel provider's domain
   suffix — quick tunnels randomize the hostname per run, so a single

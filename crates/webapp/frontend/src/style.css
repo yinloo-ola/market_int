@@ -1452,7 +1452,8 @@ details.adjust .hint-custom { color: var(--accent); }
 .hp-cash-edit { margin-left: auto; font-size: 0.75rem; }
 .hp-cash-editor { margin-left: auto; display: flex; gap: 0.35rem; align-items: center; }
 .hp-cash-editor input {
-  width: 9rem;
+  flex: 1 1 6rem;
+  min-width: 0;
   font: inherit;
   padding: 0.25rem 0.45rem;
   border: 1px solid var(--border);
@@ -1460,6 +1461,7 @@ details.adjust .hint-custom { color: var(--accent); }
   background: var(--panel);
   color: inherit;
 }
+.hp-cash-editor .btn { font-size: 0.7rem; padding: 0.25rem 0.5rem; }
 .hp-dialog-note {
   font-size: 0.72rem;
   opacity: 0.65;
@@ -1477,8 +1479,11 @@ details.adjust .hint-custom { color: var(--accent); }
   .hp-tabs-rail .hp-rail-block {
     flex: 1 1 100%;
     display: flex; align-items: baseline; gap: 0.6rem;
+    flex-wrap: wrap;
   }
   .hp-tabs-rail .hp-rail-big { font-size: 1.15rem; }
+  /* The pool list wraps to its own full-width line under the figures. */
+  .hp-tabs-rail .hp-pool-section { flex: 1 1 100%; }
   .hp-tab-tile { flex: 1; width: auto; }
   .hp-pane-head .hp-pane-title { display: none; }
   .hp-list-row.hp-list-head { display: none; }
@@ -1490,7 +1495,6 @@ details.adjust .hint-custom { color: var(--accent); }
 }
 @media (max-width: 720px) {
   .hp-cash-editor { margin-left: 0; }
-  .hp-cash-editor input { width: 7rem; }
 }
 
 @media (max-width: 480px) {
@@ -1656,4 +1660,46 @@ html[data-theme="light"] {
   --accent-deep: #0a4cb4;
   --kind-put-ink: #7fb5f5;
   --kind-call-ink: #e8b84a;
+}
+
+/* ── cash pools rail UI (2026-09-23-holdings-cash-pools; list UX after
+   preview feedback — always-visible rows, no manage toggle) ── */
+.hp-pool-section { display: flex; flex-direction: column; gap: 0.3rem; margin-top: 0.45rem; }
+.hp-pool-list { display: flex; flex-direction: column; gap: 0.25rem; }
+.hp-pool-item {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 0.25rem 0.4rem;
+}
+.hp-pool-item.active { border-color: var(--accent); }
+.hp-pool-line { display: flex; gap: 0.3rem; align-items: center; min-width: 0; }
+.hp-pool-name {
+  font: inherit; font-size: 0.72rem; font-weight: 700; color: var(--ink);
+  background: transparent; border: none; padding: 0; cursor: pointer;
+  flex: 1; min-width: 0; text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hp-pool-item.active .hp-pool-name { color: var(--accent); }
+.hp-pool-cash {
+  font-size: 0.66rem; opacity: 0.7; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.hp-pool-act { font-size: 0.6rem; padding: 0.05rem 0.3rem; }
+.hp-pool-row { display: flex; gap: 0.3rem; align-items: center; }
+.hp-pool-row input {
+  flex: 1; min-width: 0; font: inherit; font-size: 0.7rem;
+  padding: 0.15rem 0.35rem; border: 1px solid var(--border); border-radius: 5px;
+  background: var(--panel); color: var(--ink);
+}
+.hp-pool-row .btn { font-size: 0.66rem; padding: 0.12rem 0.45rem; }
+.hp-pool-del { color: var(--err); font-size: 0.66rem; padding: 0.05rem 0.3rem; }
+/* Which-pool tag on put rows (multi-pool ledgers only). */
+.hp-pool-tag {
+  font-size: 0.6rem; font-weight: 700; letter-spacing: 0.03em;
+  color: var(--muted); background: transparent; border: 1px solid var(--border);
+  border-radius: 999px; padding: 0.06rem 0.4rem; white-space: nowrap;
+}
+.holdings-add select {
+  font: inherit; padding: 5px 6px; border: 1px solid var(--border);
+  border-radius: 5px; background: var(--panel); color: var(--ink);
 }

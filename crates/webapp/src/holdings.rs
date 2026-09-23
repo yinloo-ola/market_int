@@ -207,6 +207,27 @@ async fn chain_mid(
 
 pub const LEDGER_SCHEMA_VERSION: u64 = 1;
 
+/// One named cash pool — a broker account the user sells against (cash
+/// pools design R1). Additive ledger sibling: `#[serde(default)]` array,
+/// schema stays 1 (ADR-002).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CashPool {
+    pub id: String,
+    /// Defaults keep one hand-edited partial row from failing the WHOLE
+    /// document parse (read_ledger's corrupt→empty fallback would then
+    /// clobber the user's real ledger on the next write).
+    #[serde(default)]
+    pub name: String,
+    /// Manual balance for this account — never the Tiger account API.
+    #[serde(default)]
+    pub cash: f64,
+}
+
+/// Reserved id of the implicit pool a legacy scalar `cash` reads as (and
+/// the id it materializes under on first write).
+pub const DEFAULT_POOL_ID: &str = "main";
+const DEFAULT_POOL_NAME: &str = "Main";
+
 /// Per-user ledger document (R4): sibling arrays, never a tagged position
 /// enum. Additive `#[serde(default)]` fields only — pre-wheel documents
 /// (just `positions`) parse unchanged, schema version stays 1.
@@ -219,9 +240,15 @@ pub struct HoldingsDocument {
     #[serde(default)]
     pub lots: Vec<market_int_core::holdings::ShareLot>,
     /// Manual balance — never the Tiger account API. `None` until the user
-    /// sets it once.
+    /// sets it once. Legacy scalar: superseded by `cash_pools` once those
+    /// exist, but kept serialized so a rollback build still reads the
+    /// balance (ADR-002 whole-document rewrite consequence).
     #[serde(default)]
     pub cash: Option<f64>,
+    /// Named cash pools (broker accounts). Empty ⇒ the legacy scalar above
+    /// reads as one implicit "Main" pool (lazy migration on first write).
+    #[serde(default)]
+    pub cash_pools: Vec<CashPool>,
 }
 
 impl Default for HoldingsDocument {
@@ -232,8 +259,124 @@ impl Default for HoldingsDocument {
             calls: Vec::new(),
             lots: Vec::new(),
             cash: None,
+            cash_pools: Vec::new(),
         }
     }
+}
+
+/// The default (first) pool's id — where `None`-pool entries land.
+fn first_pool_id(doc: &HoldingsDocument) -> String {
+    doc.cash_pools
+        .first()
+        .map(|p| p.id.clone())
+        .unwrap_or_else(|| DEFAULT_POOL_ID.to_string())
+}
+
+/// The pool an entry with `pool_id` spends: its own pool, else the ledger's
+/// default (first) pool.
+fn effective_pool_id(doc: &HoldingsDocument, pool_id: &Option<String>) -> String {
+    pool_id
+        .clone()
+        .unwrap_or_else(|| first_pool_id(doc))
+}
+
+/// The display name of the pool an entry spends (for the row tags): its
+/// own pool's name, the default pool's name for `None` entries, "Main"
+/// while the ledger is still the legacy implicit shape.
+fn pool_name_of(doc: &HoldingsDocument, pool_id: &Option<String>) -> String {
+    let eff = effective_pool_id(doc, pool_id);
+    doc.cash_pools
+        .iter()
+        .find(|p| p.id == eff)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| DEFAULT_POOL_NAME.to_string())
+}
+
+/// Lazy migration (cash pools R1): the first write turns a legacy scalar
+/// `cash` (or a fresh ledger, cash 0) into one real "Main" pool. Reads
+/// never rewrite — an unwritten legacy document keeps rendering implicit.
+fn materialize_default_pool(doc: &mut HoldingsDocument) {
+    if doc.cash_pools.is_empty() {
+        doc.cash_pools.push(CashPool {
+            id: DEFAULT_POOL_ID.to_string(),
+            name: DEFAULT_POOL_NAME.to_string(),
+            cash: doc.cash.unwrap_or(0.0),
+        });
+    }
+}
+
+/// The aggregate balance the list response reports: the pool sum once
+/// pools exist, else the legacy scalar.
+fn total_cash(doc: &HoldingsDocument) -> Option<f64> {
+    if doc.cash_pools.is_empty() {
+        doc.cash
+    } else {
+        Some(doc.cash_pools.iter().map(|p| p.cash).sum())
+    }
+}
+
+/// Keep the legacy scalar mirroring the pool sum on every mutation write.
+/// Pools supersede it for reads, but the rolled-back build (ADR-002
+/// consequence) reads ONLY the scalar — letting it drift stale would show
+/// a rolled-back client a long-gone balance.
+fn sync_scalar_cash(doc: &mut HoldingsDocument) {
+    if !doc.cash_pools.is_empty() {
+        doc.cash = Some(doc.cash_pools.iter().map(|p| p.cash).sum());
+    }
+}
+
+/// Reserved cash charged to one pool: its own puts plus the unassigned
+/// puts when it is the ledger's default (first) pool. `by_pool` is passed
+/// in so a multi-pool render computes the partition once, not per pool.
+fn reserved_for_pool(
+    doc: &HoldingsDocument,
+    by_pool: &std::collections::BTreeMap<Option<String>, f64>,
+    pool_id: &str,
+) -> f64 {
+    let own = by_pool
+        .get(&Some(pool_id.to_string()))
+        .copied()
+        .unwrap_or(0.0);
+    let unassigned = by_pool.get(&None).copied().unwrap_or(0.0);
+    if pool_id == first_pool_id(doc) { own + unassigned } else { own }
+}
+
+/// One pool row of the list/PATCH responses — the single builder for the
+/// `{id, name, cash, reserved, free}` shape.
+fn pool_view_json(
+    doc: &HoldingsDocument,
+    by_pool: &std::collections::BTreeMap<Option<String>, f64>,
+    pool: &CashPool,
+) -> serde_json::Value {
+    let reserved = reserved_for_pool(doc, by_pool, &pool.id);
+    json!({
+        "id": pool.id, "name": pool.name, "cash": pool.cash,
+        "reserved": reserved, "free": pool.cash - reserved,
+    })
+}
+
+/// The per-pool rows of the list response (cash pools R1): cash, reserved,
+/// free per pool. Entries with no `pool_id` fold into the FIRST pool. A
+/// legacy document (no pools, scalar cash set) renders one implicit "Main"
+/// pool; a fresh ledger renders none.
+fn pool_views(doc: &HoldingsDocument) -> Vec<serde_json::Value> {
+    let by_pool = market_int_core::holdings::reserved_cash_by_pool(&doc.positions);
+    if doc.cash_pools.is_empty() {
+        return match doc.cash {
+            Some(cash) => {
+                let reserved = reserved_for_pool(doc, &by_pool, &first_pool_id(doc));
+                vec![json!({
+                    "id": DEFAULT_POOL_ID, "name": DEFAULT_POOL_NAME,
+                    "cash": cash, "reserved": reserved, "free": cash - reserved,
+                })]
+            }
+            None => vec![],
+        };
+    }
+    doc.cash_pools
+        .iter()
+        .map(|p| pool_view_json(doc, &by_pool, p))
+        .collect()
 }
 
 /// Defensive filename mapping: Firebase UIDs are alphanumeric, but anything
@@ -426,8 +569,8 @@ fn option_json(
     })
 }
 
-fn position_json(h: &Holding, today: chrono::NaiveDate) -> serde_json::Value {
-    option_json(
+fn position_json(doc: &HoldingsDocument, h: &Holding, today: chrono::NaiveDate) -> serde_json::Value {
+    let mut v = option_json(
         &h.id,
         &h.symbol,
         h.strike,
@@ -437,13 +580,20 @@ fn position_json(h: &Holding, today: chrono::NaiveDate) -> serde_json::Value {
         h.sold,
         h.mark.as_ref(),
         h.view(today),
-    )
+    );
+    if let Some(pool) = &h.pool_id {
+        v["pool_id"] = json!(pool);
+    }
+    // Which pool of cash the put spends (row tag) — resolved, so the
+    // client never re-derives the None-folds-to-default rule.
+    v["pool_name"] = json!(pool_name_of(doc, &h.pool_id));
+    v
 }
 
 /// Calls render with the identical option shape (sibling arrays, same
 /// fields — R1): the shared `option_json` renderer.
-fn call_json(c: &market_int_core::holdings::CallHolding, today: chrono::NaiveDate) -> serde_json::Value {
-    option_json(
+fn call_json(doc: &HoldingsDocument, c: &market_int_core::holdings::CallHolding, today: chrono::NaiveDate) -> serde_json::Value {
+    let mut v = option_json(
         &c.id,
         &c.symbol,
         c.strike,
@@ -453,7 +603,12 @@ fn call_json(c: &market_int_core::holdings::CallHolding, today: chrono::NaiveDat
         c.sold,
         c.mark.as_ref(),
         c.view(today),
-    )
+    );
+    if let Some(pool) = &c.pool_id {
+        v["pool_id"] = json!(pool);
+    }
+    v["pool_name"] = json!(pool_name_of(doc, &c.pool_id));
+    v
 }
 
 /// Covered-call contracts covering a lot's symbol — the covered count the
@@ -473,7 +628,7 @@ fn lot_json(l: &market_int_core::holdings::ShareLot, today: chrono::NaiveDate, c
             "as_of": m.as_of.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         })
     });
-    json!({
+    let mut v = json!({
         "id": l.id,
         "symbol": l.symbol,
         "shares": l.shares,
@@ -481,21 +636,28 @@ fn lot_json(l: &market_int_core::holdings::ShareLot, today: chrono::NaiveDate, c
         "acquired": l.acquired.to_string(),
         "mark": mark,
         "view": l.view(today, covered),
-    })
+    });
+    if let Some(pool) = &l.pool_id {
+        v["pool_id"] = json!(pool);
+    }
+    v
 }
 
 fn ledger_json(doc: &HoldingsDocument, today: chrono::NaiveDate) -> serde_json::Value {
+    // Pools supersede the legacy scalar once they exist: the aggregate is
+    // the pool sum, and the legacy `cash` key stays for back-compat.
+    let cash = total_cash(doc);
     json!({
         "schema_version": doc.schema_version,
         "positions": doc
             .positions
             .iter()
-            .map(|p| position_json(p, today))
+            .map(|p| position_json(doc, p, today))
             .collect::<Vec<_>>(),
         "calls": doc
             .calls
             .iter()
-            .map(|c| call_json(c, today))
+            .map(|c| call_json(doc, c, today))
             .collect::<Vec<_>>(),
         "lots": doc
             .lots
@@ -505,12 +667,20 @@ fn ledger_json(doc: &HoldingsDocument, today: chrono::NaiveDate) -> serde_json::
         // The manual balance and its derived numbers (R3/R6): `cash` is
         // null until first set — `cash_free` then stays null with it,
         // while `cash_reserved` still derives from the open puts.
-        "cash": doc.cash,
+        "cash": cash,
         "cash_reserved": market_int_core::holdings::reserved_cash(&doc.positions),
-        "cash_free": doc
-            .cash
-            .map(|c| market_int_core::holdings::free_cash(c, &doc.positions)),
+        "cash_free": cash.map(|c| market_int_core::holdings::free_cash(c, &doc.positions)),
+        // Per-pool breakdown (cash pools R1): frees sum to `cash_free`.
+        "cash_pools": pool_views(doc),
     })
+}
+
+/// The `pool_id` a mutation body claims, trimmed; absent/blank ⇒ None.
+fn requested_pool_id(v: &serde_json::Value) -> Option<String> {
+    v.get("pool_id")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn parse_date(raw: &str, field: &str) -> Result<chrono::NaiveDate, Response> {
@@ -553,7 +723,7 @@ const MAX_BODY_BYTES: usize = 16 * 1024;
 
 /// `POST /api/holdings` — add to the caller's ledger. `kind` selects the
 /// array: `"put"` (the default — deployed clients never send it),
-/// `"call"`, or `"lot"` (R6).
+/// `"call"`, `"lot"`, or `"pool"` (cash pools R2).
 pub(crate) async fn holdings_add(State(st): State<crate::api::AppState>, req: Request) -> Response {
     let uid = uid_of(&req);
     let bytes = match axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES).await {
@@ -568,9 +738,10 @@ pub(crate) async fn holdings_add(State(st): State<crate::api::AppState>, req: Re
     match v.get("kind").and_then(|k| k.as_str()).unwrap_or("put") {
         "put" | "call" => add_option_leg(st, uid, &v).await,
         "lot" => add_lot(st, uid, &v).await,
+        "pool" => add_pool(st, uid, &v).await,
         other => error_response(
             StatusCode::BAD_REQUEST,
-            &format!("unknown kind {other:?} (want put, call, or lot)"),
+            &format!("unknown kind {other:?} (want put, call, lot, or pool)"),
         ),
     }
 }
@@ -622,8 +793,8 @@ async fn add_option_leg(
 
     let holding = Holding {
         // Server-generated id: process sequence on top of the clock stamp
-        // (NEXT_SEQ precedent). Unique across ALL arrays — the id prefix
-        // and clock stamp are shared by every kind.
+        // (NEXT_SEQ precedent). Unique across ALL arrays — entries share
+        // the `h` prefix; pools use their own `p` namespace.
         id: format!("h{}-{}", (st.clock)().timestamp_millis(), next_entry_seq()),
         symbol,
         strike,
@@ -632,6 +803,7 @@ async fn add_option_leg(
         contracts,
         sold,
         mark: None,
+        pool_id: None,
     };
     // One validation rule set serves both option kinds (R1 pinning).
     if let Err(reason) = holding.validate() {
@@ -647,12 +819,40 @@ async fn add_option_leg(
             )
         }
     };
+    materialize_default_pool(&mut doc);
+    // The claimed pool must exist (a typo must not silently spend the
+    // default pool). Calls without an explicit pool inherit from the
+    // same-symbol lots they would cover — the lot's pool IS the shares'
+    // pool (cash pools R4); no call-side picker.
+    let requested_pool = requested_pool_id(v);
+    let inherited_pool = if kind == "call" && requested_pool.is_none() {
+        // The FIFO-earliest covering lot — the one called-away would
+        // reduce — owns the shares' pool the call inherits.
+        doc.lots
+            .iter()
+            .filter(|l| l.symbol == holding.symbol)
+            .min_by(|a, b| (a.acquired, &a.id).cmp(&(b.acquired, &b.id)))
+            .and_then(|l| l.pool_id.clone())
+    } else {
+        None
+    };
+    let pool_id = requested_pool.or(inherited_pool);
+    if let Some(pid) = &pool_id {
+        if !doc.cash_pools.iter().any(|p| &p.id == pid) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("unknown pool_id {pid:?}"),
+            );
+        }
+    }
+    let holding = Holding { pool_id, ..holding };
     if ledger_entry_count(&doc) >= MAX_POSITIONS_PER_LEDGER {
         return error_response(
             StatusCode::BAD_REQUEST,
             &format!("ledger holds the maximum of {MAX_POSITIONS_PER_LEDGER} positions — close one first"),
         );
     }
+    sync_scalar_cash(&mut doc);
     let body = if kind == "call" {
         let call_h = market_int_core::holdings::CallHolding {
             id: holding.id.clone(),
@@ -663,12 +863,13 @@ async fn add_option_leg(
             contracts: holding.contracts,
             sold: holding.sold,
             mark: None,
+            pool_id: holding.pool_id.clone(),
         };
         doc.calls.push(call_h.clone());
-        Json(json!({ "call": call_json(&call_h, today_et(st.clock)) }))
+        Json(json!({ "call": call_json(&doc, &call_h, today_et(st.clock)) }))
     } else {
         doc.positions.push(holding.clone());
-        Json(json!({ "position": position_json(&holding, today_et(st.clock)) }))
+        Json(json!({ "position": position_json(&doc, &holding, today_et(st.clock)) }))
     };
     if let Err(err) =
         write_ledger_off_thread(st.holdings_dir.clone(), uid, doc).await
@@ -720,6 +921,7 @@ async fn add_lot(st: crate::api::AppState, uid: String, v: &serde_json::Value) -
         basis_per_share,
         acquired,
         mark: None,
+        pool_id: None,
     };
     if let Err(reason) = lot.validate() {
         return error_response(StatusCode::BAD_REQUEST, &reason);
@@ -733,6 +935,9 @@ async fn add_lot(st: crate::api::AppState, uid: String, v: &serde_json::Value) -
         .get("assigned_from")
         .and_then(|x| x.as_str())
         .map(|s| s.to_string());
+    // Explicit pool wins; an assignment defaults to the put's pool — the
+    // shares land in the account that secured them (cash pools R4).
+    let requested_pool = requested_pool_id(v);
 
     let mut doc = match read_ledger_off_thread(st.holdings_dir.clone(), uid.clone()).await {
         Ok(d) => d,
@@ -743,6 +948,11 @@ async fn add_lot(st: crate::api::AppState, uid: String, v: &serde_json::Value) -
             )
         }
     };
+    materialize_default_pool(&mut doc);
+    // The assignment's cash move happens on the PUT's pool: strike×100
+    // leaves the pool that reserved it (cash pools R4/R6).
+    let mut assigned_cash_move: Option<(String, f64)> = None;
+    let mut lot = lot;
     if let Some(put_id) = &assigned_from {
         let Some(put) = doc.positions.iter().find(|p| p.id == *put_id) else {
             return error_response(
@@ -761,7 +971,43 @@ async fn add_lot(st: crate::api::AppState, uid: String, v: &serde_json::Value) -
                 ),
             );
         }
+        assigned_cash_move = Some((
+            effective_pool_id(&doc, &put.pool_id),
+            put.strike * 100.0 * put.contracts as f64,
+        ));
+        if lot.pool_id.is_none() {
+            lot.pool_id = put.pool_id.clone();
+        }
         doc.positions.retain(|p| p.id != *put_id);
+    }
+    let pool_id = match requested_pool.or_else(|| lot.pool_id.clone()) {
+        Some(pid) => {
+            if !doc.cash_pools.iter().any(|p| p.id == pid) {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("unknown pool_id {pid:?}"),
+                );
+            }
+            Some(pid)
+        }
+        None => None,
+    };
+    lot.pool_id = pool_id;
+    // Strike×100 leaves the put's pool only when the put itself carried
+    // one (a None-pool put against the default pool still moves ITS
+    // effective pool's cash).
+    if let Some((pool_id, amount)) = assigned_cash_move {
+        match doc.cash_pools.iter_mut().find(|p| p.id == pool_id) {
+            Some(pool) => pool.cash -= amount,
+            // Only reachable via hand-edited data (a put naming a pool that
+            // no longer exists) — moving the money silently would hide it.
+            None => {
+                return error_response(
+                    StatusCode::CONFLICT,
+                    &format!("the put's pool {pool_id:?} no longer exists — reassign the put's pool first"),
+                )
+            }
+        }
     }
     if ledger_entry_count(&doc) >= MAX_POSITIONS_PER_LEDGER {
         return error_response(
@@ -770,6 +1016,7 @@ async fn add_lot(st: crate::api::AppState, uid: String, v: &serde_json::Value) -
         );
     }
     doc.lots.push(lot.clone());
+    sync_scalar_cash(&mut doc);
     // Covered count from the post-mutation document — the 201 reflects the
     // real coverage, not a placeholder.
     let covered = covered_contracts(&doc, &lot.symbol);
@@ -793,9 +1040,72 @@ fn next_entry_seq() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// `POST /api/holdings` `kind:"pool"` — a new named cash pool (cash pools
+/// R2). Materializes the legacy scalar first, so a legacy ledger keeps its
+/// balance in "Main" and the new pool starts at 0. Names are required and
+/// trimmed; ids are server-generated (the `p` prefix namespace). The array
+/// is bounded like the entries — an unbounded pool list would be the one
+/// new unbounded resource this feature adds.
+const MAX_POOLS_PER_LEDGER: usize = 20;
+
+/// Characters, not bytes — non-ASCII names get the full budget.
+const MAX_POOL_NAME_CHARS: usize = 80;
+
+async fn add_pool(st: crate::api::AppState, uid: String, v: &serde_json::Value) -> Response {
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if name.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "missing pool name");
+    }
+    if name.chars().count() > MAX_POOL_NAME_CHARS {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("pool name too long (max {MAX_POOL_NAME_CHARS} characters)"),
+        );
+    }
+
+    let mut doc = match read_ledger_off_thread(st.holdings_dir.clone(), uid.clone()).await {
+        Ok(d) => d,
+        Err(err) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("ledger read failed: {err}"),
+            )
+        }
+    };
+    materialize_default_pool(&mut doc);
+    if doc.cash_pools.len() >= MAX_POOLS_PER_LEDGER {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("ledger holds the maximum of {MAX_POOLS_PER_LEDGER} pools — delete one first"),
+        );
+    }
+    let pool = CashPool {
+        id: format!("p{}-{}", (st.clock)().timestamp_millis(), next_entry_seq()),
+        name,
+        cash: 0.0,
+    };
+    doc.cash_pools.push(pool.clone());
+    sync_scalar_cash(&mut doc);
+    let by_pool = market_int_core::holdings::reserved_cash_by_pool(&doc.positions);
+    let body = Json(json!({ "pool": pool_view_json(&doc, &by_pool, &pool) }));
+    if let Err(err) = write_ledger_off_thread(st.holdings_dir.clone(), uid, doc).await {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("ledger write failed: {err}"),
+        );
+    }
+    (StatusCode::CREATED, body).into_response()
+}
+
 /// `DELETE /api/holdings/{id}` — the outcome-confirm removal. One route
-/// for every kind: positions, then calls, then lots (R6); an id in no
-/// array is a 404 with no write.
+/// for every kind: positions, then calls, then lots, then pools (R6 +
+/// cash pools R2); an id in no array is a 404 with no write. A pool with
+/// referencing entries is a 409 — the entries must be closed or moved
+/// first, so no entry can dangle.
 pub(crate) async fn holdings_delete(
     State(st): State<crate::api::AppState>,
     AxPath(id): AxPath<String>,
@@ -820,6 +1130,53 @@ pub(crate) async fn holdings_delete(
     } else if doc.lots.iter().any(|l| l.id == id) {
         doc.lots.retain(|l| l.id != id);
         true
+    } else if let Some(pool) = doc.cash_pools.iter().find(|p| p.id == id).cloned() {
+        // Puts, lots AND calls may reference the pool (calls inherit it);
+        // any reference blocks the delete (cash pools R2 — no danglers).
+        let referenced = doc
+            .positions
+            .iter()
+            .map(|p| &p.pool_id)
+            .chain(doc.calls.iter().map(|c| &c.pool_id))
+            .chain(doc.lots.iter().map(|l| &l.pool_id))
+            .any(|pool| pool.as_deref() == Some(id.as_str()));
+        if referenced {
+            return error_response(
+                StatusCode::CONFLICT,
+                &format!(
+                    "pool {:?} still has open entries — close or move them first",
+                    pool.name
+                ),
+            );
+        }
+        // A funded pool deletes freely (user decision after preview): the
+        // pool's recorded cash simply leaves the aggregate with it.
+        // The FIRST pool is where None-pool entries land: deleting it would
+        // silently migrate their reservations to the next pool.
+        let is_first = doc.cash_pools.first().map(|p| p.id.as_str()) == Some(id.as_str());
+        let has_unassigned = doc
+            .positions
+            .iter()
+            .map(|p| &p.pool_id)
+            .chain(doc.lots.iter().map(|l| &l.pool_id))
+            .any(|pool| pool.is_none());
+        if is_first && has_unassigned {
+            return error_response(
+                StatusCode::CONFLICT,
+                &format!(
+                    "pool {:?} is the default pool and still holds unassigned entries — assign them a pool first",
+                    pool.name
+                ),
+            );
+        }
+        doc.cash_pools.retain(|p| p.id != id);
+        // Down to zero pools ⇒ fall back to the legacy scalar so a
+        // single-pool ledger reads exactly like the pre-pool shape.
+        if doc.cash_pools.is_empty() {
+            doc.cash = Some(pool.cash);
+        }
+        sync_scalar_cash(&mut doc);
+        true
     } else {
         false
     };
@@ -835,9 +1192,12 @@ pub(crate) async fn holdings_delete(
     Json(json!({ "removed": id })).into_response()
 }
 
-/// `PATCH /api/holdings/cash` — set the manual cash balance (R6, never the
-/// Tiger account API). The response carries the derived reserved/free so
-/// the UI strip re-renders from the response alone.
+/// `PATCH /api/holdings/cash` — set a pool's cash balance (and/or rename
+/// the pool; cash pools R2, never the Tiger account API). `{cash}` with no
+/// `pool_id` targets the FIRST pool — byte-for-byte the legacy route's
+/// behavior for single-pool ledgers. The response carries the pool view
+/// plus the derived aggregates so the UI strip re-renders from the
+/// response alone.
 pub(crate) async fn holdings_patch_cash(
     State(st): State<crate::api::AppState>,
     req: Request,
@@ -851,12 +1211,21 @@ pub(crate) async fn holdings_patch_cash(
         Ok(v) => v,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "body is not JSON"),
     };
-    let Some(cash) = v.get("cash").and_then(|x| x.as_f64()) else {
-        return error_response(StatusCode::BAD_REQUEST, "missing cash");
-    };
-    if !cash.is_finite() || cash < 0.0 {
-        return error_response(StatusCode::BAD_REQUEST, "cash must be a number ≥ 0");
+    let cash = v.get("cash").and_then(|x| x.as_f64());
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if cash.is_none() && name.is_none() {
+        return error_response(StatusCode::BAD_REQUEST, "missing cash or name");
     }
+    if let Some(cash) = cash {
+        if !cash.is_finite() || cash < 0.0 {
+            return error_response(StatusCode::BAD_REQUEST, "cash must be a number ≥ 0");
+        }
+    }
+    let requested_pool = requested_pool_id(&v);
 
     let mut doc = match read_ledger_off_thread(st.holdings_dir.clone(), uid.clone()).await {
         Ok(d) => d,
@@ -867,7 +1236,29 @@ pub(crate) async fn holdings_patch_cash(
             )
         }
     };
-    doc.cash = Some(cash);
+    materialize_default_pool(&mut doc);
+    let target_id = requested_pool.unwrap_or_else(|| first_pool_id(&doc));
+    let Some(target_idx) = doc
+        .cash_pools
+        .iter()
+        .position(|p| p.id == target_id)
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("unknown pool_id {target_id:?}"),
+        );
+    };
+    if let Some(cash) = cash {
+        doc.cash_pools[target_idx].cash = cash;
+    }
+    if let Some(name) = name {
+        doc.cash_pools[target_idx].name = name;
+    }
+    sync_scalar_cash(&mut doc);
+    let by_pool = market_int_core::holdings::reserved_cash_by_pool(&doc.positions);
+    let pool_view = pool_view_json(&doc, &by_pool, &doc.cash_pools[target_idx]);
+    let aggregate_cash = total_cash(&doc);
+    let reserved_total = market_int_core::holdings::reserved_cash(&doc.positions);
     if let Err(err) = write_ledger_off_thread(st.holdings_dir.clone(), uid, doc.clone()).await {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -875,9 +1266,10 @@ pub(crate) async fn holdings_patch_cash(
         );
     }
     Json(json!({
-        "cash": cash,
-        "cash_reserved": market_int_core::holdings::reserved_cash(&doc.positions),
-        "cash_free": market_int_core::holdings::free_cash(cash, &doc.positions),
+        "pool": pool_view,
+        "cash": aggregate_cash,
+        "cash_reserved": reserved_total,
+        "cash_free": aggregate_cash.map(|c| c - reserved_total),
     }))
     .into_response()
 }
@@ -919,13 +1311,43 @@ pub(crate) async fn holdings_called_away(
     let (symbol, contracts) = (call_h.symbol.clone(), call_h.contracts);
     let need = contracts as u64 * 100;
 
-    // One rewrite: the call goes and the FIFO reduction applies together.
+    // One rewrite: the call goes and the FIFO reduction applies together —
+    // scoped to the call's OWN pool (cash pools R4: no cross-pool
+    // reduction, so one symbol held in two accounts reduces in the account
+    // the call was written against).
+    let call_pool = effective_pool_id(&doc, &call_h.pool_id);
+    let candidates: Vec<market_int_core::holdings::ShareLot> = doc
+        .lots
+        .iter()
+        .filter(|l| {
+            l.symbol == symbol && effective_pool_id(&doc, &l.pool_id) == call_pool
+        })
+        .cloned()
+        .collect();
     let reduction =
-        market_int_core::holdings::apply_called_away(&doc.lots, &symbol, contracts);
+        market_int_core::holdings::apply_called_away(&candidates, &symbol, contracts);
     doc.calls.retain(|c| c.id != call_id);
     let (reduced, reason) = match reduction {
-        Some(lots) => {
-            doc.lots = lots;
+        Some(reduced_lots) => {
+            let reduced_ids: std::collections::HashSet<&str> =
+                reduced_lots.iter().map(|l| l.id.as_str()).collect();
+            let mut merged = Vec::with_capacity(doc.lots.len());
+            for l in doc.lots.drain(..) {
+                if reduced_ids.contains(l.id.as_str()) {
+                    merged.push(
+                        reduced_lots
+                            .iter()
+                            .find(|r| r.id == l.id)
+                            .cloned()
+                            .expect("reduced lot id"),
+                    );
+                } else if candidates.iter().any(|c| c.id == l.id) {
+                    // reduced to zero inside the call's pool — gone
+                } else {
+                    merged.push(l);
+                }
+            }
+            doc.lots = merged;
             (true, None)
         }
         None => (
@@ -1128,6 +1550,7 @@ mod store_tests {
 
     fn sample_holding(id: &str) -> market_int_core::holdings::Holding {
         market_int_core::holdings::Holding {
+      pool_id: None,
             id: id.to_string(),
             symbol: "GOOG".to_string(),
             strike: 350.0,
@@ -1226,9 +1649,11 @@ mod store_tests {
     fn full_wheel_document_round_trips_losslessly() {
         let dir = tempfile::tempdir().unwrap();
         let as_of = chrono::Utc::now();
+        let mut holding = sample_holding("h1");
+        holding.pool_id = Some("p1".to_string());
         let doc = HoldingsDocument {
             schema_version: LEDGER_SCHEMA_VERSION,
-            positions: vec![sample_holding("h1")],
+            positions: vec![holding],
             calls: vec![market_int_core::holdings::CallHolding {
                 id: "c1".to_string(),
                 symbol: "GOOG".to_string(),
@@ -1242,6 +1667,7 @@ mod store_tests {
                     as_of,
                     underlying_price: Some(370.0),
                 }),
+                pool_id: Some("p1".to_string()),
             }],
             lots: vec![market_int_core::holdings::ShareLot {
                 id: "l1".to_string(),
@@ -1253,8 +1679,14 @@ mod store_tests {
                     spot: 370.0,
                     as_of,
                 }),
+                pool_id: Some("p1".to_string()),
             }],
             cash: Some(150_000.0),
+            cash_pools: vec![CashPool {
+                id: "main".to_string(),
+                name: "Main".to_string(),
+                cash: 80_000.0,
+            }],
         };
         write_ledger(dir.path(), "uid1", &doc).unwrap();
         let back = read_ledger(dir.path(), "uid1").unwrap();
@@ -1269,6 +1701,7 @@ mod store_tests {
             dir.path(),
             "uid1",
             &HoldingsDocument {
+                cash_pools: Vec::new(),
                 positions: vec![sample_holding("h1")],
                 ..Default::default()
             },
@@ -1291,6 +1724,7 @@ mod store_tests {
             dir.path(),
             "uid1",
             &HoldingsDocument {
+                cash_pools: Vec::new(),
                 positions: vec![sample_holding("h1")],
                 ..Default::default()
             },
@@ -1598,6 +2032,7 @@ mod tests {
                 contracts: 1,
                 sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
                 mark: None,
+                pool_id: None,
             });
         }
         write_ledger(&dir.path().join("holdings"), "test-uid", &doc).unwrap();
@@ -1645,8 +2080,10 @@ mod tests {
             &dir.join("holdings"),
             "test-uid",
             &HoldingsDocument {
+                cash_pools: Vec::new(),
                 positions: vec![
                     market_int_core::holdings::Holding {
+                  pool_id: None,
                         id: "p-tsla".to_string(),
                         symbol: "TSLA".to_string(),
                         strike: 420.0,
@@ -1661,6 +2098,7 @@ mod tests {
                         }),
                     },
                     market_int_core::holdings::Holding {
+                  pool_id: None,
                         id: "p-aapl".to_string(),
                         symbol: "AAPL".to_string(),
                         strike: 230.0,
@@ -1796,6 +2234,36 @@ mod tests {
         let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(v["refresh"]["stale"].as_array().unwrap().len(), 2);
+    }
+
+    /// Cash pools R1: a legacy ledger (scalar `cash`, no pools) renders
+    /// ONE implicit "Main" pool in the list response — cash/reserved/free
+    /// derived, aggregates unchanged, no document rewrite (lazy migration).
+    #[tokio::test]
+    async fn legacy_cash_reads_as_implicit_main_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let holdings_dir = dir.path().join("holdings");
+        std::fs::create_dir_all(&holdings_dir).unwrap();
+        std::fs::write(
+            holdings_dir.join("test-uid.json"),
+            r#"{"schema_version":1,"positions":[],"cash":80000.0}"#,
+        )
+        .unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let pools = v["cash_pools"].as_array().expect("cash_pools array");
+        assert_eq!(pools.len(), 1);
+        assert_eq!(pools[0]["id"], "main");
+        assert_eq!(pools[0]["name"], "Main");
+        assert_eq!(pools[0]["cash"], 80000.0);
+        assert_eq!(pools[0]["reserved"], 0.0);
+        assert_eq!(pools[0]["free"], 80000.0);
+        assert_eq!(v["cash"], 80000.0);
+        assert_eq!(v["cash_free"], 80000.0);
+        // Lazy: a read never rewrites — the file is byte-identical.
+        let after = std::fs::read_to_string(holdings_dir.join("test-uid.json")).unwrap();
+        assert!(!after.contains("cash_pools"), "read left the legacy shape alone");
     }
 
     /// Design doc `## Feature acceptance` (wheel-holdings), verbatim: the
@@ -1986,16 +2454,19 @@ mod tests {
         assert_eq!(v["called_away"], true);
         assert_eq!(v["reduced"], true);
 
-        // End state: everything closed, cash back at the full balance.
+        // End state: everything closed. The assignment moved strike×100
+        // (cash pools R4) out of the default pool into the lot's basis, so
+        // the balance sits at 150,000 − 70,000 = 80,000 — the shares were
+        // called away, not sold, so no cash came back.
         let app = crate::api::build_router(test_state(dir.path(), fetcher.clone()));
         let (status, v) = call(app, "GET", "/api/holdings", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(v["positions"].as_array().unwrap().len(), 0);
         assert_eq!(v["calls"].as_array().unwrap().len(), 0);
         assert_eq!(v["lots"].as_array().unwrap().len(), 0);
-        assert_eq!(v["cash"], 150000.0);
+        assert_eq!(v["cash"], 80000.0);
         assert_eq!(v["cash_reserved"], 0.0);
-        assert_eq!(v["cash_free"], 150000.0);
+        assert_eq!(v["cash_free"], 80000.0);
 
         // No orphan ids, one document per uid.
         let file =
@@ -2010,6 +2481,827 @@ mod tests {
         assert_eq!(files, vec!["test-uid.json".to_string()], "one document per uid");
     }
 
+    // ── Cash pools R2: pool management API ─────────────────────────
+
+    /// Pool add lands in the list with its own zeroed row; the legacy
+    /// scalar materializes into "Main" in the same write.
+    #[tokio::test]
+    async fn pool_add_appears_in_list_and_materializes_main() {
+        let dir = tempfile::tempdir().unwrap();
+        let holdings_dir = dir.path().join("holdings");
+        std::fs::create_dir_all(&holdings_dir).unwrap();
+        std::fs::write(
+            holdings_dir.join("test-uid.json"),
+            r#"{"schema_version":1,"positions":[],"cash":80000.0}"#,
+        )
+        .unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({"kind": "pool", "name": "IBKR"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{v}");
+        let pool = &v["pool"];
+        assert_eq!(pool["name"], "IBKR");
+        assert_eq!(pool["cash"], 0.0);
+        assert_ne!(pool["id"], "main", "id is server-generated");
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        let pools = v["cash_pools"].as_array().unwrap();
+        assert_eq!(pools.len(), 2);
+        assert_eq!(pools[0]["name"], "Main", "legacy cash landed in Main");
+        assert_eq!(pools[0]["cash"], 80000.0);
+        assert_eq!(pools[1]["name"], "IBKR");
+
+        // A blank name is rejected, no write.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({"kind": "pool", "name": "   "})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// PATCH cash with a pool_id touches ONLY that pool; renaming works
+    /// through the same route; unknown pool ids are 400s.
+    #[tokio::test]
+    async fn pool_cash_patch_targets_one_pool_and_renames() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({"kind": "pool", "name": "IBKR"})),
+        )
+        .await;
+        let ibkr = v["pool"]["id"].as_str().unwrap().to_string();
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "PATCH",
+            "/api/holdings/cash",
+            Some(json!({"pool_id": ibkr, "cash": 50000.0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["pool"]["id"], ibkr);
+        assert_eq!(v["pool"]["cash"], 50000.0);
+        assert_eq!(v["pool"]["free"], 50000.0);
+        assert_eq!(v["cash"], 50000.0, "aggregate = Main 0 + IBKR 50k");
+        assert_eq!(v["cash_free"], 50000.0);
+
+        // Rename without touching cash.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "PATCH",
+            "/api/holdings/cash",
+            Some(json!({"pool_id": ibkr, "name": "IBKR LLC"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["pool"]["name"], "IBKR LLC");
+        assert_eq!(v["pool"]["cash"], 50000.0, "rename left cash alone");
+
+        // Unknown pool id.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(
+            app,
+            "PATCH",
+            "/api/holdings/cash",
+            Some(json!({"pool_id": "nope", "cash": 1.0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Negative cash rejected with the document untouched.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(
+            app,
+            "PATCH",
+            "/api/holdings/cash",
+            Some(json!({"pool_id": ibkr, "cash": -1.0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// The pool array is bounded (the one new unbounded resource), and
+    /// every pool mutation keeps the legacy scalar mirroring the pool sum
+    /// so a rolled-back binary still reads the right balance.
+    #[tokio::test]
+    async fn pools_are_capped_and_scalar_stays_in_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let mut last_id = String::new();
+        for i in 0..21 {
+            let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+            let (status, v) = call(
+                app,
+                "POST",
+                "/api/holdings",
+                Some(json!({"kind": "pool", "name": format!("P{i}")})),
+            )
+            .await;
+            // The first add also materializes "Main", so 19 named pools
+            // fill the 20-slot cap.
+            if i < 19 {
+                assert_eq!(status, StatusCode::CREATED, "pool {i}: {v}");
+                last_id = v["pool"]["id"].as_str().unwrap().to_string();
+            } else {
+                assert_eq!(status, StatusCode::BAD_REQUEST, "pool {i} over cap: {v}");
+            }
+        }
+        // Scalar sync: cash the last pool, read the raw document.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(
+            app,
+            "PATCH",
+            "/api/holdings/cash",
+            Some(json!({"pool_id": last_id, "cash": 777.0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let file = std::fs::read_to_string(dir.path().join("holdings/test-uid.json")).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&file).unwrap();
+        assert_eq!(
+            doc["cash"], 777.0,
+            "the scalar mirrors the pool sum after a pool edit"
+        );
+    }
+
+    /// PATCH cash with NO pool_id on a legacy ledger behaves exactly like
+    /// the pre-pool route: the balance lands where reads find it.
+    #[tokio::test]
+    async fn legacy_patch_cash_without_pool_id_matches_old_behavior() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "PATCH",
+            "/api/holdings/cash",
+            Some(json!({"cash": 1234.0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["cash"], 1234.0);
+        assert_eq!(v["cash_free"], 1234.0);
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["cash"], 1234.0);
+        let pools = v["cash_pools"].as_array().unwrap();
+        assert_eq!(pools.len(), 1);
+        assert_eq!(pools[0]["cash"], 1234.0, "the single pool carries it");
+    }
+
+    /// Deleting a pool with referencing entries is a 409 and the document
+    /// is unchanged; without references it goes, and the last pool falls
+    /// back to the legacy scalar shape.
+    #[tokio::test]
+    async fn pool_delete_blocks_on_dependents_and_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (_, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({"kind": "pool", "name": "IBKR"})),
+        )
+        .await;
+        let ibkr = v["pool"]["id"].as_str().unwrap().to_string();
+
+        // A put referencing IBKR blocks the delete.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "symbol": "GOOG", "strike": 100.0, "premium": 1.0,
+                "contracts": 1, "sold": "2026-09-04", "expiry": "2026-09-11",
+                "pool_id": ibkr
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{v}");
+        let put_id = v["position"]["id"].as_str().unwrap().to_string();
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "DELETE", &format!("/api/holdings/{ibkr}"), None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{v}");
+
+        // Close the put; now the delete goes, and Main remains.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(app, "DELETE", &format!("/api/holdings/{put_id}"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "DELETE", &format!("/api/holdings/{ibkr}"), None).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(v["cash_pools"].as_array().unwrap().len(), 1, "Main left");
+
+        // Deleting the LAST pool falls back to the legacy scalar shape.
+        let main_id = v["cash_pools"][0]["id"].as_str().unwrap().to_string();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, dbg) = call(app, "DELETE", &format!("/api/holdings/{main_id}"), None).await;
+        assert_eq!(status, StatusCode::OK, "main delete: {dbg}");
+        // The fallback restores the scalar: cash_pools empties and the
+        // pool's cash becomes `cash` — the read view then renders it as
+        // implicit Main again. (A pre-pool binary ignores the unknown
+        // empty array, so rollback stays safe — ADR-002.)
+        let file = std::fs::read_to_string(dir.path().join("holdings/test-uid.json")).unwrap();
+        assert!(file.contains("\"cash_pools\": []"), "pool array emptied: {file}");
+        assert!(file.contains("\"cash\": 0.0"), "the pool's cash became the scalar");
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let pools = v["cash_pools"].as_array().unwrap();
+        assert_eq!(pools.len(), 1, "the scalar reads as implicit Main again");
+        assert_eq!(pools[0]["cash"], 0.0);
+    }
+
+    // ── Cash pools R4: pool routing rules ──────────────────────────
+
+    /// An unassigned (None-pool) put against pools: its assignment moves
+    /// the DEFAULT (first) pool's cash and the lot stays None (folding to
+    /// the first pool on read).
+    #[tokio::test]
+    async fn assignment_without_pool_moves_default_pool_cash() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "PATCH",
+            "/api/holdings/cash",
+            Some(json!({"cash": 50000.0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "symbol": "GOOG", "strike": 100.0, "premium": 1.0,
+                "contracts": 2, "sold": "2026-09-04", "expiry": "2026-09-11"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{v}");
+        assert!(
+            v["position"]["pool_id"].is_null(),
+            "no pool chosen ⇒ None"
+        );
+        let put_id = v["position"]["id"].as_str().unwrap().to_string();
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "lot", "symbol": "GOOG", "shares": 200,
+                "basis_per_share": 99.0, "acquired": "2026-09-08",
+                "assigned_from": put_id
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{v}");
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        let pools = v["cash_pools"].as_array().unwrap();
+        assert_eq!(pools[0]["cash"], 30000.0, "strike×100×2 left Main");
+        assert_eq!(pools[0]["free"], 30000.0);
+        assert!(v["lots"][0]["pool_id"].is_null(), "lot stays None");
+    }
+
+    /// Unknown pool ids are rejected on puts and calls; called-away moves
+    /// no cash (the shares were bought back by the broker, the ledger only
+    /// reduces the lot).
+    #[tokio::test]
+    async fn pool_validation_and_called_away_cash_neutrality() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "symbol": "GOOG", "strike": 100.0, "premium": 1.0,
+                "contracts": 1, "sold": "2026-09-04", "expiry": "2026-09-11",
+                "pool_id": "nope"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "unknown put pool");
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "call", "symbol": "GOOG", "strike": 110.0,
+                "premium": 0.8, "contracts": 1,
+                "sold": "2026-09-08", "expiry": "2026-09-18",
+                "pool_id": "nope"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "unknown call pool");
+
+        // A pools ledger: cash a put away and confirm no pool moved.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (_, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({"kind": "pool", "name": "IBKR"})),
+        )
+        .await;
+        let ibkr = v["pool"]["id"].as_str().unwrap().to_string();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let _ = call(
+            app,
+            "PATCH",
+            "/api/holdings/cash",
+            Some(json!({"pool_id": ibkr, "cash": 20000.0})),
+        )
+        .await;
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "lot", "symbol": "GOOG", "shares": 100,
+                "basis_per_share": 99.0, "acquired": "2026-09-08",
+                "pool_id": ibkr
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "plain lot with pool: {v}");
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "call", "symbol": "GOOG", "strike": 110.0,
+                "premium": 0.8, "contracts": 1,
+                "sold": "2026-09-08", "expiry": "2026-09-18"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "call add: {v}");
+        assert_eq!(v["call"]["pool_id"], ibkr, "call inherits the lot's pool");
+        let call_id = v["call"]["id"].as_str().unwrap().to_string();
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings/called-away",
+            Some(json!({"call_id": call_id})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["reduced"], true);
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        let pools = v["cash_pools"].as_array().unwrap();
+        assert_eq!(pools[1]["cash"], 20000.0, "called-away moved no cash");
+        assert_eq!(v["lots"].as_array().unwrap().len(), 0, "lot fully reduced");
+    }
+
+    /// R3 gap-closure at the router level: puts in BOTH pools render their
+    /// own reserved; a None-pool put folds into the FIRST pool; a pool can
+    /// go negative honestly.
+    #[tokio::test]
+    async fn pool_views_partition_puts_and_fold_none_into_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (_, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({"kind": "pool", "name": "IBKR"})),
+        )
+        .await;
+        let ibkr = v["pool"]["id"].as_str().unwrap().to_string();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let _ = call(
+            app,
+            "PATCH",
+            "/api/holdings/cash",
+            Some(json!({"pool_id": ibkr, "cash": 5000.0})),
+        )
+        .await;
+
+        // Put A into IBKR (reserve 20,000), put B unassigned (folds to
+        // Main, reserve 10,000).
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "symbol": "GOOG", "strike": 200.0, "premium": 1.0,
+                "contracts": 1, "sold": "2026-09-04", "expiry": "2026-09-11",
+                "pool_id": ibkr
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{v}");
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "symbol": "SPY", "strike": 100.0, "premium": 1.0,
+                "contracts": 1, "sold": "2026-09-04", "expiry": "2026-09-11"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        let pools = v["cash_pools"].as_array().unwrap();
+        assert_eq!(pools[0]["name"], "Main");
+        assert_eq!(pools[0]["reserved"], 10000.0, "None-pool put folds to first");
+        assert_eq!(pools[0]["free"], -10000.0, "honest negative, never clamped");
+        assert_eq!(pools[1]["reserved"], 20000.0, "IBKR's own put only");
+        assert_eq!(pools[1]["free"], 5000.0 - 20000.0);
+        assert_eq!(v["cash_reserved"], 30000.0, "aggregate = pool sum");
+        let total_free: f64 = pools.iter().map(|p| p["free"].as_f64().unwrap()).sum();
+        assert_eq!(v["cash_free"], total_free);
+
+        // Each row names the pool it spends — resolved server-side (the
+        // None→default rule never re-derived on the client).
+        let positions = v["positions"].as_array().unwrap();
+        let names: Vec<&str> = positions
+            .iter()
+            .map(|p| p["pool_name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"IBKR"), "assigned put names its pool: {names:?}");
+        assert!(names.contains(&"Main"), "None-pool put names the default pool: {names:?}");
+    }
+
+    /// R4 gap-closure: called-away reduces ONLY inside the call's pool,
+    /// even when the same symbol has lots in both — and the inheritance
+    /// picks the FIFO-earliest covering lot (the one that would reduce).
+    #[tokio::test]
+    async fn called_away_fifo_is_pool_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (_, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({"kind": "pool", "name": "IBKR"})),
+        )
+        .await;
+        let ibkr = v["pool"]["id"].as_str().unwrap().to_string();
+
+        // GOOG lots: 100 sh in Main (acquired Sep 1, EARLIER) and 100 sh in
+        // IBKR (Sep 5).
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "lot", "symbol": "GOOG", "shares": 100,
+                "basis_per_share": 300.0, "acquired": "2026-09-01"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "lot", "symbol": "GOOG", "shares": 100,
+                "basis_per_share": 300.0, "acquired": "2026-09-05",
+                "pool_id": ibkr
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // A call with no explicit pool inherits the FIFO-earliest lot's
+        // pool — Main, the lot called-away would actually reduce.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "call", "symbol": "GOOG", "strike": 350.0,
+                "premium": 1.0, "contracts": 1,
+                "sold": "2026-09-08", "expiry": "2026-09-18"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{v}");
+        assert!(
+            v["call"]["pool_id"].is_null(),
+            "inherits Main via the earliest lot (None = default pool)"
+        );
+        let call_id = v["call"]["id"].as_str().unwrap().to_string();
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings/called-away",
+            Some(json!({"call_id": call_id})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["reduced"], true);
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        let lots = v["lots"].as_array().unwrap();
+        assert_eq!(lots.len(), 1, "exactly one lot reduced to zero");
+        assert_eq!(lots[0]["pool_id"], ibkr, "the IBKR lot survived untouched");
+    }
+
+    /// Delete policy (user decision after preview — no funded guard): a
+    /// pool holding cash deletes freely and its balance leaves the
+    /// aggregate with it; the LAST pool's delete falls back to the legacy
+    /// scalar and keeps the balance. Entries still block: a referenced
+    /// pool is a 409, and so is the default pool while None-pool entries
+    /// exist (their reservations would silently migrate to the next pool).
+    #[tokio::test]
+    async fn pool_delete_allows_funded_keeps_entry_and_default_guards() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (_, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({"kind": "pool", "name": "IBKR"})),
+        )
+        .await;
+        let ibkr = v["pool"]["id"].as_str().unwrap().to_string();
+
+        // Fund IBKR and delete it: no guard — the $100 leaves the record,
+        // Main (never funded) stays at 0.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let _ = call(
+            app,
+            "PATCH",
+            "/api/holdings/cash",
+            Some(json!({"pool_id": ibkr, "cash": 100.0})),
+        )
+        .await;
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(app, "DELETE", &format!("/api/holdings/{ibkr}"), None).await;
+        assert_eq!(status, StatusCode::OK, "funded pool deletes freely");
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (_, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(v["cash_pools"].as_array().unwrap().len(), 1, "{v}");
+        assert_eq!(v["cash"], 0.0, "the deleted pool's cash left the aggregate");
+
+        // An unassigned put still blocks the default pool's delete: its
+        // reservation would silently migrate to the next pool.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "symbol": "SPY", "strike": 100.0, "premium": 1.0,
+                "contracts": 1, "sold": "2026-09-04", "expiry": "2026-09-11"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{v}");
+        let put_id = v["position"]["id"].as_str().unwrap().to_string();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(app, "DELETE", "/api/holdings/main", None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "default pool with unassigned put");
+
+        // Close the put, fund Main as the LAST pool, delete: the fallback
+        // keeps the balance as the legacy scalar (implicit Main renders it).
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let _ = call(app, "DELETE", &format!("/api/holdings/{put_id}"), None).await;
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let _ = call(
+            app,
+            "PATCH",
+            "/api/holdings/cash",
+            Some(json!({"cash": 250.0})),
+        )
+        .await;
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(app, "DELETE", "/api/holdings/main", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (_, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(v["cash"], 250.0, "last-pool delete keeps the balance");
+        let pools = v["cash_pools"].as_array().unwrap();
+        assert_eq!(pools.len(), 1, "implicit Main renders the scalar");
+        assert_eq!(pools[0]["id"], "main");
+        assert_eq!(pools[0]["cash"], 250.0);
+    }
+
+    /// Design doc `## Feature acceptance` (cash pools), verbatim: a legacy
+    /// ledger with cash 80,000 reads as one implicit "Main" pool; adding
+    /// pool "IBKR" with 50,000, selling a put in IBKR (strike 100 ×1) and
+    /// assigning it moves strike×100 out of IBKR's cash into a lot that
+    /// lives in IBKR — Main untouched throughout, and the aggregate
+    /// cash_free always equals the sum of the pool frees.
+    #[tokio::test]
+    async fn feature_acceptance_cash_pools() {
+        let dir = tempfile::tempdir().unwrap();
+        // Legacy pre-pools ledger: the old scalar `cash`, no pools field.
+        let holdings_dir = dir.path().join("holdings");
+        std::fs::create_dir_all(&holdings_dir).unwrap();
+        std::fs::write(
+            holdings_dir.join("test-uid.json"),
+            r#"{"schema_version":1,"positions":[],"cash":80000.0}"#,
+        )
+        .unwrap();
+        let no_marks: MarkFetcher = Arc::new(|_r: &[MarkRequest], _l: &[String]| MarkBatch {
+            marks: vec![],
+            spots: Default::default(),
+        });
+
+        // The legacy document reads as one implicit "Main" pool: 80,000
+        // free, nothing reserved — with the old aggregates unchanged.
+        let app = crate::api::build_router(test_state(dir.path(), no_marks.clone()));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK, "legacy read: {v}");
+        let pools = v["cash_pools"].as_array().expect("cash_pools array");
+        assert_eq!(pools.len(), 1, "implicit Main from the legacy scalar");
+        assert_eq!(pools[0]["name"], "Main");
+        assert_eq!(pools[0]["cash"], 80000.0);
+        assert_eq!(pools[0]["reserved"], 0.0);
+        assert_eq!(pools[0]["free"], 80000.0);
+        assert_eq!(v["cash"], 80000.0, "aggregate back-compat");
+        assert_eq!(v["cash_free"], 80000.0);
+
+        // Add pool "IBKR" and cash it at 50,000. The next write
+        // materializes Main, so both pools are real now.
+        let app = crate::api::build_router(test_state(dir.path(), no_marks.clone()));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({"kind": "pool", "name": "IBKR"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "pool add: {v}");
+        let ibkr = v["pool"]["id"].as_str().expect("pool id").to_string();
+
+        let app = crate::api::build_router(test_state(dir.path(), no_marks.clone()));
+        let (status, v) = call(
+            app,
+            "PATCH",
+            "/api/holdings/cash",
+            Some(json!({"pool_id": ibkr, "cash": 50000.0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "pool cash patch: {v}");
+        assert_eq!(v["pool"]["cash"], 50000.0);
+        assert_eq!(v["pool"]["free"], 50000.0);
+
+        let app = crate::api::build_router(test_state(dir.path(), no_marks.clone()));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        let pools = v["cash_pools"].as_array().unwrap();
+        assert_eq!(pools.len(), 2);
+        assert_eq!(pools[0]["name"], "Main", "Main materialized first");
+        assert_eq!(pools[0]["cash"], 80000.0);
+        assert_eq!(pools[1]["id"], ibkr);
+        assert_eq!(v["cash_free"], 130000.0, "aggregate = pool sum");
+
+        // Sell the GOOG 100P ×1 @ $1.00 INTO IBKR: the put carries the pool,
+        // IBKR reserves 10,000, Main is untouched.
+        let app = crate::api::build_router(test_state(dir.path(), no_marks.clone()));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "symbol": "GOOG", "strike": 100.0, "premium": 1.0,
+                "contracts": 1, "sold": "2026-09-04", "expiry": "2026-09-11",
+                "pool_id": ibkr
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "put add: {v}");
+        let put_id = v["position"]["id"].as_str().expect("put id").to_string();
+        assert_eq!(v["position"]["pool_id"], ibkr, "put carries its pool");
+        assert_eq!(v["position"]["pool_name"], "IBKR", "put names its pool");
+
+        let app = crate::api::build_router(test_state(dir.path(), no_marks.clone()));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let pools = v["cash_pools"].as_array().unwrap();
+        assert_eq!(pools[0]["reserved"], 0.0, "Main untouched");
+        assert_eq!(pools[0]["free"], 80000.0);
+        assert_eq!(pools[1]["reserved"], 10000.0, "strike×100×contracts");
+        assert_eq!(pools[1]["free"], 40000.0);
+        assert_eq!(v["cash_reserved"], 10000.0);
+        assert_eq!(v["cash_free"], 120000.0);
+
+        // Assign at $99 basis → the lot records IN IBKR and strike×100
+        // leaves IBKR's cash in the same rewrite; Main still untouched.
+        let app = crate::api::build_router(test_state(dir.path(), no_marks.clone()));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "lot", "symbol": "GOOG", "shares": 100,
+                "basis_per_share": 99.0, "acquired": "2026-09-08",
+                "assigned_from": put_id
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "assignment: {v}");
+        assert_eq!(v["lot"]["pool_id"], ibkr, "lot lands in the put's pool");
+
+        let app = crate::api::build_router(test_state(dir.path(), no_marks.clone()));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        let pools = v["cash_pools"].as_array().unwrap();
+        assert_eq!(pools[0]["cash"], 80000.0, "Main untouched");
+        assert_eq!(pools[1]["cash"], 40000.0, "strike×100 left IBKR");
+        assert_eq!(pools[1]["reserved"], 0.0, "the put is gone");
+        assert_eq!(pools[1]["free"], 40000.0);
+        assert_eq!(v["cash_free"], 120000.0);
+        assert_eq!(v["lots"].as_array().unwrap().len(), 1);
+
+        // Covered call inherits the lot's pool (GOOG has exactly one lot);
+        // called away, the FIFO reduction stays inside IBKR.
+        let app = crate::api::build_router(test_state(dir.path(), no_marks.clone()));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "call", "symbol": "GOOG", "strike": 110.0,
+                "premium": 0.80, "contracts": 1,
+                "sold": "2026-09-08", "expiry": "2026-09-18"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "call add: {v}");
+        let call_id = v["call"]["id"].as_str().unwrap().to_string();
+        assert_eq!(v["call"]["pool_id"], ibkr, "call inherits the lot's pool");
+
+        let app = crate::api::build_router(test_state(dir.path(), no_marks.clone()));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings/called-away",
+            Some(json!({"call_id": call_id})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "called away: {v}");
+        assert_eq!(v["reduced"], true, "the IBKR lot covers and reduces");
+
+        // End state: the fully-reduced lot is gone, IBKR intact, pools sum
+        // to totals, no orphans.
+        let app = crate::api::build_router(test_state(dir.path(), no_marks.clone()));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["positions"].as_array().unwrap().len(), 0);
+        assert_eq!(v["calls"].as_array().unwrap().len(), 0);
+        assert_eq!(v["lots"].as_array().unwrap().len(), 0, "100 sh fully called away");
+        let pools = v["cash_pools"].as_array().unwrap();
+        assert_eq!(pools[0]["cash"], 80000.0);
+        assert_eq!(pools[1]["cash"], 40000.0);
+        let total_free: f64 = pools.iter().map(|p| p["free"].as_f64().unwrap()).sum();
+        assert_eq!(v["cash_free"], total_free, "aggregate = sum of pools");
+
+        let file =
+            std::fs::read_to_string(dir.path().join("holdings/test-uid.json")).unwrap();
+        for orphan in [put_id, call_id] {
+            assert!(!file.contains(&orphan), "orphan id {orphan} survived");
+        }
+    }
+
     /// R5: the handler prepares ONE fetch for all three kinds — option
     /// requests carry their side, lot symbols ride along for the spot map,
     /// and lot symbols never become chain-query requests.
@@ -2020,8 +3312,10 @@ mod tests {
             &dir.path().join("holdings"),
             "test-uid",
             &HoldingsDocument {
+                cash_pools: Vec::new(),
                 schema_version: LEDGER_SCHEMA_VERSION,
                 positions: vec![market_int_core::holdings::Holding {
+              pool_id: None,
                     id: "p-goog".to_string(),
                     symbol: "GOOG".to_string(),
                     strike: 350.0,
@@ -2032,6 +3326,7 @@ mod tests {
                     mark: None,
                 }],
                 calls: vec![market_int_core::holdings::CallHolding {
+              pool_id: None,
                     id: "c-aapl".to_string(),
                     symbol: "AAPL".to_string(),
                     strike: 240.0,
@@ -2042,6 +3337,7 @@ mod tests {
                     mark: None,
                 }],
                 lots: vec![market_int_core::holdings::ShareLot {
+              pool_id: None,
                     id: "l-lofa".to_string(),
                     symbol: "LOFA".to_string(),
                     shares: 100,
@@ -2097,8 +3393,10 @@ mod tests {
             &dir.path().join("holdings"),
             "test-uid",
             &HoldingsDocument {
+                cash_pools: Vec::new(),
                 schema_version: LEDGER_SCHEMA_VERSION,
                 positions: vec![market_int_core::holdings::Holding {
+              pool_id: None,
                     id: "p1".to_string(),
                     symbol: "GOOG".to_string(),
                     strike: 350.0,
@@ -2113,6 +3411,7 @@ mod tests {
                     }),
                 }],
                 calls: vec![market_int_core::holdings::CallHolding {
+              pool_id: None,
                     id: "c1".to_string(),
                     symbol: "GOOG".to_string(),
                     strike: 360.0,
@@ -2124,6 +3423,7 @@ mod tests {
                 }],
                 lots: vec![
                     market_int_core::holdings::ShareLot {
+                  pool_id: None,
                         id: "l-goog".to_string(),
                         symbol: "GOOG".to_string(),
                         shares: 200,
@@ -2135,6 +3435,7 @@ mod tests {
                         }),
                     },
                     market_int_core::holdings::ShareLot {
+                  pool_id: None,
                         id: "l-nope".to_string(),
                         symbol: "NOPE".to_string(),
                         shares: 100,
@@ -2307,6 +3608,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut doc = HoldingsDocument::default();
         doc.positions.push(market_int_core::holdings::Holding {
+      pool_id: None,
             id: "p1".to_string(),
             symbol: "GOOG".to_string(),
             strike: 350.0,
@@ -2354,6 +3656,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut doc = HoldingsDocument::default();
         doc.positions.push(market_int_core::holdings::Holding {
+      pool_id: None,
             id: "p1".to_string(),
             symbol: "GOOG".to_string(),
             strike: 350.0,
@@ -2364,6 +3667,7 @@ mod tests {
             mark: None,
         });
         doc.calls.push(market_int_core::holdings::CallHolding {
+      pool_id: None,
             id: "c1".to_string(),
             symbol: "GOOG".to_string(),
             strike: 360.0,
@@ -2374,6 +3678,7 @@ mod tests {
             mark: None,
         });
         doc.lots.push(market_int_core::holdings::ShareLot {
+      pool_id: None,
             id: "l1".to_string(),
             symbol: "GOOG".to_string(),
             shares: 100,
@@ -2417,6 +3722,7 @@ mod tests {
                 contracts: 1,
                 sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
                 mark: None,
+                pool_id: None,
             });
         }
         doc.calls.push(market_int_core::holdings::CallHolding {
@@ -2428,6 +3734,7 @@ mod tests {
             contracts: 1,
             sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
             mark: None,
+            pool_id: None,
         });
         write_ledger(&dir.path().join("holdings"), "test-uid", &doc).unwrap();
 
@@ -2469,8 +3776,10 @@ mod tests {
             &ledger_dir,
             "test-uid",
             &HoldingsDocument {
+                cash_pools: Vec::new(),
                 schema_version: LEDGER_SCHEMA_VERSION,
                 positions: vec![market_int_core::holdings::Holding {
+              pool_id: None,
                     id: "p1".to_string(),
                     symbol: "GOOG".to_string(),
                     strike: 350.0,
@@ -2481,6 +3790,7 @@ mod tests {
                     mark: None,
                 }],
                 calls: vec![market_int_core::holdings::CallHolding {
+              pool_id: None,
                     id: "c1".to_string(),
                     symbol: "GOOG".to_string(),
                     strike: 360.0,
@@ -2491,6 +3801,7 @@ mod tests {
                     mark: None,
                 }],
                 lots: vec![market_int_core::holdings::ShareLot {
+              pool_id: None,
                     id: "l1".to_string(),
                     symbol: "GOOG".to_string(),
                     shares: 200,
@@ -2511,6 +3822,7 @@ mod tests {
                 let mut doc = read_ledger(&ledger_dir, "test-uid").unwrap();
                 doc.positions
                     .push(market_int_core::holdings::Holding {
+                  pool_id: None,
                         id: "p-late".to_string(),
                         symbol: "AAPL".to_string(),
                         strike: 230.0,
@@ -2565,8 +3877,10 @@ mod tests {
             &ledger_dir,
             "test-uid",
             &HoldingsDocument {
+                cash_pools: Vec::new(),
                 schema_version: LEDGER_SCHEMA_VERSION,
                 positions: vec![market_int_core::holdings::Holding {
+              pool_id: None,
                     id: "p1".to_string(),
                     symbol: "GOOG".to_string(),
                     strike: 350.0,
@@ -2583,6 +3897,7 @@ mod tests {
                 calls: Vec::new(),
                 lots: vec![
                     market_int_core::holdings::ShareLot {
+                  pool_id: None,
                         id: "l-goog".to_string(),
                         symbol: "GOOG".to_string(),
                         shares: 200,
@@ -2591,6 +3906,7 @@ mod tests {
                         mark: None,
                     },
                     market_int_core::holdings::ShareLot {
+                  pool_id: None,
                         id: "l-nope".to_string(),
                         symbol: "NOPE".to_string(),
                         shares: 100,
@@ -2654,6 +3970,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut doc = HoldingsDocument::default();
         doc.positions.push(market_int_core::holdings::Holding {
+      pool_id: None,
             id: "p1".to_string(),
             symbol: "GOOG".to_string(),
             strike: 350.0,
@@ -2707,6 +4024,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut doc = HoldingsDocument::default();
         doc.positions.push(market_int_core::holdings::Holding {
+      pool_id: None,
             id: "p1".to_string(),
             symbol: "GOOG".to_string(),
             strike: 350.0,
@@ -2781,6 +4099,7 @@ mod tests {
     fn fifo_fixture() -> HoldingsDocument {
         let mut doc = HoldingsDocument::default();
         doc.calls.push(market_int_core::holdings::CallHolding {
+      pool_id: None,
             id: "c1".to_string(),
             symbol: "GOOG".to_string(),
             strike: 360.0,
@@ -2795,6 +4114,7 @@ mod tests {
             }),
         });
         doc.lots.push(market_int_core::holdings::ShareLot {
+      pool_id: None,
             id: "l-old".to_string(),
             symbol: "GOOG".to_string(),
             shares: 200,
@@ -2803,6 +4123,7 @@ mod tests {
             mark: None,
         });
         doc.lots.push(market_int_core::holdings::ShareLot {
+      pool_id: None,
             id: "l-new".to_string(),
             symbol: "GOOG".to_string(),
             shares: 100,

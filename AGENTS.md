@@ -20,6 +20,7 @@ frontend build.
   stores, Tiger client, metrics, pipeline, holdings (wheel ledger math:
   puts + covered calls + share lots + cash — shared pace rule
   (`pace_view`/`validate_option_leg`), lot views, reserved/free cash,
+  per-pool partition (`reserved_cash_by_pool`),
   FIFO `apply_called_away`). **Telegram-free by construction** —
   the webapp depends only on core, so it cannot link publishing code.
   - `src/model.rs` — domain types, `QuotesError`, scoring
@@ -54,7 +55,10 @@ frontend build.
   cash: /api/holdings CRUD with `kind` dispatch, PATCH cash, DELETE
   everywhere, POST refresh via the `MarkBatch{marks, spots}` seam
   (per-side chain queries + lot-symbol spot map), single-rewrite
-  assignment (`assigned_from`) and called-away FIFO reduction; schema
+  assignment (`assigned_from`) and called-away FIFO reduction; named
+  cash pools (2026-09-23): `cash_pools` array + `pool_id` on puts/lots,
+  per-pool reserved/free, pool CRUD + pool-aware PATCH, puts reserve
+  strike×100×contracts against their pool server-side; schema
   stays v1 by additive serde defaults — docs/adr/0002; JSON document per
   Firebase UID under /data/webapp/holdings/),
   `assets.rs` embedded frontend) + vite/Solid frontend under `frontend/`

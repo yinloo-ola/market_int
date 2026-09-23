@@ -141,11 +141,13 @@ export async function refreshHoldings() {
 /// Wheel holdings (2026-09-17-wheel-holdings): set the manual cash balance.
 /// The response carries the server-derived reserved/free — callers re-render
 /// the strip from it, never from client math.
-export async function patchCash(cash) {
+export async function patchCash(fields) {
+  // fields: {cash} and/or {pool_id}/{name} (cash pools R2) — the route
+  // targets the first pool when pool_id is omitted (legacy parity).
   const res = await authorizedFetch("/api/holdings/cash", {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cash }),
+    body: JSON.stringify(fields),
   });
   const v = await res.json().catch(() => null);
   if (!res.ok) throw new Error(v?.error ?? `PATCH /api/holdings/cash -> ${res.status}`);

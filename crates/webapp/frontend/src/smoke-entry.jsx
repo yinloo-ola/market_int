@@ -562,6 +562,228 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
   ok("empty pane shows its per-tab message", (rootEl.textContent ?? "").includes("No open puts"));
 }
 
+// ── cash pools rail + put-form pool picker (2026-09-23-holdings-cash-pools,
+// list UX after preview feedback) ──
+// A pools-aware mock (two pools, one unpriced put in each) walks the rail:
+// the always-visible pool list renders per-pool figures verbatim from the
+// document, picking a row switches the strip, every row carries its own
+// cash/rename/delete, the add row exists even at zero pools, and the PUTS
+// form's pool dropdown submits the chosen pool_id.
+{
+  const HP = (await import("./components/HoldingsPanel")).default;
+  let poolsDoc, positionsDoc, seq2;
+  const resetPools = () => {
+    seq2 = 0;
+    positionsDoc = [];
+    poolsDoc = [
+      { id: "main", name: "Main", cash: 80000, reserved: 10000, free: 70000 },
+      { id: "pibkr", name: "IBKR", cash: 50000, reserved: 10000, free: 40000 },
+    ];
+  };
+  resetPools();
+  const seen2 = [];
+  const jsonRes2 = (v) =>
+    new Response(JSON.stringify(v), { status: 200, headers: { "Content-Type": "application/json" } });
+  const setVal2 = (el, v) => {
+    if (!el) return;
+    el.value = v;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  globalThis.fetch = async (path, opts = {}) => {
+    const method = opts.method ?? "GET";
+    const body = opts.body ? JSON.parse(opts.body) : null;
+    seen2.push([String(path), method, body]);
+    if (path === "/api/holdings" && method === "GET") {
+      return jsonRes2({
+        schema_version: 1,
+        positions: positionsDoc,
+        calls: [],
+        lots: [],
+        cash: poolsDoc.reduce((n, p) => n + p.cash, 0),
+        cash_reserved: poolsDoc.reduce((n, p) => n + p.reserved, 0),
+        cash_free: poolsDoc.reduce((n, p) => n + p.free, 0),
+        cash_pools: poolsDoc,
+      });
+    }
+    if (path === "/api/holdings" && method === "POST") {
+      if (body?.kind === "pool") {
+        seq2 += 1;
+        poolsDoc = [...poolsDoc, { id: `px${seq2}`, name: body.name, cash: 0, reserved: 0, free: 0 }];
+        return jsonRes2({ pool: poolsDoc[poolsDoc.length - 1] });
+      }
+      seq2 += 1;
+      // Server-faithful position: option_json fields incl. a view (the
+      // real server always computes one) and the resolved pool name
+      // (its pool, or the first pool when pool_id is absent).
+      const effPool = poolsDoc.find((p) => p.id === (body?.pool_id ?? poolsDoc[0]?.id));
+      const pos = {
+        id: `hx${seq2}`,
+        symbol: body?.symbol, strike: body?.strike, premium: body?.premium,
+        contracts: body?.contracts, sold: body?.sold, expiry: body?.expiry,
+        mark: null,
+        pool_id: body?.pool_id ?? null,
+        pool_name: effPool?.name ?? "Main",
+        view: {
+          pl_pct: null, target_pct: 0.2, pace_met: false,
+          days_elapsed: 0, days_total: 5, spot_pct_vs_strike: null, pl_dollars: null,
+        },
+      };
+      positionsDoc = [...positionsDoc, pos];
+      return jsonRes2({ position: pos });
+    }
+    if (path === "/api/holdings/cash" && method === "PATCH") {
+      poolsDoc = poolsDoc.map((p) =>
+        p.id === (body?.pool_id ?? p.id)
+          ? { ...p, ...(body?.cash != null ? { cash: body.cash } : {}), ...(body?.name ? { name: body.name } : {}) }
+          : p
+      );
+      // Server-verbatim shape: aggregates + the targeted pool's view.
+      return jsonRes2({
+        cash: poolsDoc.reduce((n, p) => n + p.cash, 0),
+        cash_reserved: poolsDoc.reduce((n, p) => n + p.reserved, 0),
+        cash_free: poolsDoc.reduce((n, p) => n + p.free, 0),
+        pool: poolsDoc.find((p) => p.id === body?.pool_id) ?? null,
+      });
+    }
+    if (method === "DELETE" && String(path).startsWith("/api/holdings/")) {
+      const id = String(path).split("/").pop();
+      poolsDoc = poolsDoc.filter((p) => p.id !== id);
+      return jsonRes2({ removed: id });
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  const div = document.createElement("div");
+  div.id = "pools-root";
+  document.body.appendChild(div);
+  render(() => <HP />, div);
+  await tick();
+  const rsel = "#pools-root";
+  const poolRows = () => qa(`${rsel} .hp-pool-item`);
+  const rowName = (i) => poolRows()[i]?.querySelector(".hp-pool-name")?.textContent;
+  const rail = () => q(`${rsel} .hp-tabs-rail`)?.textContent ?? "";
+
+  ok("pool list renders both pools", rowName(0) === "Main" && rowName(1) === "IBKR");
+  ok("first pool selected by default", poolRows()[0]?.classList.contains("active") && !poolRows()[1]?.classList.contains("active"));
+  ok("strip shows the selected pool's figures", rail().includes("$70,000") && rail().includes("$80,000 cash − $10,000 reserved"));
+  poolRows()[1]?.querySelector(".hp-pool-name")?.click();
+  await tick();
+  ok("picking a row switches the strip's figures", poolRows()[1]?.classList.contains("active") && rail().includes("$40,000") && rail().includes("$50,000 cash − $10,000 reserved"));
+
+  // Per-row cash edit: the IBKR row's "cash" button opens the editor
+  // targeted at IBKR — the PATCH carries its pool_id and the strip
+  // re-renders the pool's new figures.
+  Array.from(poolRows()[1].querySelectorAll("button")).find((b) => b.textContent === "cash")?.click();
+  await tick();
+  setVal2(q(`${rsel} .hp-cash-editor input`), "60000");
+  qa(`${rsel} .hp-cash-editor button`).find((b) => b.textContent === "save")?.click();
+  await tick();
+  const poolCashPatch = seen2.find(([p2, m, b]) => m === "PATCH" && b?.cash === 60000);
+  ok("row cash edit PATCHes with pool_id", !!poolCashPatch && poolCashPatch[2].pool_id === "pibkr");
+  ok("strip re-renders the edited pool", rail().includes("$60,000 cash − $10,000 reserved"));
+
+  // Cancel: opening the cash editor for Main and hitting cancel closes it
+  // with no PATCH fired.
+  Array.from(poolRows()[0].querySelectorAll("button")).find((b) => b.textContent === "cash")?.click();
+  await tick();
+  Array.from(q(`${rsel} .hp-cash-editor`).querySelectorAll("button")).find((b) => b.textContent === "cancel")?.click();
+  await tick();
+  ok(
+    "cash editor cancel closes without PATCHing",
+    !q(`${rsel} .hp-cash-editor`) &&
+      !!q(`${rsel} .hp-cash-edit`) &&
+      !seen2.some(([p2, m, b]) => m === "PATCH" && b?.cash === 80000)
+  );
+
+  // Per-row rename: the IBKR row's "rename" button swaps in an input;
+  // save PATCHes the name and the row re-renders with it.
+  Array.from(poolRows()[1].querySelectorAll("button")).find((b) => b.textContent === "rename")?.click();
+  await tick();
+  setVal2(q(`${rsel} .hp-pool-item input`), "IBKR LLC");
+  Array.from(poolRows()[1].querySelectorAll("button")).find((b) => b.textContent === "save")?.click();
+  await tick();
+  const renamePatch = seen2.find(([p2, m, b]) => m === "PATCH" && b?.name === "IBKR LLC");
+  ok("rename PATCHes the pool name", !!renamePatch && renamePatch[2].pool_id === "pibkr");
+  await tick();
+  ok("row re-renders with the new name", rowName(1) === "IBKR LLC");
+
+  // Rename cancel (Escape this time): the input closes, the name and the
+  // ledger are untouched.
+  Array.from(poolRows()[1].querySelectorAll("button")).find((b) => b.textContent === "rename")?.click();
+  await tick();
+  const renameInput = q(`${rsel} .hp-pool-item input`);
+  setVal2(renameInput, "nope");
+  renameInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await tick();
+  ok(
+    "rename cancel (Escape) exits without PATCHing",
+    !q(`${rsel} .hp-pool-item input`) &&
+      rowName(1) === "IBKR LLC" &&
+      !seen2.some(([p2, m, b]) => m === "PATCH" && b?.name === "nope")
+  );
+
+  // Add: type a name in the always-visible add row → POST kind pool, a
+  // third row appears (Enter also submits — the input owns that path).
+  setVal2(q(`${rsel} .hp-pool-add input`), "FUTU");
+  qa(`${rsel} .hp-pool-add button`).find((b) => b.textContent === "add")?.click();
+  await tick();
+  ok("add POSTs kind pool and a row appears", seen2.some(([p2, m, b]) => m === "POST" && b?.kind === "pool" && b?.name === "FUTU") && poolRows().length === 3 && rowName(2) === "FUTU");
+
+  // Delete: the × on the FUTU row → DELETE, row gone.
+  poolRows()[2]?.querySelector(".hp-pool-del")?.click();
+  await tick();
+  ok("delete DELETEs the pool and the row goes", seen2.some(([p2, m]) => m === "DELETE" && p2.endsWith("/px1")) && poolRows().length === 2);
+
+  // Put form: the pool dropdown lists the pools and submits the choice.
+  qa(`${rsel} .hp-tab-tile`)[1]?.click();
+  await tick();
+  qa(`${rsel} .hp-toolbar-row button`).find((b) => b.textContent.includes("Sell put"))?.click();
+  await tick();
+  const poolSelect = q(`${rsel} .holdings-add select`);
+  ok("put form shows a pool dropdown with both pools", !!poolSelect && poolSelect.querySelectorAll("option").length === 2 && poolSelect.value === "main");
+  setVal2(q(`${rsel} .holdings-add input[placeholder="SYMBOL"]`), "AMD");
+  setVal2(q(`${rsel} .holdings-add input[placeholder="e.g. 350.00"]`), "100");
+  setVal2(q(`${rsel} .holdings-add input[placeholder="e.g. 1.00"]`), "1.00");
+  poolSelect.value = "pibkr";
+  poolSelect.dispatchEvent(new Event("input", { bubbles: true }));
+  await tick();
+  qa(`${rsel} .holdings-add button`).find((b) => b.textContent === "Sell put")?.click();
+  await tick();
+  const poolPut = seen2.find(([p2, m, b]) => m === "POST" && b?.symbol === "AMD");
+  ok("put POST carries the chosen pool_id", !!poolPut && poolPut[2].pool_id === "pibkr");
+  await tick();
+  ok(
+    "put row names the pool it spends",
+    q(`${rsel} .hp-list-pos .hp-pool-tag`)?.textContent === "IBKR LLC"
+  );
+
+  // Zero-pool ledger: the add row is STILL offered — under the old UI it
+  // was hidden entirely, so the first pool could never be created (the
+  // preview feedback that drove this rework). Adding it materializes Main
+  // server-side and the row appears.
+  poolsDoc = [];
+  positionsDoc = [];
+  document.getElementById("pools-root").remove();
+  const div2 = document.createElement("div");
+  div2.id = "pools-root2";
+  document.body.appendChild(div2);
+  render(() => <HP />, div2);
+  await tick();
+  const rsel2 = "#pools-root2";
+  ok(
+    "zero-pool ledger still offers add-pool",
+    qa(`${rsel2} .hp-pool-item`).length === 0 && !!q(`${rsel2} .hp-pool-add input`)
+  );
+  setVal2(q(`${rsel2} .hp-pool-add input`), "Main");
+  qa(`${rsel2} .hp-pool-add button`).find((b) => b.textContent === "add")?.click();
+  await tick();
+  ok(
+    "first pool can be created from an empty ledger",
+    qa(`${rsel2} .hp-pool-item`).length === 1 &&
+      q(`${rsel2} .hp-pool-item .hp-pool-name`)?.textContent === "Main"
+  );
+}
+
 // ── dark mode (2026-09-23-dark-mode) ──
 // R1 is CSS-cascade territory happy-dom can't compute, so the palette is
 // asserted at the stylesheet level: the imported bundle must carry the

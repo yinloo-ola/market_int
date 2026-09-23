@@ -29,6 +29,10 @@ pub struct Holding {
     /// Latest Tiger mid mark; `None` until the first refresh succeeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mark: Option<Mark>,
+    /// The cash pool (broker account) this put spends. `None` = the
+    /// ledger's default (first) pool — pre-pool entries parse unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -58,6 +62,10 @@ pub struct CallHolding {
     /// Latest Tiger mid mark; `None` until the first refresh succeeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mark: Option<Mark>,
+    /// The cash pool this call's shares live in — inherited from the lot it
+    /// was written against; no separate call-side picker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_id: Option<String>,
 }
 
 /// Shares held from an assignment — the lot a covered call is sold
@@ -72,6 +80,10 @@ pub struct ShareLot {
     /// Latest underlying spot; `None` until the first refresh succeeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mark: Option<SpotMark>,
+    /// The cash pool (broker account) these shares sit in — inherited from
+    /// the assigned put; `None` = the ledger's default (first) pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_id: Option<String>,
 }
 
 /// The underlying spot quote a lot prices from, captured by the refresh
@@ -126,19 +138,34 @@ fn is_weekend(d: NaiveDate) -> bool {
     matches!(d.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun)
 }
 
+/// One put's strike notional: strike × 100 × contracts.
+fn strike_notional(p: &Holding) -> f64 {
+    p.strike * 100.0 * p.contracts as f64
+}
+
 /// Cash reserved by open short puts: Σ strike × 100 × contracts. Calls
 /// never reserve (they're covered by held shares) and lots never reserve —
 /// the cash-secured assumption lives entirely in the puts book (R3).
 pub fn reserved_cash(puts: &[Holding]) -> f64 {
-    puts.iter()
-        .map(|p| p.strike * 100.0 * p.contracts as f64)
-        .sum()
+    puts.iter().map(strike_notional).sum()
 }
 
 /// `cash − reserved_cash(puts)`. Negative is real (margin used elsewhere)
 /// and is displayed honestly, never clamped.
 pub fn free_cash(cash: f64, puts: &[Holding]) -> f64 {
     cash - reserved_cash(puts)
+}
+
+/// Reserved cash grouped by pool id — the multi-account partition (cash
+/// pools design R3). `None` groups puts with no pool; the caller folds that
+/// group into the ledger's default (first) pool when rendering, so core
+/// stays policy-free. Deterministic order via BTreeMap.
+pub fn reserved_cash_by_pool(puts: &[Holding]) -> std::collections::BTreeMap<Option<String>, f64> {
+    let mut by_pool = std::collections::BTreeMap::new();
+    for p in puts {
+        *by_pool.entry(p.pool_id.clone()).or_insert(0.0) += strike_notional(p);
+    }
+    by_pool
 }
 
 /// R9: the called-away FIFO reduction. Among `lots` of `symbol` that can
@@ -408,6 +435,7 @@ mod tests {
                 as_of: Utc::now(),
                 underlying_price: None,
             }),
+            pool_id: None,
         }
     }
 
@@ -583,6 +611,7 @@ mod tests {
                     as_of: Utc::now(),
                     underlying_price: None,
                 }),
+                pool_id: None,
             }
         }
 
@@ -666,6 +695,7 @@ mod tests {
                 basis_per_share: basis,
                 acquired: NaiveDate::from_ymd_opt(2026, 9, 8).unwrap(),
                 mark: None,
+                pool_id: None,
             }
         }
 
@@ -755,6 +785,7 @@ mod tests {
                 contracts,
                 sold: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
                 mark: None,
+                pool_id: None,
             }
         }
 
@@ -779,6 +810,26 @@ mod tests {
             assert_eq!(reserved_cash(&[]), 0.0);
             assert_eq!(free_cash(50_000.0, &[]), 50_000.0);
         }
+
+        /// Cash pools R3: reserved cash partitions by `pool_id`; None-pool
+        /// puts group under None and the caller folds them into the default.
+        #[test]
+        fn reserved_cash_groups_by_pool() {
+            let mut a = put(100.0, 1);
+            a.pool_id = Some("p1".to_string());
+            let mut b = put(200.0, 2);
+            b.pool_id = Some("p2".to_string());
+            let unassigned = put(50.0, 1);
+            let by_pool = reserved_cash_by_pool(&[a, b, unassigned]);
+            assert_eq!(by_pool.get(&Some("p1".to_string())), Some(&10_000.0));
+            assert_eq!(by_pool.get(&Some("p2".to_string())), Some(&40_000.0));
+            assert_eq!(by_pool.get(&None), Some(&5_000.0));
+            assert_eq!(
+                by_pool.values().sum::<f64>(),
+                55_000.0,
+                "pool sums equal the aggregate reserved"
+            );
+        }
     }
 
     /// R9: the called-away FIFO reduction.
@@ -793,6 +844,7 @@ mod tests {
                 basis_per_share: 349.0,
                 acquired,
                 mark: None,
+                pool_id: None,
             }
         }
 

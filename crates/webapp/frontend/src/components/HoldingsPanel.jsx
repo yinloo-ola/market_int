@@ -80,6 +80,7 @@ function CashEditor(props) {
         placeholder="150000"
         value={val()}
         onInput={(e) => setVal(e.target.value)}
+        onKeyDown={(e) => e.key === "Escape" && props.onCancel?.()}
       />
       <button
         type="button"
@@ -89,43 +90,189 @@ function CashEditor(props) {
       >
         save
       </button>
+      <button type="button" class="btn" onClick={() => props.onCancel?.()}>
+        cancel
+      </button>
     </span>
   );
 }
 
+/* Cash pools (2026-09-23-holdings-cash-pools; list UX after preview
+   feedback): the strip shows the SELECTED pool's figures when pools
+   exist, the legacy aggregates when they don't. One always-visible pool
+   list replaces chips + the manage toggle — every row carries its own
+   cash figure, edit-cash, rename and delete, and the add row is
+   reachable even before the first pool exists. All server-verbatim. */
 function CashStrip(props) {
   const [editing, setEditing] = createSignal(false);
-  const neverSet = () => props.cash == null;
+  // The pool the open editor saves into (null = legacy aggregate when no
+  // pools exist). Opening it for another pool re-targets and selects
+  // that pool, so the figures above always describe what's being edited.
+  const [editPool, setEditPool] = createSignal(null);
+  const [newName, setNewName] = createSignal("");
+  const pools = () => props.pools ?? [];
+  const sel = () => props.pool;
+  const cash = () => (sel() ? sel().cash : props.cash);
+  const reserved = () => (sel() ? sel().reserved : props.reserved);
+  const free = () => (sel() ? sel().free : props.free);
+  const neverSet = () => cash() == null;
+  const editCash = (poolId) => {
+    if (poolId && poolId !== sel()?.id) props.onSelectPool(poolId);
+    setEditPool(poolId ?? null);
+    setEditing(true);
+  };
+  // Editing pool X shows X's cash; the legacy strip button edits the
+  // aggregate (first-pool) figure when no pool is selected.
+  const editorCash = () => {
+    const p = pools().find((x) => x.id === editPool());
+    return p ? p.cash : props.cash;
+  };
+  const submitAdd = async () => {
+    if (!newName().trim() || props.busy?.()) return;
+    if (await props.onAddPool(newName().trim())) setNewName("");
+  };
   return (
     <div class="hp-rail-block">
       <div class="hp-rail-label">free to sell puts</div>
-      <div class="hp-rail-big">
-        {props.free == null ? "—" : money(props.free)}
-      </div>
+      <div class="hp-rail-big">{free() == null ? "—" : money(free())}</div>
       <div class="hp-rail-sub">
-        {props.cash == null ? "—" : money(props.cash)} cash −{" "}
-        {money(props.reserved)} reserved
+        {cash() == null ? "—" : money(cash())} cash − {money(reserved())}{" "}
+        reserved
       </div>
       <Show
         when={!editing()}
         fallback={
           <CashEditor
-            cash={props.cash}
+            cash={editorCash()}
             busy={props.busy}
             onSave={async (n) => {
-              const res = await props.onSaveCash(n);
+              const res = await props.onSaveCash(n, editPool());
               if (res) setEditing(false);
             }}
+            onCancel={() => setEditing(false)}
           />
         }
       >
         <button
           type="button"
           class="btn-ghost hp-cash-edit"
-          onClick={() => setEditing(true)}
+          onClick={() => editCash(sel()?.id ?? null)}
         >
           {neverSet() ? "set cash" : "edit cash"}
         </button>
+      </Show>
+      <div class="hp-pool-section">
+        <Show when={pools().length > 0}>
+          <div class="hp-pool-list">
+            <For each={pools()}>
+              {(p) => (
+                <PoolRow
+                  pool={p}
+                  selected={sel()?.id === p.id}
+                  busy={props.busy}
+                  onSelect={() => {
+                    setEditing(false);
+                    props.onSelectPool(p.id);
+                  }}
+                  onEditCash={() => editCash(p.id)}
+                  onRename={(name) => props.onRenamePool(p.id, name)}
+                  onDelete={() => props.onDeletePool(p.id)}
+                />
+              )}
+            </For>
+          </div>
+        </Show>
+        <div class="hp-pool-row hp-pool-add">
+          <input
+            placeholder="new pool name"
+            aria-label="new pool name"
+            value={newName()}
+            onInput={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submitAdd()}
+          />
+          <button type="button" class="btn" disabled={!newName().trim() || props.busy?.()} onClick={submitAdd}>
+            add
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* One pool of the always-visible list: the name selects the pool (the
+   strip figures above follow), the row shows its cash verbatim, and the
+   row carries its own edit-cash / rename / delete. Rename is inline
+   (Enter or save); delete is server-guarded (409 while entries remain
+   or funded cash stays). */
+function PoolRow(props) {
+  const [renaming, setRenaming] = createSignal(false);
+  const [name, setName] = createSignal(props.pool.name);
+  const startRename = () => {
+    setName(props.pool.name);
+    setRenaming(true);
+  };
+  const saveRename = () => {
+    const n = name().trim();
+    if (!n || n === props.pool.name || props.busy?.()) return;
+    props.onRename(n);
+    setRenaming(false);
+  };
+  return (
+    <div class="hp-pool-item" classList={{ active: props.selected }}>
+      <Show
+        when={!renaming()}
+        fallback={
+          <span class="hp-pool-row">
+            <input
+              aria-label={`rename ${props.pool.name}`}
+              value={name()}
+              onInput={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") saveRename();
+                else if (e.key === "Escape") setRenaming(false);
+              }}
+            />
+            <button
+              type="button"
+              class="btn"
+              disabled={
+                props.busy?.() || !name().trim() || name().trim() === props.pool.name
+              }
+              onClick={saveRename}
+            >
+              save
+            </button>
+            <button
+              type="button"
+              class="btn"
+              onClick={() => setRenaming(false)}
+            >
+              cancel
+            </button>
+          </span>
+        }
+      >
+        <span class="hp-pool-line">
+          <button type="button" class="hp-pool-name" onClick={props.onSelect}>
+            {props.pool.name}
+          </button>
+          <span class="hp-pool-cash">{money(props.pool.cash)}</span>
+          <button type="button" class="btn-ghost hp-pool-act" onClick={props.onEditCash}>
+            cash
+          </button>
+          <button type="button" class="btn-ghost hp-pool-act" onClick={startRename}>
+            rename
+          </button>
+          <button
+            type="button"
+            class="btn hp-pool-del"
+            disabled={props.busy?.()}
+            aria-label={`delete ${props.pool.name}`}
+            onClick={props.onDelete}
+          >
+            ×
+          </button>
+        </span>
       </Show>
     </div>
   );
@@ -194,6 +341,11 @@ function OptionRow(props) {
             {x.p.symbol} {x.p.strike}
             {x.p.kind === "put" ? "P" : "C"} ×{x.p.contracts}
           </b>
+          {/* Which pool of cash this put spends (server-resolved name;
+              hidden on single-pool ledgers where there's nothing to tell). */}
+          <Show when={x.p.kind === "put" && props.showPool && x.p.pool_name}>
+            <span class="hp-pool-tag">{x.p.pool_name}</span>
+          </Show>
           <i>
             exp {x.p.expiry} · {x.v.days_elapsed}/{x.v.days_total} wd
           </i>
@@ -265,6 +417,9 @@ function OptionRow(props) {
    and the call's coverage footnote differ. */
 function OptionForm(props) {
   const kind = props.kind;
+  // Cash pools (R3): the put form picks the pool that secures the put;
+  // calls have no picker (they inherit the shares' pool server-side).
+  const pools = () => (kind === "put" ? (props.pools ?? []) : []);
   const [f, setF] = createSignal({
     symbol: "",
     strike: "",
@@ -272,6 +427,7 @@ function OptionForm(props) {
     contracts: "1",
     sold: todayET(),
     expiry: plusDays(todayET(), 7),
+    pool_id: props.pools?.[0]?.id ?? "",
   });
   const set = (k) => (e) => setF({ ...f(), [k]: e.target.value });
   const valid = () =>
@@ -287,6 +443,9 @@ function OptionForm(props) {
         if (!valid() || props.busy?.()) return;
         props.onAdd({
           ...(kind === "call" ? { kind: "call" } : {}),
+          ...(kind === "put" && pools().length > 0
+            ? { pool_id: f().pool_id || pools()[0]?.id }
+            : {}),
           symbol: f().symbol.trim().toUpperCase(),
           strike: Number(f().strike),
           premium: Number(f().premium),
@@ -320,6 +479,14 @@ function OptionForm(props) {
       <label>
         contracts <input inputmode="numeric" value={f().contracts} onInput={set("contracts")} />
       </label>
+      <Show when={pools().length > 1}>
+        <label>
+          pool
+          <select value={f().pool_id} onInput={set("pool_id")}>
+            <For each={pools()}>{(p) => <option value={p.id}>{p.name}</option>}</For>
+          </select>
+        </label>
+      </Show>
       <label>
         sold <input type="date" value={f().sold} onInput={set("sold")} />
       </label>
@@ -832,18 +999,62 @@ export default function HoldingsPanel() {
   };
 
   /* The strip re-renders from the PATCH response's derived numbers —
-     never from client math. */
-  const onSaveCash = async (n) => {
-    const res = await run(() => patchCash(n));
+     never from client math. With pools, the PATCH targets the selected
+     pool and the response's pool view patches the pool list in place. */
+  const onSaveCash = async (n, poolId) => {
+    const res = await run(() =>
+      patchCash(poolId ? { cash: n, pool_id: poolId } : { cash: n })
+    );
     if (!res) return false;
     setLedger((cur) => ({
       ...(cur ?? {}),
       cash: res.cash,
       cash_reserved: res.cash_reserved,
       cash_free: res.cash_free,
+      cash_pools: res.pool
+        ? (cur?.cash_pools ?? []).map((p) =>
+            p.id === res.pool.id ? { ...p, ...res.pool } : p
+          )
+        : (cur?.cash_pools ?? []),
     }));
-    flash(`Cash set to ${money(res.cash)} — ${money(res.cash_free)} free.`);
+    flash(
+      res.pool
+        ? `Cash set to ${money(res.pool.cash)} — ${money(res.pool.free)} free in ${res.pool.name}.`
+        : `Cash set to ${money(res.cash)} — ${money(res.cash_free)} free.`
+    );
     return true;
+  };
+
+  /* ── cash pools (2026-09-23-holdings-cash-pools, R2/R3) ── */
+  const pools = () => ledger()?.cash_pools ?? [];
+  const [poolSelId, setPoolSelId] = createSignal(null);
+  // Effective selection: the chosen id while it exists, else the FIRST
+  // pool (the ledger's default — where unassigned puts land).
+  const selectedPool = () => {
+    const ps = pools();
+    if (!ps.length) return null;
+    return ps.find((p) => p.id === poolSelId()) ?? ps[0];
+  };
+  const onAddPool = async (name) => {
+    const res = await run(() => addHolding({ kind: "pool", name }));
+    if (!res) return false;
+    flash(`Pool “${name}” added — set its cash with the strip.`);
+    setPoolSelId(res.pool?.id ?? null);
+    await load();
+    return true;
+  };
+  const onRenamePool = async (poolId, name) => {
+    const res = await run(() => patchCash({ pool_id: poolId, name }));
+    if (!res) return;
+    flash(`Pool renamed to “${name}”.`);
+    await load();
+  };
+  const onDeletePool = async (poolId) => {
+    const res = await run(() => deleteHolding(poolId));
+    if (!res) return;
+    flash("Pool deleted.");
+    if (poolSelId() === poolId) setPoolSelId(null);
+    await load();
   };
 
   const dialogActions = {
@@ -945,6 +1156,7 @@ export default function HoldingsPanel() {
             {(x) => (
               <OptionRow
                 x={x}
+                showPool={pools().length > 1}
                 dialogFor={dialogFor}
                 dialogActions={dialogActions}
                 onClose={(x2) => setDialog({ type: x2.p.kind, pos: x2.p })}
@@ -973,6 +1185,7 @@ export default function HoldingsPanel() {
       ) : (
         <OptionForm
           kind={id === "puts" ? "put" : "call"}
+          pools={pools()}
           busy={busy}
           onDone={() => setDialog(null)}
           onAdd={(f) =>
@@ -1026,8 +1239,14 @@ export default function HoldingsPanel() {
             cash={ledger()?.cash ?? null}
             reserved={ledger()?.cash_reserved ?? 0}
             free={ledger()?.cash_free ?? null}
+            pools={pools()}
+            pool={selectedPool()}
             busy={busy}
             onSaveCash={onSaveCash}
+            onSelectPool={setPoolSelId}
+            onAddPool={onAddPool}
+            onRenamePool={onRenamePool}
+            onDeletePool={onDeletePool}
           />
           <For each={paneDefs()}>
             {(t) => (
