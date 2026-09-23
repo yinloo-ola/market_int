@@ -211,6 +211,62 @@ export function TabsRow(props) {
   );
 }
 
+// ── Dark mode (2026-09-23-dark-mode): R2 — session theme toggle ──
+// Untouched, the app follows prefers-color-scheme (CSS-only, R1). This
+// button forces the opposite theme via <html data-theme>, which beats the
+// media query on specificity. Deliberately non-persistent: nothing is
+// stored, so a reload returns to system-follow.
+export function ThemeToggle() {
+  // null = follow the system (no attribute); a forced value writes
+  // data-theme AND the signal, so the label/icon re-render in Solid.
+  const [forced, setForced] = createSignal(null);
+  const sysDark = () =>
+    window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const effective = () => forced() ?? (sysDark() ? "dark" : "light");
+  const flip = () => {
+    const next = effective() === "dark" ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    setForced(next);
+  };
+  const label = () =>
+    effective() === "dark" ? "Switch to light theme" : "Switch to dark theme";
+  return (
+    <button
+      type="button"
+      class="btn-ghost theme-toggle"
+      aria-label={label()}
+      title={label()}
+      onClick={flip}
+    >
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <Show
+          when={effective() === "dark"}
+          fallback={
+            // moon — shown while light, click goes dark
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+          }
+        >
+          {/* sun — shown while dark, click goes light */}
+          <>
+            <circle cx="12" cy="12" r="4" />
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+          </>
+        </Show>
+      </svg>
+    </button>
+  );
+}
+
 function App() {
   // t17 auth state: undefined = resolving, null = signed out, object = in.
   // The results resource sources off it, so /api traffic starts only after a
@@ -388,6 +444,7 @@ function App() {
           {/* ── RUN_SLOT (ticket 18) part 1 — ▶ Run pipeline button joins
                  this header line ── */}
           <div class="run-slot-head">
+            <ThemeToggle />
             <RunButton run={run} />
           </div>
           {/* ── end RUN_SLOT part 1 ── */}

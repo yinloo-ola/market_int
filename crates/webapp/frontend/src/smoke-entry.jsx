@@ -562,6 +562,62 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
   ok("empty pane shows its per-tab message", (rootEl.textContent ?? "").includes("No open puts"));
 }
 
+// ── dark mode (2026-09-23-dark-mode) ──
+// R1 is CSS-cascade territory happy-dom can't compute, so the palette is
+// asserted at the stylesheet level: the imported bundle must carry the
+// system-follow media query and both explicit data-theme overrides. R2 is
+// behavioral: the header toggle flips data-theme on <html>, reports the
+// state a click switches to, and persists nothing.
+{
+  const cssText = Array.from(document.querySelectorAll("style"))
+    .map((s) => s.textContent)
+    .join("\n");
+  const varNames = ["--page", "--panel", "--border", "--ink", "--muted", "--accent"];
+  const blockHasVars = (block) => varNames.every((v) => block.includes(v));
+  const mediaStart = cssText.indexOf("@media (prefers-color-scheme: dark)");
+  ok("stylesheet carries the system-follow dark block", mediaStart !== -1);
+  ok(
+    "dark media query re-declares the palette variables",
+    mediaStart !== -1 && blockHasVars(cssText.slice(mediaStart, mediaStart + 2000))
+  );
+  const darkSel = cssText.indexOf('html[data-theme="dark"]');
+  const lightSel = cssText.indexOf('html[data-theme="light"]');
+  ok(
+    "explicit light/dark data-theme overrides exist",
+    darkSel !== -1 && lightSel !== -1 && blockHasVars(cssText.slice(darkSel, darkSel + 2000))
+  );
+
+  const TT = (await import("./App")).ThemeToggle;
+  const div = document.createElement("div");
+  div.id = "theme-root";
+  document.body.appendChild(div);
+  render(() => <TT />, div);
+  await tick();
+  const btn = () => q("#theme-root button");
+  ok("toggle mounts with an accessible name", !!btn() && (btn().getAttribute("aria-label") ?? "").length > 0);
+  delete document.documentElement.dataset.theme;
+  const sysDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  btn()?.click();
+  await tick();
+  const firstForced = document.documentElement.dataset.theme;
+  ok(
+    "click forces the opposite of the effective system theme",
+    firstForced === (sysDark ? "light" : "dark")
+  );
+  ok("aria-label flips with the forced theme", (btn().getAttribute("aria-label") ?? "").includes(sysDark ? "dark" : "light"));
+  btn()?.click();
+  await tick();
+  ok(
+    "second click returns to the other forced theme",
+    document.documentElement.dataset.theme === (sysDark ? "dark" : "light")
+  );
+  ok(
+    "toggle persists nothing (reload returns to system-follow)",
+    localStorage.length === 0 && !sessionStorage.length
+  );
+  delete document.documentElement.dataset.theme;
+}
+
 // Tab-strip persistence: the Holdings tab lives in the same strip as the
 // timeframes and navigating both ways keeps the strip mounted (R5 criterion).
 {

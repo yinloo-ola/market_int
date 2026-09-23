@@ -10,7 +10,7 @@ Retire rules that no longer apply during finalizing.
 
 ## Rules
 
-- (append new rules here during execution)
+- Before adding a second theme (or any palette-wide variation), tokenize hardcoded color values into CSS custom properties first and enforce a "no raw colors outside the token block" audit — the new theme then reduces to re-declaring tokens, and a three-layer cascade (default → media query → attribute/class override, most specific wins) keeps each theme one block.
 
 ## Tool Usage
 
