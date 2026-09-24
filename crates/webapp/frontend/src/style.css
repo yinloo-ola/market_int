@@ -1491,7 +1491,12 @@ details.adjust .hint-custom { color: var(--accent); }
   .hp-pane-head .hp-pane-title { display: none; }
   .hp-list-row.hp-list-head { display: none; }
   .hp-list-row { display: flex; flex-direction: column; align-items: stretch; gap: 0.45rem; }
-  .hp-list-pos { justify-content: space-between; }
+  /* Deterministic two-line head: kind + symbol + pool picker on the first
+     line (picker pinned right), exp meta always on its own line below —
+     wrap-by-accident depending on name lengths is not okay. */
+  .hp-list-pos { justify-content: flex-start; }
+  .hp-list-pos .hp-pool-pick { margin-left: auto; }
+  .hp-list-pos > i { flex: 1 1 100%; }
   .hp-list-pace { display: flex; flex-direction: column; gap: 0.15rem; }
   .hp-list-status { flex-direction: row; flex-wrap: wrap; }
   .hp-list-row .holdings-close-btn { align-self: flex-end; }
