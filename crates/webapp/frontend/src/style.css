@@ -685,6 +685,8 @@ tr.prow td { opacity: 0.62; }
 
 .run-slot-head { float: right; margin-left: 12px; }
 
+.theme-slot-head { float: right; margin: 0 10px; display: flex; align-items: center; }
+
 .run-btn {
   font: inherit;
   padding: 5px 14px;
@@ -1412,7 +1414,8 @@ details.adjust .hint-custom { color: var(--accent); }
 .hp-lot-row-meta i { font-style: normal; }
 .hp-toolbar-row { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.4rem; }
 
-.hp-list { display: flex; flex-direction: column; gap: 0.35rem; }
+/* Bottom margin keeps the last row clear of the viewport edge on mobile. */
+.hp-list { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 0.75rem; }
 .hp-list-row {
   display: grid;
   grid-template-columns: minmax(14rem, 1.4fr) 5rem minmax(9rem, 1fr) 8rem auto;
@@ -1672,7 +1675,11 @@ html[data-theme="light"] {
   padding: 0.25rem 0.4rem;
 }
 .hp-pool-item.active { border-color: var(--accent); }
-.hp-pool-line { display: flex; gap: 0.3rem; align-items: center; min-width: 0; }
+/* The name takes a full line with the delete button at its right; cash +
+   actions wrap onto a second line — in the 13rem rail one line for all of
+   it leaves the name zero-width. */
+.hp-pool-line { display: flex; flex-wrap: wrap; gap: 0.3rem 0.45rem; align-items: center; min-width: 0; }
+.hp-pool-name-row { display: flex; gap: 0.3rem; align-items: center; min-width: 0; flex: 1 1 100%; }
 .hp-pool-name {
   font: inherit; font-size: 0.72rem; font-weight: 700; color: var(--ink);
   background: transparent; border: none; padding: 0; cursor: pointer;
@@ -1698,6 +1705,13 @@ html[data-theme="light"] {
   font-size: 0.6rem; font-weight: 700; letter-spacing: 0.03em;
   color: var(--muted); background: transparent; border: 1px solid var(--border);
   border-radius: 999px; padding: 0.06rem 0.4rem; white-space: nowrap;
+}
+/* The put-row pool picker (same slot the tag held) — selects where the
+   put's strike×100×contracts reservation lands. */
+.hp-pool-pick {
+  font: inherit; font-size: 0.62rem; font-weight: 700; letter-spacing: 0.03em;
+  color: var(--muted); background: var(--panel); border: 1px solid var(--border);
+  border-radius: 999px; padding: 0.06rem 0.4rem; white-space: nowrap; cursor: pointer;
 }
 .holdings-add select {
   font: inherit; padding: 5px 6px; border: 1px solid var(--border);

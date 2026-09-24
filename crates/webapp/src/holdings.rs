@@ -1192,6 +1192,73 @@ pub(crate) async fn holdings_delete(
     Json(json!({ "removed": id })).into_response()
 }
 
+/// `PATCH /api/holdings/{id}` — reassign an open put to a cash pool
+/// (`{pool_id}`; cash pools R4). Puts only: covered calls inherit the
+/// covering lot's pool and a lot IS the shares' pool, so neither takes a
+/// picker. A put's reservation is derived from `pool_id` at read time, so
+/// the move is a field rewrite — no stored cash changes hands.
+pub(crate) async fn holdings_patch(
+    State(st): State<crate::api::AppState>,
+    AxPath(id): AxPath<String>,
+    req: Request,
+) -> Response {
+    let uid = uid_of(&req);
+    let bytes = match axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "unreadable body"),
+    };
+    let v: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "body is not JSON"),
+    };
+    let Some(pool_id) = requested_pool_id(&v) else {
+        return error_response(StatusCode::BAD_REQUEST, "missing pool_id");
+    };
+    let mut doc = match read_ledger_off_thread(st.holdings_dir.clone(), uid.clone()).await {
+        Ok(d) => d,
+        Err(err) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("ledger read failed: {err}"),
+            )
+        }
+    };
+    if doc.calls.iter().any(|c| c.id == id) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "covered calls inherit the shares' pool — reassign the covering lot",
+        );
+    }
+    if doc.lots.iter().any(|l| l.id == id) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "a lot IS the shares' pool — covered calls follow it",
+        );
+    }
+    let updated = {
+        let Some(pos) = doc.positions.iter_mut().find(|p| p.id == id) else {
+            return error_response(StatusCode::NOT_FOUND, "no such holding");
+        };
+        if !doc.cash_pools.iter().any(|p| p.id == pool_id) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("unknown pool_id {pool_id:?}"),
+            );
+        }
+        pos.pool_id = Some(pool_id.clone());
+        pos.clone()
+    };
+    sync_scalar_cash(&mut doc);
+    let pos_json = position_json(&doc, &updated, today_et(st.clock));
+    if let Err(err) = write_ledger_off_thread(st.holdings_dir.clone(), uid, doc).await {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("ledger write failed: {err}"),
+        );
+    }
+    Json(json!({ "position": pos_json })).into_response()
+}
+
 /// `PATCH /api/holdings/cash` — set a pool's cash balance (and/or rename
 /// the pool; cash pools R2, never the Tiger account API). `{cash}` with no
 /// `pool_id` targets the FIRST pool — byte-for-byte the legacy route's
@@ -3123,6 +3190,74 @@ mod tests {
         assert_eq!(pools.len(), 1, "implicit Main renders the scalar");
         assert_eq!(pools[0]["id"], "main");
         assert_eq!(pools[0]["cash"], 250.0);
+    }
+
+    /// PATCH /api/holdings/{id} (cash pools R4): an unassigned put moves to
+    /// a named pool — its reservation follows (derived from pool_id), which
+    /// unblocks the default pool's delete. Calls and lots take no picker
+    /// (a call inherits the covering lot's pool; the lot IS the shares'
+    /// pool), and an unknown pool is a 400 with no write.
+    #[tokio::test]
+    async fn patch_reassigns_put_pool_and_unblocks_default_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (_, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({"kind": "pool", "name": "IBKR"})),
+        )
+        .await;
+        let ibkr = v["pool"]["id"].as_str().unwrap().to_string();
+
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "symbol": "SPY", "strike": 100.0, "premium": 1.0,
+                "contracts": 1, "sold": "2026-09-04", "expiry": "2026-09-11"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{v}");
+        let put_id = v["position"]["id"].as_str().unwrap().to_string();
+
+        // Unknown pool: 400, nothing moves.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(
+            app,
+            "PATCH",
+            &format!("/api/holdings/{put_id}"),
+            Some(json!({"pool_id": "nope"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "unknown pool rejected");
+
+        // The reassign: 200, the position carries the pool, and IBKR's
+        // derived reservation now holds strike×100×contracts.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "PATCH",
+            &format!("/api/holdings/{put_id}"),
+            Some(json!({"pool_id": ibkr})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["position"]["pool_id"], ibkr);
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (_, v) = call(app, "GET", "/api/holdings", None).await;
+        let pools = v["cash_pools"].as_array().unwrap();
+        let ibkr_view = pools.iter().find(|p| p["id"] == ibkr).unwrap();
+        assert_eq!(ibkr_view["reserved"], 10000.0, "{ibkr_view}");
+        assert_eq!(v["cash_reserved"], 10000.0, "aggregate follows the move");
+
+        // No unassigned entries remain — Main (the default) deletes now.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(app, "DELETE", "/api/holdings/main", None).await;
+        assert_eq!(status, StatusCode::OK, "default pool unblocked");
     }
 
     /// Design doc `## Feature acceptance` (cash pools), verbatim: a legacy

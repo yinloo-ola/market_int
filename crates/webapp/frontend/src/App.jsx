@@ -432,6 +432,11 @@ function App() {
             </Show>
           </div>
           {/* USER_SLOT(t17):end */}
+          {/* Theme toggle floats right, beside the user box (float order:
+              declared after it, so it lands to its left). */}
+          <div class="theme-slot-head">
+            <ThemeToggle />
+          </div>
           <h1 class="brand">
             <span class="brand-mark">
               Market<span class="brand-accent">Int</span>
@@ -444,7 +449,6 @@ function App() {
           {/* ── RUN_SLOT (ticket 18) part 1 — ▶ Run pipeline button joins
                  this header line ── */}
           <div class="run-slot-head">
-            <ThemeToggle />
             <RunButton run={run} />
           </div>
           {/* ── end RUN_SLOT part 1 ── */}

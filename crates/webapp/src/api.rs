@@ -92,7 +92,8 @@ pub fn build_router(state: AppState) -> axum::Router {
         )
         .route(
             "/api/holdings/{id}",
-            axum::routing::delete(crate::holdings::holdings_delete),
+            axum::routing::patch(crate::holdings::holdings_patch)
+                .delete(crate::holdings::holdings_delete),
         )
         .with_state(state)
 }

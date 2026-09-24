@@ -131,6 +131,21 @@ export async function deleteHolding(id) {
   return v;
 }
 
+/// Reassign an open put to a cash pool (`{pool_id}`; cash pools R4) —
+/// its strike×100×contracts reservation follows the field server-side.
+/// The response carries the re-rendered position (server-resolved
+/// pool_name included); callers reload, never re-derive.
+export async function patchHoldingPool(id, poolId) {
+  const res = await authorizedFetch(`/api/holdings/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pool_id: poolId }),
+  });
+  const v = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(v?.error ?? `PATCH /api/holdings/${id} -> ${res.status}`);
+  return v;
+}
+
 export async function refreshHoldings() {
   const res = await authorizedFetch("/api/holdings/refresh", { method: "POST" });
   const v = await res.json().catch(() => null);

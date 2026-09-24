@@ -631,6 +631,18 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
       positionsDoc = [...positionsDoc, pos];
       return jsonRes2({ position: pos });
     }
+    // PATCH /api/holdings/{id} — the put's pool reassign (cash pools R4):
+    // the reservation follows pool_id server-side; the response re-renders
+    // the position with its resolved pool name.
+    if (method === "PATCH" && String(path).startsWith("/api/holdings/h")) {
+      const id = String(path).split("/").pop();
+      const eff = poolsDoc.find((p) => p.id === body?.pool_id);
+      positionsDoc = positionsDoc.map((p) =>
+        p.id === id ? { ...p, pool_id: body?.pool_id, pool_name: eff?.name ?? "Main" } : p
+      );
+      const moved = positionsDoc.find((p) => p.id === id);
+      return moved ? jsonRes2({ position: moved }) : new Response("not found", { status: 404 });
+    }
     if (path === "/api/holdings/cash" && method === "PATCH") {
       poolsDoc = poolsDoc.map((p) =>
         p.id === (body?.pool_id ?? p.id)
@@ -752,9 +764,24 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
   const poolPut = seen2.find(([p2, m, b]) => m === "POST" && b?.symbol === "AMD");
   ok("put POST carries the chosen pool_id", !!poolPut && poolPut[2].pool_id === "pibkr");
   await tick();
+  const rowPick = q(`${rsel} .hp-list-pos .hp-pool-pick`);
   ok(
-    "put row names the pool it spends",
-    q(`${rsel} .hp-list-pos .hp-pool-tag`)?.textContent === "IBKR LLC"
+    "put row shows a pool picker naming the pool it spends",
+    !!rowPick && rowPick.selectedOptions[0]?.textContent === "IBKR LLC"
+  );
+  // Switching the picker PATCHes the put's pool; the reload re-renders
+  // with the server-resolved name.
+  rowPick.value = "main";
+  rowPick.dispatchEvent(new Event("change", { bubbles: true }));
+  await tick();
+  const reassign = seen2.find(
+    ([p2, m, b]) => m === "PATCH" && /^\/api\/holdings\/h/.test(p2) && b?.pool_id === "main"
+  );
+  ok("picker PATCHes the put's pool", !!reassign);
+  await tick();
+  ok(
+    "picker re-renders with the server-resolved pool",
+    q(`${rsel} .hp-list-pos .hp-pool-pick`)?.selectedOptions[0]?.textContent === "Main"
   );
 
   // Zero-pool ledger: the add row is STILL offered — under the old UI it

@@ -20,6 +20,7 @@ import {
   deleteHolding,
   getHoldings,
   patchCash,
+  patchHoldingPool,
   refreshHoldings,
 } from "../api";
 
@@ -252,16 +253,9 @@ function PoolRow(props) {
           </span>
         }
       >
-        <span class="hp-pool-line">
+        <span class="hp-pool-name-row">
           <button type="button" class="hp-pool-name" onClick={props.onSelect}>
             {props.pool.name}
-          </button>
-          <span class="hp-pool-cash">{money(props.pool.cash)}</span>
-          <button type="button" class="btn-ghost hp-pool-act" onClick={props.onEditCash}>
-            cash
-          </button>
-          <button type="button" class="btn-ghost hp-pool-act" onClick={startRename}>
-            rename
           </button>
           <button
             type="button"
@@ -271,6 +265,15 @@ function PoolRow(props) {
             onClick={props.onDelete}
           >
             ×
+          </button>
+        </span>
+        <span class="hp-pool-line">
+          <span class="hp-pool-cash">{money(props.pool.cash)}</span>
+          <button type="button" class="btn-ghost hp-pool-act" onClick={props.onEditCash}>
+            cash
+          </button>
+          <button type="button" class="btn-ghost hp-pool-act" onClick={startRename}>
+            rename
           </button>
         </span>
       </Show>
@@ -342,9 +345,21 @@ function OptionRow(props) {
             {x.p.kind === "put" ? "P" : "C"} ×{x.p.contracts}
           </b>
           {/* Which pool of cash this put spends (server-resolved name;
-              hidden on single-pool ledgers where there's nothing to tell). */}
-          <Show when={x.p.kind === "put" && props.showPool && x.p.pool_name}>
-            <span class="hp-pool-tag">{x.p.pool_name}</span>
+              hidden on single-pool ledgers where there's nothing to tell).
+              Multi-pool ledgers get a picker — the reservation follows the
+              choice server-side (cash pools R4). */}
+          <Show when={x.p.kind === "put" && props.showPool}>
+            <select
+              class="hp-pool-pick"
+              aria-label={`cash pool for ${x.p.symbol} ${x.p.strike} put`}
+              value={props.pools?.find((p) => p.name === x.p.pool_name)?.id ?? ""}
+              disabled={props.dialogActions?.busy?.()}
+              onChange={(e) => props.onPoolChange?.(x.p.id, e.target.value)}
+            >
+              <For each={props.pools}>
+                {(p) => <option value={p.id}>{p.name}</option>}
+              </For>
+            </select>
           </Show>
           <i>
             exp {x.p.expiry} · {x.v.days_elapsed}/{x.v.days_total} wd
@@ -1057,6 +1072,16 @@ export default function HoldingsPanel() {
     await load();
   };
 
+  /* Move an open put to another pool (PATCH /api/holdings/{id}): the
+     strike×100×contracts reservation follows server-side, so the strip's
+     reserved/free re-derive from the reload — never client math. */
+  const onPoolChange = async (putId, poolId) => {
+    const res = await run(() => patchHoldingPool(putId, poolId));
+    if (!res) return;
+    flash(`Put moved to ${res.position?.pool_name ?? "the pool"}.`);
+    await load();
+  };
+
   const dialogActions = {
     busy,
     onDone: () => setDialog(null),
@@ -1157,6 +1182,8 @@ export default function HoldingsPanel() {
               <OptionRow
                 x={x}
                 showPool={pools().length > 1}
+                pools={pools()}
+                onPoolChange={onPoolChange}
                 dialogFor={dialogFor}
                 dialogActions={dialogActions}
                 onClose={(x2) => setDialog({ type: x2.p.kind, pos: x2.p })}
