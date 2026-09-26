@@ -382,11 +382,13 @@ mod tests {
             holdings_dir: path.with_file_name("holdings"),
             mark_fetcher: Arc::new(
                 |_: &[crate::holdings::MarkRequest],
-                 _: &[String]|
+                 _: &[String],
+                 _: crate::holdings::MarketSession|
                  -> crate::holdings::MarkBatch {
                     crate::holdings::MarkBatch {
                         marks: Vec::new(),
                         spots: Default::default(),
+                ext: Default::default(),
                     }
                 },
             ),
@@ -535,7 +537,7 @@ mod tests {
         let path = dir.path().join("last_run.json");
         let shared = crate::run::SharedState::new();
         shared.begin().expect("acquire");
-        let app = build_router(AppState { result_path: path, holdings_dir: PathBuf::from("holdings"), mark_fetcher: Arc::new(|_: &[crate::holdings::MarkRequest], _: &[String]| crate::holdings::MarkBatch { marks: Vec::new(), spots: Default::default() }), shared, access: Default::default(), clock: crate::run::real_now });
+        let app = build_router(AppState { result_path: path, holdings_dir: PathBuf::from("holdings"), mark_fetcher: Arc::new(|_: &[crate::holdings::MarkRequest], _: &[String], _: crate::holdings::MarketSession| crate::holdings::MarkBatch { marks: Vec::new(), spots: Default::default(), ext: Default::default() }), shared, access: Default::default(), clock: crate::run::real_now });
 
         let response = app
             .oneshot(axum::http::Request::builder().uri("/api/latest").body(Body::empty()).unwrap())

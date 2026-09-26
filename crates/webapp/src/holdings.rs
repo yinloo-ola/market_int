@@ -36,13 +36,61 @@ pub struct MarkResult {
     pub underlying: Option<f64>,
 }
 
+/// Which US-equity session an instant falls in (ET wall clock; Blue-Ocean
+/// overnight 20:00–04:00 ET, no Friday- or Saturday-night session — the
+/// live probe showed Friday 20:00+ returns no overnight bars). A clock
+/// heuristic, not a trading calendar: half-days and holidays read as the
+/// regular schedule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MarketSession {
+    PreMarket,
+    Regular,
+    AfterHours,
+    OverNight,
+    /// Weekend daytime (and Friday night) — nothing active to emphasize,
+    /// extended data still fetched and shown.
+    Closed,
+}
+
+/// Classify an instant by the ET wall clock (extended-hours R3).
+fn et_market_session(now: DateTime<Utc>) -> MarketSession {
+    use chrono::Datelike;
+    use chrono::Timelike;
+    use chrono::Weekday::*;
+    use chrono_tz::America::New_York;
+    let et = now.with_timezone(&New_York);
+    let minutes = et.hour() * 60 + et.minute();
+    match et.weekday() {
+        Sat => MarketSession::Closed,
+        Sun if minutes >= 20 * 60 => MarketSession::OverNight,
+        Sun => MarketSession::Closed,
+        Fri if minutes >= 20 * 60 => MarketSession::Closed,
+        _ if (4 * 60..9 * 60 + 30).contains(&minutes) => MarketSession::PreMarket,
+        _ if (9 * 60 + 30..16 * 60).contains(&minutes) => MarketSession::Regular,
+        _ if (16 * 60..20 * 60).contains(&minutes) => MarketSession::AfterHours,
+        _ => MarketSession::OverNight, // 20:00–24:00 Mon–Thu and 00:00–04:00 Tue–Fri
+    }
+}
+
 /// The fetcher's whole outcome: option marks by request id, plus the
 /// per-symbol underlying closes the same kline pass produced. Lots price
 /// from `spots` — chain queries are never issued for lot symbols (R5).
+/// `ext` carries the extended-session closes per lot symbol (empty until
+/// the closed-session fetch merges them, extended-hours R3).
 #[derive(Debug)]
 pub struct MarkBatch {
     pub marks: Vec<MarkResult>,
     pub spots: std::collections::BTreeMap<String, f64>,
+    pub ext: std::collections::BTreeMap<String, SessionQuotes>,
+}
+
+/// One lot symbol's extended-session closes, assembled from the per-session
+/// kline calls. A session whose call failed or returned no bars is `None`.
+#[derive(Debug)]
+pub struct SessionQuotes {
+    pub pre: Option<market_int_core::model::ExtQuote>,
+    pub post: Option<market_int_core::model::ExtQuote>,
+    pub overnight: Option<market_int_core::model::ExtQuote>,
 }
 
 /// Seam (Runner precedent): production constructs ONE Tiger requester per
@@ -50,7 +98,7 @@ pub struct MarkBatch {
 /// lists lot symbols so the same kline pass prices them into `spots`.
 /// Tests script per-symbol outcomes with no network.
 pub type MarkFetcher =
-    Arc<dyn Fn(&[MarkRequest], &[String]) -> MarkBatch + Send + Sync>;
+    Arc<dyn Fn(&[MarkRequest], &[String], MarketSession) -> MarkBatch + Send + Sync>;
 
 /// Production fetcher: one Tiger requester per refresh call, one underlying
 /// kline per unique symbol across option AND lot symbols, then a
@@ -60,17 +108,21 @@ pub type MarkFetcher =
 /// minimum 0: we want *our* strike, not liquid ones. Blocking by design —
 /// the refresh handler parks it on `spawn_blocking`.
 pub fn live_fetcher() -> MarkFetcher {
-    Arc::new(move |requests: &[MarkRequest], lot_symbols: &[String]| {
-        fetch_marks_blocking(requests.to_vec(), lot_symbols.to_vec())
+    Arc::new(move |requests: &[MarkRequest], lot_symbols: &[String], session: MarketSession| {
+        fetch_marks_blocking(requests.to_vec(), lot_symbols.to_vec(), session)
     })
 }
 
-fn fetch_marks_blocking(requests: Vec<MarkRequest>, lot_symbols: Vec<String>) -> MarkBatch {
+fn fetch_marks_blocking(
+    requests: Vec<MarkRequest>,
+    lot_symbols: Vec<String>,
+    session: MarketSession,
+) -> MarkBatch {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build();
     match runtime {
-        Ok(rt) => rt.block_on(fetch_marks(requests, lot_symbols)),
+        Ok(rt) => rt.block_on(fetch_marks(requests, lot_symbols, session)),
         Err(e) => MarkBatch {
             marks: requests
                 .into_iter()
@@ -81,11 +133,16 @@ fn fetch_marks_blocking(requests: Vec<MarkRequest>, lot_symbols: Vec<String>) ->
                 })
                 .collect(),
             spots: Default::default(),
+                ext: Default::default(),
         },
     }
 }
 
-async fn fetch_marks(requests: Vec<MarkRequest>, lot_symbols: Vec<String>) -> MarkBatch {
+async fn fetch_marks(
+    requests: Vec<MarkRequest>,
+    lot_symbols: Vec<String>,
+    session: MarketSession,
+) -> MarkBatch {
     use std::collections::BTreeSet;
 
     let Some(requester) =
@@ -104,6 +161,7 @@ async fn fetch_marks(requests: Vec<MarkRequest>, lot_symbols: Vec<String>) -> Ma
                 })
                 .collect(),
             spots: Default::default(),
+                ext: Default::default(),
         };
     };
 
@@ -138,6 +196,16 @@ async fn fetch_marks(requests: Vec<MarkRequest>, lot_symbols: Vec<String>) -> Ma
         .map(|(symbol, &close)| (symbol.clone(), close))
         .collect();
 
+    // Extended-session closes, best-effort and only outside Regular: one
+    // 1-minute kline call per extended session for the deduped lot symbols
+    // (option symbols never get extended calls). A failed or empty session
+    // costs only its own segments.
+    let ext = if session != MarketSession::Regular && !lot_symbols.is_empty() {
+        fetch_session_quotes(&requester, &lot_symbols).await
+    } else {
+        Default::default()
+    };
+
     let mut marks = Vec::with_capacity(requests.len());
     for r in requests {
         let Some(&spot) = underlyings.get(&r.symbol) else {
@@ -170,7 +238,52 @@ async fn fetch_marks(requests: Vec<MarkRequest>, lot_symbols: Vec<String>) -> Ma
             underlying: Some(spot),
         });
     }
-    MarkBatch { marks, spots }
+    MarkBatch { marks, spots, ext }
+}
+
+/// One 1-minute kline call per extended session for the lot symbols,
+/// folded into per-symbol `SessionQuotes`. A session whose call fails or
+/// returns no bars leaves its slot `None` (extended-hours R3).
+async fn fetch_session_quotes(
+    requester: &market_int_core::tiger::api_caller::Requester,
+    lot_symbols: &[String],
+) -> std::collections::BTreeMap<String, SessionQuotes> {
+    let mut out: std::collections::BTreeMap<String, SessionQuotes> = lot_symbols
+        .iter()
+        .map(|s| {
+            (
+                s.clone(),
+                SessionQuotes {
+                    pre: None,
+                    post: None,
+                    overnight: None,
+                },
+            )
+        })
+        .collect();
+    let refs: Vec<&str> = lot_symbols.iter().map(|s| s.as_str()).collect();
+    for (name, slot) in [
+        ("PreMarket", 0u8),
+        ("AfterHours", 1u8),
+        ("OverNight", 2u8),
+    ] {
+        match requester.query_session_closes(&refs, name).await {
+            Ok(closes) => {
+                for (symbol, quote) in closes {
+                    if let Some(entry) = out.get_mut(&symbol) {
+                        match slot {
+                            0 => entry.pre = Some(quote),
+                            1 => entry.post = Some(quote),
+                            _ => entry.overnight = Some(quote),
+                        }
+                    }
+                }
+            }
+            Err(e) => log::warn!("holdings: extended closes for {name} failed: {e}"),
+        }
+    }
+    out.retain(|_, q| q.pre.is_some() || q.post.is_some() || q.overnight.is_some());
+    out
 }
 
 // The chain query is async and must run on the same runtime as the kline
@@ -623,10 +736,25 @@ fn covered_contracts(doc: &HoldingsDocument, symbol: &str) -> u32 {
 
 fn lot_json(l: &market_int_core::holdings::ShareLot, today: chrono::NaiveDate, covered: u32) -> serde_json::Value {
     let mark = l.mark.as_ref().map(|m| {
-        json!({
+        // Extended-hours fields ride additively (absent when None, matching
+        // the persisted document's skip_serializing_if shape).
+        let mut mark = json!({
             "spot": m.spot,
             "as_of": m.as_of.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        })
+        });
+        if let Some(pre) = &m.pre {
+            mark["pre"] = json!(pre);
+        }
+        if let Some(post) = &m.post {
+            mark["post"] = json!(post);
+        }
+        if let Some(overnight) = &m.overnight {
+            mark["overnight"] = json!(overnight);
+        }
+        if let Some(session) = &m.session {
+            mark["session"] = json!(session);
+        }
+        mark
     });
     let mut v = json!({
         "id": l.id,
@@ -1487,8 +1615,12 @@ pub(crate) async fn holdings_refresh(
     };
     // Tiger is a blocking HTTP client — park the whole batch off the async
     // workers (read_document_off_thread precedent).
+    // The session gates the extended-hours fetch and merge (extended-hours
+    // R3) — classified once, from the injected clock.
+    let session = et_market_session((st.clock)());
     let fetcher = st.mark_fetcher.clone();
-    let batch = tokio::task::spawn_blocking(move || fetcher(&requests, &lot_symbols))
+    let batch =
+        tokio::task::spawn_blocking(move || fetcher(&requests, &lot_symbols, session))
         .await
         .expect("spawn_blocking mark fetch");
 
@@ -1569,11 +1701,51 @@ pub(crate) async fn holdings_refresh(
 
     // Lots price from the spot map — a lot whose symbol is missing from it
     // (kline failed, say) is stale with a reason and keeps its previous
-    // SpotMark.
+    // SpotMark. Extended fields follow the session gate: a Regular-session
+    // refresh clears them (data captured in an earlier closed session is
+    // stale once the market opens); otherwise the present session closes
+    // merge in, with `session` naming the active one (None when nothing is).
     for lot in &mut doc.lots {
         match batch.spots.get(&lot.symbol) {
             Some(&spot) => {
-                lot.mark = Some(market_int_core::holdings::SpotMark { spot, as_of: now });
+                // Latest known price (user decision, preview feedback): the
+                // chronologically newest extended close — the session cycle
+                // pre → regular → post → overnight makes bar time the
+                // truth — falling back to the regular close when no
+                // extended data survived. A Regular-session refresh clears
+                // extended data entirely (stale once the market opens).
+                let ext = if session == MarketSession::Regular {
+                    None
+                } else {
+                    batch.ext.get(&lot.symbol)
+                };
+                let (pre, post, overnight) = match ext {
+                    Some(q) => (q.pre.clone(), q.post.clone(), q.overnight.clone()),
+                    None => (None, None, None),
+                };
+                let session_name = ext.and_then(|q| {
+                    [
+                        q.pre.as_ref().map(|quote| (quote, "PreMarket")),
+                        q.post.as_ref().map(|quote| (quote, "AfterHours")),
+                        q.overnight.as_ref().map(|quote| (quote, "OverNight")),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .max_by_key(|(quote, _)| quote.time)
+                    .map(|(quote, name)| (quote.price, name.to_string()))
+                });
+                let (spot, session_name) = match session_name {
+                    Some((price, name)) => (price, Some(name)),
+                    None => (spot, None),
+                };
+                lot.mark = Some(market_int_core::holdings::SpotMark {
+                    spot,
+                    as_of: now,
+                    pre,
+                    post,
+                    overnight,
+                    session: session_name,
+                });
                 ok.push(lot.id.clone());
             }
             None => stale.push((
@@ -1745,6 +1917,10 @@ mod store_tests {
                 mark: Some(market_int_core::holdings::SpotMark {
                     spot: 370.0,
                     as_of,
+                    pre: None,
+                    post: None,
+                    overnight: None,
+                    session: None,
                 }),
                 pool_id: Some("p1".to_string()),
             }],
@@ -1885,7 +2061,7 @@ mod tests {
     }
 
     fn goog_fetcher(mid: f64) -> MarkFetcher {
-        Arc::new(move |requests: &[MarkRequest], _lots: &[String]| MarkBatch {
+        Arc::new(move |requests: &[MarkRequest], _lots: &[String], _session: MarketSession| MarkBatch {
             marks: requests
                 .iter()
                 .map(|r| MarkResult {
@@ -1895,7 +2071,333 @@ mod tests {
                 })
                 .collect(),
             spots: Default::default(),
+                ext: Default::default(),
         })
+    }
+
+    // ── Extended-hours quotes: feature-acceptance E2E ──────────────
+    // Design doc `## Feature acceptance`, verbatim: a closed-session
+    // refresh persists pre/post/overnight + session on the lot mark (the
+    // extended line's data); a pre-feature ledger document loads and
+    // renders exactly as before, then gains the line after one refresh;
+    // a quote call failing entirely keeps every previous mark and reports
+    // stale without a rewrite.
+
+    /// 2026-09-08 22:00 UTC = 18:00 ET, a Tuesday evening — post-market.
+    fn frozen_after_hours() -> DateTime<Utc> {
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 8)
+            .unwrap()
+            .and_hms_opt(22, 0, 0)
+            .unwrap()
+            .and_utc()
+    }
+
+    fn test_state_clock(dir: &std::path::Path, fetcher: MarkFetcher, clock: fn() -> DateTime<Utc>) -> AppState {
+        AppState {
+            result_path: dir.join("last_run.json"),
+            holdings_dir: dir.join("holdings"),
+            mark_fetcher: fetcher,
+            shared: crate::run::SharedState::new(),
+            access: Default::default(),
+            clock,
+        }
+    }
+
+    fn aapl_ext_fetcher(closed: bool) -> MarkFetcher {
+        Arc::new(move |requests: &[MarkRequest], _lots: &[String], _session: MarketSession| {
+            if !closed {
+                return MarkBatch {
+                    marks: requests
+                        .iter()
+                        .map(|r| MarkResult {
+                            id: r.id.clone(),
+                            mid: Ok(Some(2.5)),
+                            underlying: Some(250.42),
+                        })
+                        .collect(),
+                    spots: std::collections::BTreeMap::from([("AAPL".to_string(), 250.42)]),
+                    ext: Default::default(),
+                };
+            }
+            let ext = std::collections::BTreeMap::from([(
+                "AAPL".to_string(),
+                SessionQuotes {
+                    pre: Some(market_int_core::model::ExtQuote {
+                        price: 251.2,
+                        time: chrono::DateTime::parse_from_rfc3339("2026-09-08T13:15:00Z")
+                            .unwrap()
+                            .into(),
+                    }),
+                    post: Some(market_int_core::model::ExtQuote {
+                        price: 250.05,
+                        time: chrono::DateTime::parse_from_rfc3339("2026-09-08T19:59:00Z")
+                            .unwrap()
+                            .into(),
+                    }),
+                    overnight: None,
+                },
+            )]);
+            MarkBatch {
+                marks: requests
+                    .iter()
+                    .map(|r| MarkResult {
+                        id: r.id.clone(),
+                        mid: Ok(Some(2.5)),
+                        underlying: Some(249.87),
+                    })
+                    .collect(),
+                spots: std::collections::BTreeMap::from([("AAPL".to_string(), 249.87)]),
+                ext,
+            }
+        })
+    }
+
+    /// Old-format ledger document: no extended fields anywhere (a
+    /// pre-feature write), single lot with a regular mark.
+    fn write_pre_feature_ledger(dir: &std::path::Path, uid: &str) {
+        let holdings_dir = dir.join("holdings");
+        std::fs::create_dir_all(&holdings_dir).unwrap();
+        std::fs::write(
+            holdings_dir.join(format!("{uid}.json")),
+            r#"{"schema_version":1,"positions":[],"lots":[{"id":"lot-old","symbol":"AAPL","shares":100,"basis_per_share":231.4,"acquired":"2026-08-12","mark":{"spot":249.87,"as_of":"2026-09-08T15:00:00Z"}}]}"#,
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn feature_acceptance_extended_hours_quotes() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // ── Scenario 1: refresh during a closed session persists the
+        // extended data alongside the regular spot.
+        write_pre_feature_ledger(dir.path(), "test-uid");
+        let app = crate::api::build_router(test_state_clock(
+            dir.path(),
+            aapl_ext_fetcher(true),
+            frozen_after_hours,
+        ));
+        let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
+        assert_eq!(status, StatusCode::OK, "closed-session refresh: {v}");
+        assert_eq!(v["refresh"]["ok"].as_array().unwrap().len(), 1);
+        assert_eq!(v["refresh"]["stale"].as_array().unwrap().len(), 0);
+
+        let app = crate::api::build_router(test_state_clock(
+            dir.path(),
+            aapl_ext_fetcher(true),
+            frozen_after_hours,
+        ));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let mark = &v["lots"][0]["mark"];
+        assert_eq!(
+            mark["spot"], 250.05,
+            "spot = the chronologically latest close (post, 19:59)"
+        );
+        assert_eq!(mark["session"], "AfterHours", "session names the source");
+        assert_eq!(mark["pre"]["price"], 251.2);
+        assert_eq!(mark["post"]["price"], 250.05);
+        assert!(mark["overnight"].is_null(), "symbol has no overnight data");
+        // Value and P&L follow the latest price.
+        assert_eq!(v["lots"][0]["view"]["value"], 25005.0);
+        assert_eq!(v["lots"][0]["view"]["pl_dollars"], 1865.0);
+        // The additive fields persist to the ledger document.
+        let file = std::fs::read_to_string(dir.path().join("holdings/test-uid.json")).unwrap();
+        assert!(file.contains("\"session\""), "session persisted: {file}");
+        assert!(file.contains("\"post\""), "post persisted: {file}");
+
+        // ── Scenario 2: a fresh pre-feature document loads and renders
+        // exactly as before (no extended fields), then one closed-session
+        // refresh makes the line appear.
+        let dir2 = tempfile::tempdir().unwrap();
+        write_pre_feature_ledger(dir2.path(), "test-uid");
+        let app = crate::api::build_router(test_state_clock(
+            dir2.path(),
+            aapl_ext_fetcher(true),
+            frozen_after_hours,
+        ));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK, "old document loads: {v}");
+        let mark = &v["lots"][0]["mark"];
+        assert_eq!(mark["spot"], 249.87);
+        assert!(mark["pre"].is_null() && mark["post"].is_null() && mark["session"].is_null(),
+            "pre-feature mark has no extended fields: {mark}");
+
+        let app = crate::api::build_router(test_state_clock(
+            dir2.path(),
+            aapl_ext_fetcher(true),
+            frozen_after_hours,
+        ));
+        let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
+        assert_eq!(status, StatusCode::OK, "refresh on old document: {v}");
+        let mark = &v["lots"][0]["mark"];
+        assert_eq!(mark["spot"], 250.05, "priced at the latest close");
+        assert_eq!(mark["session"], "AfterHours");
+
+        // ── Scenario 3: the quote call failing entirely keeps every
+        // previous mark, reports stale, and does not rewrite the ledger.
+        let dir3 = tempfile::tempdir().unwrap();
+        write_pre_feature_ledger(dir3.path(), "test-uid");
+        let app = crate::api::build_router(test_state_clock(
+            dir3.path(),
+            Arc::new(|_: &[MarkRequest], _lots: &[String], _session: MarketSession| MarkBatch {
+                marks: Vec::new(),
+                spots: Default::default(),
+                ext: Default::default(),
+            }),
+            frozen_after_hours,
+        ));
+        let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
+        assert_eq!(status, StatusCode::OK, "failing refresh still 200: {v}");
+        assert_eq!(v["refresh"]["ok"].as_array().unwrap().len(), 0);
+        let stale = v["refresh"]["stale"].as_array().unwrap();
+        assert_eq!(stale.len(), 1, "the lot is reported stale: {v}");
+        assert_eq!(stale[0]["id"], "lot-old");
+        assert!(
+            stale[0]["reason"].as_str().is_some_and(|r| !r.is_empty()),
+            "stale carries a reason: {stale:?}"
+        );
+
+        let app = crate::api::build_router(test_state_clock(
+            dir3.path(),
+            aapl_ext_fetcher(true),
+            frozen_after_hours,
+        ));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let mark = &v["lots"][0]["mark"];
+        assert_eq!(mark["spot"], 249.87, "previous mark kept");
+        assert_eq!(mark["as_of"], "2026-09-08T15:00:00Z", "mark untouched");
+        let file =
+            std::fs::read_to_string(dir3.path().join("holdings/test-uid.json")).unwrap();
+        assert!(
+            file.contains("2026-09-08T15:00:00Z"),
+            "all-stale pass must not rewrite the document: {file}"
+        );
+        assert!(!file.contains("\"session\""), "no extended data persisted: {file}");
+    }
+
+    /// 2026-09-12 (Saturday) 16:00 UTC = noon ET — weekend daytime.
+    fn frozen_weekend_noon() -> DateTime<Utc> {
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 12)
+            .unwrap()
+            .and_hms_opt(16, 0, 0)
+            .unwrap()
+            .and_utc()
+    }
+
+    #[test]
+    fn et_market_session_classifies_the_week() {
+        use MarketSession::*;
+        use chrono::TimeZone;
+        let at = |d: u32, h: u32, mi: u32| {
+            Utc.with_ymd_and_hms(2026, 9, d, h, mi, 0).unwrap()
+        };
+        // Sept 2026 is EDT: ET = UTC − 4h. Tuesday the 8th:
+        assert_eq!(et_market_session(at(8, 7, 0)), OverNight, "03:00 ET");
+        assert_eq!(et_market_session(at(8, 8, 0)), PreMarket, "04:00 ET sharp");
+        assert_eq!(et_market_session(at(8, 13, 29)), PreMarket, "09:29 ET");
+        assert_eq!(et_market_session(at(8, 13, 30)), Regular, "09:30 ET sharp");
+        assert_eq!(et_market_session(at(8, 19, 59)), Regular, "15:59 ET");
+        assert_eq!(et_market_session(at(8, 20, 0)), AfterHours, "16:00 ET sharp");
+        assert_eq!(et_market_session(at(8, 23, 59)), AfterHours, "19:59 ET");
+        // Wednesday 00:00 UTC = Tuesday 20:00 ET — the overnight session.
+        assert_eq!(et_market_session(at(9, 0, 0)), OverNight);
+        // Friday night has no overnight session (live-probed: Friday 20:00+
+        // returns no OverNight bars).
+        assert_eq!(et_market_session(at(12, 0, 30)), Closed, "Fri 20:30 ET (Sat 00:30 UTC)");
+        // Saturday daytime and Sunday daytime stay closed.
+        assert_eq!(et_market_session(at(12, 16, 0)), Closed, "Sat noon ET");
+        assert_eq!(et_market_session(at(13, 16, 0)), Closed, "Sun noon ET");
+        // Sunday 20:00 ET opens the week's first overnight session.
+        assert_eq!(et_market_session(at(14, 0, 30)), OverNight, "Sun 20:30 ET");
+    }
+
+    /// DST and timezone: the classifier works in America/New_York wall
+    /// clock (chrono-tz), so 09:30 ET is Regular in July (EDT, 13:30 UTC)
+    /// AND in January (EST, 14:30 UTC) — the UTC boundary shifts with the
+    /// season, and the viewer's local timezone never matters (server-side
+    /// classification of absolute instants).
+    #[test]
+    fn et_market_session_is_dst_and_timezone_safe() {
+        use chrono::TimeZone;
+        use MarketSession::*;
+        // Second Wednesday of July 2026: EDT (UTC−4). 13:30 UTC = 09:30 ET.
+        let jul = |h: u32, mi: u32| Utc.with_ymd_and_hms(2026, 7, 8, h, mi, 0).unwrap();
+        assert_eq!(et_market_session(jul(13, 30)), Regular, "09:30 EDT sharp");
+        assert_eq!(et_market_session(jul(13, 29)), PreMarket, "09:29 EDT");
+        // Second Tuesday of January 2027: EST (UTC−5). 14:30 UTC = 09:30 ET.
+        let jan = |h: u32, mi: u32| Utc.with_ymd_and_hms(2027, 1, 12, h, mi, 0).unwrap();
+        assert_eq!(et_market_session(jan(14, 30)), Regular, "09:30 EST sharp");
+        assert_eq!(et_market_session(jan(14, 29)), PreMarket, "09:29 EST");
+        // Same UTC instant classifies differently across the switch:
+        // 13:30 UTC is Regular in July but 08:30 EST (PreMarket) in January.
+        assert_eq!(et_market_session(jan(13, 30)), PreMarket, "08:30 EST");
+        // Overnight boundary across the November switch: Nov 2 2026 (Mon)
+        // is EST — 00:30 UTC = 19:30 ET Sunday (Closed), 01:00 UTC = 20:00
+        // ET Sunday (the week's first overnight session).
+        assert_eq!(
+            et_market_session(Utc.with_ymd_and_hms(2026, 11, 2, 0, 30, 0).unwrap()),
+            Closed,
+            "Sun 19:30 ET after the fall switch"
+        );
+        assert_eq!(
+            et_market_session(Utc.with_ymd_and_hms(2026, 11, 2, 1, 0, 0).unwrap()),
+            OverNight,
+            "Sun 20:00 ET after the fall switch"
+        );
+    }
+
+    /// A Regular-session refresh clears the extended fields even when the
+    /// scripted fetcher hands extended data back — the handler gates the
+    /// merge, so a pre-open line cannot linger into the trading day.
+    #[tokio::test]
+    async fn regular_session_refresh_clears_extended_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pre_feature_ledger(dir.path(), "test-uid");
+        let app = crate::api::build_router(test_state(dir.path(), aapl_ext_fetcher(true)));
+        let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
+        assert_eq!(status, StatusCode::OK, "regular refresh: {v}");
+        assert_eq!(v["refresh"]["ok"].as_array().unwrap().len(), 1);
+
+        let app = crate::api::build_router(test_state(dir.path(), aapl_ext_fetcher(true)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let mark = &v["lots"][0]["mark"];
+        assert_eq!(mark["spot"], 249.87, "regular spot intact");
+        assert!(
+            mark["pre"].is_null() && mark["post"].is_null() && mark["session"].is_null(),
+            "extended fields cleared on the regular session: {mark}"
+        );
+    }
+
+    /// Weekend daytime is a Closed session: extended data is fetched and
+    /// the lot prices at the latest close, tagged with its source session
+    /// (the fixture's newest close is post, 19:59).
+    #[tokio::test]
+    async fn closed_weekend_refresh_prices_at_latest_close() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pre_feature_ledger(dir.path(), "test-uid");
+        let app = crate::api::build_router(test_state_clock(
+            dir.path(),
+            aapl_ext_fetcher(true),
+            frozen_weekend_noon,
+        ));
+        let (status, v) = call(app, "POST", "/api/holdings/refresh", None).await;
+        assert_eq!(status, StatusCode::OK, "weekend refresh: {v}");
+        assert_eq!(v["refresh"]["ok"].as_array().unwrap().len(), 1);
+
+        let app = crate::api::build_router(test_state_clock(
+            dir.path(),
+            aapl_ext_fetcher(true),
+            frozen_weekend_noon,
+        ));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let mark = &v["lots"][0]["mark"];
+        assert_eq!(mark["pre"]["price"], 251.2, "all closes persist");
+        assert_eq!(mark["post"]["price"], 250.05);
+        assert_eq!(mark["spot"], 250.05, "latest close is the price");
+        assert_eq!(mark["session"], "AfterHours", "source session tagged");
     }
 
     /// Design doc `## Feature acceptance`, verbatim: fresh ledger → add GOOG
@@ -2187,7 +2689,7 @@ mod tests {
     async fn refresh_updates_marks() {
         let dir = tempfile::tempdir().unwrap();
         seed_two(dir.path());
-        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], _lots: &[String]| {
+        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], _lots: &[String], _session: MarketSession| {
             MarkBatch {
                 marks: reqs
                     .iter()
@@ -2201,6 +2703,7 @@ mod tests {
                     })
                     .collect(),
                 spots: Default::default(),
+                ext: Default::default(),
             }
         });
         let app = crate::api::build_router(test_state(dir.path(), fetcher));
@@ -2232,7 +2735,7 @@ mod tests {
     async fn refresh_partial_failure_is_stale_not_error() {
         let dir = tempfile::tempdir().unwrap();
         seed_two(dir.path());
-        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], _lots: &[String]| {
+        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], _lots: &[String], _session: MarketSession| {
             MarkBatch {
                 marks: reqs
                     .iter()
@@ -2247,6 +2750,7 @@ mod tests {
                     })
                     .collect(),
                 spots: Default::default(),
+                ext: Default::default(),
             }
         });
         let app = crate::api::build_router(test_state(dir.path(), fetcher));
@@ -2280,7 +2784,7 @@ mod tests {
     async fn refresh_missing_chain_data_is_stale() {
         let dir = tempfile::tempdir().unwrap();
         seed_two(dir.path());
-        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], _lots: &[String]| {
+        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], _lots: &[String], _session: MarketSession| {
             MarkBatch {
                 marks: reqs
                     .iter()
@@ -2295,6 +2799,7 @@ mod tests {
                     })
                     .collect(),
                 spots: Default::default(),
+                ext: Default::default(),
             }
         });
         let app = crate::api::build_router(test_state(dir.path(), fetcher));
@@ -2347,7 +2852,7 @@ mod tests {
     #[tokio::test]
     async fn feature_acceptance_wheel_lifecycle() {
         let dir = tempfile::tempdir().unwrap();
-        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], lots: &[String]| {
+        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], lots: &[String], _session: MarketSession| {
             // Phase 1 (no lots yet): the put refresh — GOOG at 344.20.
             // Phase 2 (the lot exists): the call refresh — GOOG at 370.00
             // rides the spots map the lot prices from.
@@ -2371,7 +2876,7 @@ mod tests {
                     }
                 })
                 .collect();
-            MarkBatch { marks, spots }
+            MarkBatch { marks, spots, ext: Default::default() }
         });
 
         // Fresh ledger: nothing held anywhere, cash never set.
@@ -3277,9 +3782,10 @@ mod tests {
             r#"{"schema_version":1,"positions":[],"cash":80000.0}"#,
         )
         .unwrap();
-        let no_marks: MarkFetcher = Arc::new(|_r: &[MarkRequest], _l: &[String]| MarkBatch {
+        let no_marks: MarkFetcher = Arc::new(|_r: &[MarkRequest], _l: &[String], _session: MarketSession| MarkBatch {
             marks: vec![],
             spots: Default::default(),
+                ext: Default::default(),
         });
 
         // The legacy document reads as one implicit "Main" pool: 80,000
@@ -3489,7 +3995,7 @@ mod tests {
             Arc::new(std::sync::Mutex::new(None));
         let fetcher: MarkFetcher = {
             let seen = seen.clone();
-            Arc::new(move |reqs: &[MarkRequest], lots: &[String]| {
+            Arc::new(move |reqs: &[MarkRequest], lots: &[String], _session: MarketSession| {
                 *seen.lock().unwrap() = Some((
                     reqs.iter()
                         .map(|r| format!("{}:{:?}", r.symbol, r.side))
@@ -3499,6 +4005,7 @@ mod tests {
                 MarkBatch {
                     marks: Vec::new(),
                     spots: Default::default(),
+                ext: Default::default(),
                 }
             })
         };
@@ -3567,6 +4074,10 @@ mod tests {
                         mark: Some(market_int_core::holdings::SpotMark {
                             spot: 344.20,
                             as_of: frozen - chrono::Duration::hours(2),
+                            pre: None,
+                            post: None,
+                            overnight: None,
+                            session: None,
                         }),
                     },
                     market_int_core::holdings::ShareLot {
@@ -3579,6 +4090,10 @@ mod tests {
                         mark: Some(market_int_core::holdings::SpotMark {
                             spot: 100.0,
                             as_of: frozen - chrono::Duration::hours(2),
+                            pre: None,
+                            post: None,
+                            overnight: None,
+                            session: None,
                         }),
                     },
                 ],
@@ -3587,7 +4102,7 @@ mod tests {
         )
         .unwrap();
 
-        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], _lots: &[String]| {
+        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], _lots: &[String], _session: MarketSession| {
             MarkBatch {
                 marks: reqs
                     .iter()
@@ -3598,6 +4113,7 @@ mod tests {
                     })
                     .collect(),
                 spots: [("GOOG".to_string(), 370.0)].into_iter().collect(),
+                ext: Default::default(),
             }
         });
         let app = crate::api::build_router(test_state(dir.path(), fetcher));
@@ -3951,7 +4467,7 @@ mod tests {
 
         let fetcher: MarkFetcher = {
             let ledger_dir = ledger_dir.clone();
-            Arc::new(move |reqs: &[MarkRequest], _lots: &[String]| {
+            Arc::new(move |reqs: &[MarkRequest], _lots: &[String], _session: MarketSession| {
                 // Another request's mutation lands while "Tiger" is being
                 // queried: a fresh mark-less position joins the ledger.
                 let mut doc = read_ledger(&ledger_dir, "test-uid").unwrap();
@@ -3978,6 +4494,7 @@ mod tests {
                         })
                         .collect(),
                     spots: [("GOOG".to_string(), 370.0)].into_iter().collect(),
+                    ext: Default::default(),
                 }
             })
         };
@@ -4050,6 +4567,10 @@ mod tests {
                         mark: Some(market_int_core::holdings::SpotMark {
                             spot: 100.0,
                             as_of: frozen_today() - chrono::Duration::hours(2),
+                            pre: None,
+                            post: None,
+                            overnight: None,
+                            session: None,
                         }),
                     },
                 ],
@@ -4060,7 +4581,7 @@ mod tests {
 
         // The put's chain query fails; GOOT spot arrives for the GOOG lot;
         // NOPE's kline failed so it's missing from spots entirely.
-        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], _lots: &[String]| {
+        let fetcher: MarkFetcher = Arc::new(|reqs: &[MarkRequest], _lots: &[String], _session: MarketSession| {
             MarkBatch {
                 marks: reqs
                     .iter()
@@ -4071,6 +4592,7 @@ mod tests {
                     })
                     .collect(),
                 spots: [("GOOG".to_string(), 370.0)].into_iter().collect(),
+                ext: Default::default(),
             }
         });
         let app = crate::api::build_router(test_state(dir.path(), fetcher));

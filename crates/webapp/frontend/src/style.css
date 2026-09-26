@@ -1403,6 +1403,13 @@ details.adjust .hint-custom { color: var(--accent); }
   margin-top: 0.1rem;
 }
 .hp-lot-row-sub b { font-variant-numeric: tabular-nums; }
+.hp-spot-session {
+  font-style: normal;
+  font-weight: 400;
+  font-size: 0.68rem;
+  color: var(--muted);
+  margin-left: 0.3rem;
+}
 .hp-lot-row-meta {
   display: flex;
   justify-content: space-between;

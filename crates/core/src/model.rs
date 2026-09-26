@@ -7,7 +7,7 @@ use std::{
     io::{self, BufWriter},
 };
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use chrono_tz::America::New_York;
 use csv::Writer;
 use rusqlite::{
@@ -74,6 +74,14 @@ pub struct Candle {
     pub close: f64,     // Closing price.
     pub volume: u32,    // Trading volume.
     pub timestamp: u32, // Timestamp of the candle.
+}
+
+/// One extended-hours session quote (pre-market, post-market, or
+/// overnight): the session's last trade price and when it traded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtQuote {
+    pub price: f64,
+    pub time: DateTime<Utc>,
 }
 
 #[derive(Debug)]

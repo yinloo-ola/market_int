@@ -87,11 +87,25 @@ pub struct ShareLot {
 }
 
 /// The underlying spot quote a lot prices from, captured by the refresh
-/// that covered its symbol.
+/// that covered its symbol. The extended-hours fields are additive
+/// (ADR-0002 pattern): absent on every mark written before the feature and
+/// skipped on serialization when `None`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SpotMark {
     pub spot: f64,
     pub as_of: DateTime<Utc>,
+    /// Pre-market / post-market / overnight last prices captured by a
+    /// closed-session refresh; display-only, never read by view math.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre: Option<crate::model::ExtQuote>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post: Option<crate::model::ExtQuote>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overnight: Option<crate::model::ExtQuote>,
+    /// The extended session active at capture time (`PreMarket`,
+    /// `AfterHours`, `OverNight`) — drives the row's in-session emphasis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 /// The close decision for one holding, as rendered on the card.
@@ -686,6 +700,7 @@ mod tests {
     /// R2: share lots from assignments, priced from the underlying spot.
     mod share_lot {
         use super::*;
+        use chrono::TimeZone;
 
         fn lot(shares: u32, basis: f64) -> ShareLot {
             ShareLot {
@@ -708,6 +723,10 @@ mod tests {
             l.mark = Some(SpotMark {
                 spot: 344.20,
                 as_of: Utc::now(),
+                pre: None,
+                post: None,
+                overnight: None,
+                session: None,
             });
             let v = l.view(today, 2);
             let value = v.value.unwrap();
@@ -721,6 +740,74 @@ mod tests {
             assert_eq!(v.spot, Some(344.20));
             assert!(v.spot_as_of.is_some());
             assert_eq!(v.age_days, 0);
+        }
+
+        /// Extended-hours R2: a pre-feature mark JSON carries no extended
+        /// fields, deserializes with all four `None`, and re-serializes
+        /// byte-equivalently (skip_serializing_if keeps the document clean).
+        #[test]
+        fn spot_mark_round_trips_pre_feature_json() {
+            let json = r#"{"spot":249.87,"as_of":"2026-09-08T15:00:00Z"}"#;
+            let mark: SpotMark = serde_json::from_str(json).unwrap();
+            assert_eq!(mark.spot, 249.87);
+            assert_eq!(mark.pre, None);
+            assert_eq!(mark.post, None);
+            assert_eq!(mark.overnight, None);
+            assert_eq!(mark.session, None);
+            let out = serde_json::to_string(&mark).unwrap();
+            assert_eq!(out, r#"{"spot":249.87,"as_of":"2026-09-08T15:00:00Z"}"#);
+        }
+
+        /// Extended-hours R2: a fully-populated mark round-trips exactly.
+        #[test]
+        fn spot_mark_round_trips_extended_fields() {
+            let ext = crate::model::ExtQuote {
+                price: 251.2,
+                time: Utc.with_ymd_and_hms(2026, 9, 8, 13, 15, 0).unwrap(),
+            };
+            let mark = SpotMark {
+                spot: 249.87,
+                as_of: Utc.with_ymd_and_hms(2026, 9, 8, 22, 0, 0).unwrap(),
+                pre: Some(ext.clone()),
+                post: Some(crate::model::ExtQuote {
+                    price: 250.05,
+                    time: Utc.with_ymd_and_hms(2026, 9, 8, 19, 59, 0).unwrap(),
+                }),
+                overnight: None,
+                session: Some("AfterHours".to_string()),
+            };
+            let json = serde_json::to_string(&mark).unwrap();
+            let back: SpotMark = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, mark);
+            assert!(json.contains("\"session\":\"AfterHours\""));
+            let _ = ext;
+        }
+
+        /// Extended-hours R2: extended fields never move the view math.
+        #[test]
+        fn spot_mark_extended_fields_leave_view_unchanged() {
+            let today = NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
+            let mut l = lot(200, 349.0);
+            l.mark = Some(SpotMark {
+                spot: 344.20,
+                as_of: Utc.with_ymd_and_hms(2026, 9, 8, 22, 0, 0).unwrap(),
+                pre: Some(crate::model::ExtQuote {
+                    price: 345.0,
+                    time: Utc.with_ymd_and_hms(2026, 9, 8, 13, 0, 0).unwrap(),
+                }),
+                post: Some(crate::model::ExtQuote {
+                    price: 343.0,
+                    time: Utc.with_ymd_and_hms(2026, 9, 8, 19, 0, 0).unwrap(),
+                }),
+                overnight: None,
+                session: Some("AfterHours".to_string()),
+            });
+            let with_ext = l.view(today, 2);
+            l.mark.as_mut().unwrap().pre = None;
+            l.mark.as_mut().unwrap().post = None;
+            l.mark.as_mut().unwrap().session = None;
+            let without_ext = l.view(today, 2);
+            assert_eq!(with_ext, without_ext);
         }
 
         /// Unpriced lots report no value/P&L/spot but still compute

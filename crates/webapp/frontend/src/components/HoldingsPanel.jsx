@@ -281,9 +281,14 @@ function PoolRow(props) {
   );
 }
 
+const SPOT_SESSION_LABELS = { PreMarket: "pre", AfterHours: "post", OverNight: "overnight" };
+
 function LotRailRow(props) {
   const l = props.lot;
   const v = () => l.view;
+  // The headline price IS the latest known price (extended-hours R3/R4):
+  // when the mark names a source session, a small muted tag says which one
+  // (e.g. `overnight` on a weekend). No tag = the regular-session price.
   return (
     <div class="hp-slot">
       <div class="hp-lot-row">
@@ -291,7 +296,12 @@ function LotRailRow(props) {
           <span>
             {l.shares} sh {l.symbol}
           </span>
-          <b>{v().spot == null ? "—" : money2(v().spot)}</b>
+          <b>
+            {v().spot == null ? "—" : money2(v().spot)}
+            <Show when={SPOT_SESSION_LABELS[l.mark?.session]}>
+              {(label) => <i class="hp-spot-session">{label()}</i>}
+            </Show>
+          </b>
         </div>
         <div class="hp-lot-row-sub">
           <span>

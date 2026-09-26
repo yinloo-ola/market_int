@@ -886,6 +886,71 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
   ok("tab strip routes to holdings and back", holdingsSelected && tab() === "short");
 }
 
+// ── extended-hours R4: the headline IS the latest price ──
+// One mount, two lots: one priced at the latest close with a source
+// session (AfterHours), one plain (regular mark). Asserts the headline
+// shows the latest price with its session tag, and that plain lots render
+// exactly as before with no session line anywhere.
+{
+  const HP = (await import("./components/HoldingsPanel")).default;
+  const LOT_EXT = {
+    id: "l-ext", symbol: "AAPL", shares: 100, basis_per_share: 231.4,
+    acquired: "2026-08-12",
+    mark: {
+      spot: 249.5, as_of: "2026-09-08T22:00:00Z",
+      pre: { price: 251.2, time: "2026-09-08T13:15:00Z" },
+      post: { price: 249.5, time: "2026-09-08T19:59:00Z" },
+      session: "AfterHours",
+    },
+    view: {
+      value: 24950.0, pl_dollars: 1810.0, pl_pct: 1810 / 23140,
+      capacity: 1, covered: 0, spot: 249.5,
+      spot_as_of: "2026-09-08T22:00:00Z", age_days: 0,
+    },
+  };
+  const LOT_PLAIN = {
+    ...LOT_EXT,
+    id: "l-plain",
+    mark: { spot: 249.87, as_of: "2026-09-08T15:00:00Z" },
+    view: {
+      ...LOT_EXT.view,
+      value: 24987.0, pl_dollars: 1847.0, pl_pct: 1847 / 23140, spot: 249.87,
+    },
+  };
+  const extLedger = {
+    schema_version: 1, positions: [], calls: [],
+    lots: [LOT_EXT, LOT_PLAIN], cash: null, cash_pools: [],
+  };
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify(extLedger), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  const div = document.createElement("div");
+  div.id = "ext-root";
+  document.body.appendChild(div);
+  render(() => <HP />, div);
+  await tick();
+  const rows = qa("#ext-root .hp-lot-row");
+  ok("two lot rows render", rows.length === 2);
+  const head = rows[0]?.querySelector(".hp-lot-row-top b");
+  ok(
+    "headline shows the latest price tagged with its source session",
+    !!head && head.textContent.includes("$249.50") &&
+      head.querySelector(".hp-spot-session")?.textContent === "post"
+  );
+  ok(
+    "no per-session line remains anywhere",
+    !document.querySelector("#ext-root .hp-lot-row-ext")
+  );
+  const plainHead = rows[1]?.querySelector(".hp-lot-row-top b");
+  ok(
+    "plain lot shows the regular price with no tag",
+    !!plainHead && plainHead.textContent.includes("$249.87") &&
+      !plainHead.querySelector(".hp-spot-session")
+  );
+}
+
 console.log(JSON.stringify({ total: checks.length }));
 let failedCount = 0;
 for (const [name, passed] of checks) {

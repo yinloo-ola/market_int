@@ -295,6 +295,35 @@ impl Requester {
         Ok(candles)
     }
 
+    /// Extended-session last closes (extended-hours quotes): a 1-minute
+    /// kline request per symbol chunk with `trade_session` set, returning
+    /// per symbol the last bar's close and timestamp — that session's
+    /// latest trade. Symbols with no bars in the session are absent.
+    pub async fn query_session_closes(
+        &self,
+        symbols: &[&str],
+        trade_session: &str,
+    ) -> Result<Vec<(String, model::ExtQuote)>, RequestError> {
+        let mut out = Vec::new();
+        for batch in kline_batches(symbols) {
+            let biz_content = serde_json::json!({
+                "symbols": batch,
+                "period": "1min",
+                "limit": 5,
+                "trade_session": trade_session,
+            });
+
+            let resp = self
+                .execute_query(METHOD_KLINE, "", Some(biz_content))
+                .await
+                .map_err(|e| {
+                    RequestError::Other(format!("Failed to execute query: {}", e))
+                })?;
+            out.extend(parse_session_closes(&resp.data));
+        }
+        Ok(out)
+    }
+
     pub async fn option_expiration(
         &mut self,
         symbols: &[&str],
@@ -704,10 +733,16 @@ impl Requester {
             )));
         }
 
-        let result: Response = response
-            .json()
+        let body_text = response
+            .text()
             .await
-            .map_err(|e| RequestError::Other(format!("Failed to parse response: {}", e)))?;
+            .map_err(|e| RequestError::Other(format!("Failed to read response body: {}", e)))?;
+        let result: Response = serde_json::from_str(&body_text).map_err(|e| {
+            // An unexpected envelope (e.g. a method-level error without
+            // `data`) would otherwise vanish — surface its head verbatim.
+            let head: String = body_text.chars().take(300).collect();
+            RequestError::Other(format!("Failed to parse response: {e}; body={head}"))
+        })?;
 
         if result.code != 0 {
             return Err(RequestError::Other(format!(
@@ -857,5 +892,121 @@ fn calculate_mid_price(bid: f64, ask: f64, last: f64) -> f64 {
         ask
     } else {
         last
+    }
+}
+
+/// The kline gateway caps symbols per request (documented: 50).
+const KLINE_BATCH_MAX: usize = 50;
+
+/// Chunk symbol lists for the kline gateway's per-request cap.
+fn kline_batches<'a>(symbols: &[&'a str]) -> Vec<Vec<&'a str>> {
+    symbols.chunks(KLINE_BATCH_MAX).map(<[&str]>::to_vec).collect()
+}
+
+/// Parse an extended-session kline response (`data` array of
+/// `{symbol, period, items}`) into per-symbol last-bar closes: the
+/// session's latest trade. Symbols with no bars are absent. Shape
+/// live-verified 2026-09-26 (AAPL PreMarket / AfterHours / OverNight).
+fn parse_session_closes(data: &serde_json::Value) -> Vec<(String, model::ExtQuote)> {
+    let mut out = Vec::new();
+    let Ok(entries) = parse_response_as_array(data, "Invalid response format: expected array")
+    else {
+        return out;
+    };
+    for entry in entries {
+        let Ok(entry) =
+            parse_value_as_object(entry, "Invalid response format: expected object")
+        else {
+            continue;
+        };
+        let Some(symbol) = entry.get("symbol").and_then(|v| v.as_str()).map(str::to_string)
+        else {
+            continue;
+        };
+        let Some(bars) = entry.get("items").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        let Some(last) = bars.iter().filter_map(|b| b.as_object()).next_back() else {
+            continue;
+        };
+        let Some(price) = last.get("close").and_then(|v| v.as_f64()) else {
+            continue;
+        };
+        let Some(ms) = last.get("time").and_then(|v| v.as_f64()) else {
+            continue;
+        };
+        let Some(time) = chrono::DateTime::from_timestamp((ms / 1000.0) as i64, 0) else {
+            continue;
+        };
+        out.push((symbol, model::ExtQuote { price, time }));
+    }
+    out
+}
+
+#[cfg(test)]
+mod session_close_tests {
+    use super::*;
+
+    // Shape captured from the live 2026-09-26 probe (AAPL, all sessions).
+    fn live_shape() -> serde_json::Value {
+        serde_json::json!([
+            {"items":[
+                {"amount":23558.6817,"close":341.44,"high":341.44,"low":341.4001,"open":341.4001,"time":1790380620000u64,"volume":69},
+                {"amount":212046.3457,"close":341.4603,"high":341.4899,"low":341.44,"open":341.4899,"time":1790380740000u64,"volume":621}
+            ],"period":"1min","symbol":"AAPL"},
+            {"items":[],"period":"1min","symbol":"HALTED"}
+        ])
+    }
+
+    #[test]
+    fn parse_takes_last_bar_close_and_time() {
+        let closes = parse_session_closes(&live_shape());
+        assert_eq!(closes.len(), 1, "symbol with no bars is absent");
+        let (symbol, quote) = &closes[0];
+        assert_eq!(symbol, "AAPL");
+        assert_eq!(quote.price, 341.4603, "last bar's close, not the first");
+        assert_eq!(
+            quote.time,
+            chrono::DateTime::from_timestamp(1790380740, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_survives_garbled_entries() {
+        let data = serde_json::json!([
+            {"symbol": "NOITEMS"},
+            {"symbol": "NOPRICE", "items": [{"open": 1.0}]},
+            {"symbol": "BADTIME", "items": [{"close": 1.5, "time": "x"}]},
+            "not-an-object",
+            {"symbol": "OK", "items": [{"close": 2.5, "time": 1790380740000u64}]}
+        ]);
+        let closes = parse_session_closes(&data);
+        assert_eq!(closes.len(), 1);
+        assert_eq!(closes[0].0, "OK");
+        assert_eq!(closes[0].1.price, 2.5);
+    }
+
+    #[test]
+    fn parse_rejects_non_array_data() {
+        assert!(parse_session_closes(&serde_json::json!({"error": 1})).is_empty());
+    }
+
+    #[test]
+    fn kline_batches_chunk_at_the_cap() {
+        let symbols: Vec<&str> = (0..120).map(|_| "S").collect();
+        let batches = kline_batches(&symbols);
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].len(), KLINE_BATCH_MAX);
+        assert_eq!(batches[2].len(), 20);
+    }
+
+    /// The shared execute_query error path surfaces through
+    /// query_session_closes like through every other query method
+    /// (unreachable gateway stub).
+    #[tokio::test]
+    async fn query_session_closes_surfaces_request_errors() {
+        let requester = Requester::pipeline_test_stub();
+        let err = requester.query_session_closes(&["AAPL"], "AfterHours").await;
+        assert!(err.is_err(), "dead gateway must surface a RequestError");
     }
 }

@@ -372,10 +372,11 @@ mod tests {
                     result_path: std::path::PathBuf::from("/tmp/none.json"),
                     holdings_dir: std::path::PathBuf::from("/tmp/holdings"),
                     mark_fetcher: std::sync::Arc::new(
-                        |_: &[crate::holdings::MarkRequest], _: &[String]| {
+                        |_: &[crate::holdings::MarkRequest], _: &[String], _: crate::holdings::MarketSession| {
                             crate::holdings::MarkBatch {
                                 marks: Vec::new(),
                                 spots: Default::default(),
+                ext: Default::default(),
                             }
                         },
                     ),
