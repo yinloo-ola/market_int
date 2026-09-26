@@ -17,6 +17,7 @@ import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import {
   addHolding,
   calledAway,
+  closeLot,
   deleteHolding,
   getHoldings,
   patchCash,
@@ -295,6 +296,21 @@ function LotRailRow(props) {
         <div class="hp-lot-row-top">
           <span>
             {l.shares} sh {l.symbol}
+            {/* Lot IS the shares' pool — the picker re-homes the lot (PATCH,
+                a field rewrite) exactly like a put's picker. */}
+            <Show
+              when={(props.pools?.length ?? 0) > 1}
+              fallback={<Show when={props.showPool}><span class="hp-pool-tag">{l.pool_name ?? "Main"}</span></Show>}
+            >
+              <select
+                class="hp-pool-pick"
+                aria-label={`cash pool for ${l.symbol} lot`}
+                value={l.pool_id ?? props.pools?.[0]?.id ?? ""}
+                onChange={(e) => props.onPoolChange?.(l, e.currentTarget.value)}
+              >
+                <For each={props.pools}>{(p) => <option value={p.id}>{p.name}</option>}</For>
+              </select>
+            </Show>
           </span>
           <b>
             {v().spot == null ? "—" : money2(v().spot)}
@@ -320,17 +336,39 @@ function LotRailRow(props) {
           </i>
         </div>
       </div>
-      <Show when={v().capacity > 0}>
+      <div class="hp-lot-actions">
+        {/* pool pickers render inside both forms when the ledger has 2+ pools */}
+        <Show when={v().capacity > 0}>
+          <button
+            type="button"
+            class="btn-ghost holdings-close-btn"
+            onClick={() => props.onSellDialog(l)}
+          >
+            sell call…
+          </button>
+        </Show>
         <button
           type="button"
           class="btn-ghost holdings-close-btn"
-          onClick={() => props.onSellDialog(l)}
+          onClick={() => props.onCloseDialog(l)}
         >
-          sell call…
+          close…
         </button>
-      </Show>
+      </div>
       <Show when={props.dialogFor("sellCall", l.id)} keyed>
-        {(d) => <SellCallForm lot={d.lot} onDone={props.onDialogDone} onSell={props.onSellCall} />}
+        {(d) => (
+          <SellCallForm lot={d.lot} onDone={props.onDialogDone} onSell={props.onSellCall} />
+        )}
+      </Show>
+      <Show when={props.dialogFor("closeLot", l.id)} keyed>
+        {(d) => (
+          <CloseLotForm
+            lot={d.lot}
+            busy={props.busy}
+            onDone={props.onDialogDone}
+            onClose={props.onCloseLot}
+          />
+        )}
       </Show>
     </div>
   );
@@ -354,6 +392,11 @@ function OptionRow(props) {
             {x.p.symbol} {x.p.strike}
             {x.p.kind === "put" ? "P" : "C"} ×{x.p.contracts}
           </b>
+          {/* Calls don't reserve cash and their pool is fixed at creation —
+              an indicator pill, not the put's reassignment picker. */}
+          <Show when={x.p.kind === "call" && props.showPool}>
+            <span class="hp-pool-tag">{x.p.pool_name}</span>
+          </Show>
           {/* Which pool of cash this put spends (server-resolved name;
               hidden on single-pool ledgers where there's nothing to tell).
               Multi-pool ledgers get a picker — the reservation follows the
@@ -429,7 +472,7 @@ function OptionRow(props) {
         </div>
       </div>
       <Show when={props.dialogFor(x.p.kind, x.p.id)} keyed>
-        {(d) => <ClosePanel d={d} {...props.dialogActions} />}
+        {(d) => <ClosePanel d={d} pools={props.pools} {...props.dialogActions} />}
       </Show>
     </div>
   );
@@ -442,9 +485,10 @@ function OptionRow(props) {
    and the call's coverage footnote differ. */
 function OptionForm(props) {
   const kind = props.kind;
-  // Cash pools (R3): the put form picks the pool that secures the put;
-  // calls have no picker (they inherit the shares' pool server-side).
-  const pools = () => (kind === "put" ? (props.pools ?? []) : []);
+  // Cash pools (R3 + pool-consistency pass): both kinds pick their pool —
+  // a put's reservation and a call's called-away scoping/credit follow it.
+  // (A call sold from a lot row inherits the lot's pool — no picker there.)
+  const pools = () => props.pools ?? [];
   const [f, setF] = createSignal({
     symbol: "",
     strike: "",
@@ -468,9 +512,10 @@ function OptionForm(props) {
         if (!valid() || props.busy?.()) return;
         props.onAdd({
           ...(kind === "call" ? { kind: "call" } : {}),
-          ...(kind === "put" && pools().length > 0
-            ? { pool_id: f().pool_id || pools()[0]?.id }
-            : {}),
+          // Both kinds: a put's reservation and a call's future
+          // called-away scoping/credit follow this pool. A call sold from
+          // a lot row inherits the lot's pool instead (no field here).
+          ...(pools().length > 0 ? { pool_id: f().pool_id || pools()[0]?.id } : {}),
           symbol: f().symbol.trim().toUpperCase(),
           strike: Number(f().strike),
           premium: Number(f().premium),
@@ -534,11 +579,13 @@ function OptionForm(props) {
 }
 
 function AddLotForm(props) {
+  const pools = () => props.pools ?? [];
   const [f, setF] = createSignal({
     symbol: "",
     shares: "",
     basis_per_share: "",
     acquired: todayET(),
+    pool_id: pools()[0]?.id ?? "",
   });
   const set = (k) => (e) => setF({ ...f(), [k]: e.target.value });
   const valid = () =>
@@ -555,6 +602,9 @@ function AddLotForm(props) {
           shares: Math.trunc(Number(f().shares)),
           basis_per_share: Number(f().basis_per_share),
           acquired: f().acquired,
+          // Creating a lot spends real money (shares × basis) — the chosen
+          // pool is debited server-side (pool-consistency pass).
+          ...(pools().length > 0 ? { pool_id: f().pool_id || pools()[0]?.id } : {}),
         });
       }}
     >
@@ -568,6 +618,14 @@ function AddLotForm(props) {
         basis / share
         <input inputmode="decimal" placeholder="e.g. 349.00" value={f().basis_per_share} onInput={set("basis_per_share")} />
       </label>
+      <Show when={pools().length > 1}>
+        <label>
+          pool (deduct {Math.trunc(Number(f().shares) * Number(f().basis_per_share) || 0).toLocaleString()} from)
+          <select value={f().pool_id} onInput={set("pool_id")}>
+            <For each={pools()}>{(p) => <option value={p.id}>{p.name}</option>}</For>
+          </select>
+        </label>
+      </Show>
       <label>
         acquired <input type="date" value={f().acquired} onInput={set("acquired")} />
       </label>
@@ -636,6 +694,57 @@ function SellCallForm(props) {
         </label>
         <button type="submit" class="btn btn-primary" disabled={!valid() || props.busy?.()}>
           Sell call
+        </button>
+        <button type="button" class="btn" onClick={props.onDone}>
+          Cancel
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function CloseLotForm(props) {
+  const lot = props.lot;
+  const [f, setF] = createSignal({ shares: String(lot.shares), price: "" });
+  const set = (k) => (e) => setF({ ...f(), [k]: e.target.value });
+  const shares = () => Math.trunc(Number(f().shares));
+  const price = () => Number(f().price);
+  const valid = () =>
+    Number.isInteger(shares()) && shares() >= 1 && shares() <= lot.shares && price() > 0;
+  const proceeds = () => (valid() ? shares() * price() : null);
+  // Proceeds return to the lot's own pool — no override (the money
+  // physically lands in the account where the shares were held).
+  return (
+    <div class="holdings-outcome">
+      <div class="holdings-outcome-head">
+        Close lot · {lot.shares} sh {lot.symbol}
+      </div>
+      <form
+        class="holdings-add"
+        onKeyDown={(e) => {
+          if (e.key === "Escape") props.onDone();
+        }}
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!valid() || props.busy?.()) return;
+          props.onClose(lot, shares(), price());
+        }}
+      >
+        <label>
+          shares
+          <input inputmode="numeric" value={f().shares} onInput={set("shares")} />
+        </label>
+        <label>
+          sale price
+          <input inputmode="decimal" placeholder="e.g. 360.00" value={f().price} onInput={set("price")} />
+        </label>
+        <Show when={proceeds() != null}>
+          <i class="holdings-preview">
+            {`${shares()} sh × $${price().toFixed(2)} → $${proceeds().toFixed(2)} → pool ${lot.pool_name ?? "Main"}`}
+          </i>
+        </Show>
+        <button type="submit" class="btn btn-primary" disabled={!valid() || props.busy?.()}>
+          Close {shares() === lot.shares ? "lot" : `${shares()} sh`}
         </button>
         <button type="button" class="btn" onClick={props.onDone}>
           Cancel
@@ -732,7 +841,11 @@ function PutCloseDialog(props) {
 /* Stage 2 of the assigned flow: the prefilled lot form. Cancelling here
    (or anywhere before it) sends no request — the put stays. */
 function AssignedLotForm(props) {
-  const [f, setF] = createSignal({ ...props.d.prefill });
+  const pools = () => props.pools ?? [];
+  const [f, setF] = createSignal({
+    ...props.d.prefill,
+    pool_id: props.d.pos?.pool_id ?? pools()[0]?.id ?? "",
+  });
   const set = (k) => (e) => setF({ ...f(), [k]: e.target.value });
   const valid = () =>
     f().symbol.trim() && Number(f().shares) > 0 && Number(f().basis_per_share) > 0;
@@ -753,6 +866,9 @@ function AssignedLotForm(props) {
               basis_per_share: Number(f().basis_per_share),
               acquired: f().acquired,
               assigned_from: props.d.pos.id,
+              ...(pools().length > 0
+                ? { pool_id: f().pool_id || pools()[0]?.id }
+                : {}),
             },
           );
         }}
@@ -763,6 +879,14 @@ function AssignedLotForm(props) {
         <label>
           shares <input inputmode="numeric" value={f().shares} onInput={set("shares")} />
         </label>
+        <Show when={pools().length > 1}>
+          <label>
+            pool (deduct strike × 100 × contracts from)
+            <select value={f().pool_id} onInput={set("pool_id")}>
+              <For each={pools()}>{(p) => <option value={p.id}>{p.name}</option>}</For>
+            </select>
+          </label>
+        </Show>
         <label>
           basis / share
           <input inputmode="decimal" value={f().basis_per_share} onInput={set("basis_per_share")} />
@@ -865,7 +989,7 @@ function CallCloseDialog(props) {
 function ClosePanel(props) {
   return props.d.type === "put" ? (
     props.d.stage === "lot" ? (
-      <AssignedLotForm d={props.d} busy={props.busy} onDone={props.onDone} onAssign={props.onAssign} />
+      <AssignedLotForm d={props.d} pools={props.pools} busy={props.busy} onDone={props.onDone} onAssign={props.onAssign} />
     ) : (
       <PutCloseDialog d={props.d} busy={props.busy} onDone={props.onDone} onConfirmPut={props.onConfirmPut} />
     )
@@ -1092,6 +1216,15 @@ export default function HoldingsPanel() {
     await load();
   };
 
+  /* Move a lot to another pool (PATCH): the lot IS the shares' pool, so
+     future called-away scoping follows — no stored cash moves. */
+  const onLotPoolChange = async (lot, poolId) => {
+    const res = await run(() => patchHoldingPool(lot.id, poolId));
+    if (!res) return;
+    flash(`${lot.symbol} lot moved to ${res.lot?.pool_name ?? "the pool"}.`);
+    await load();
+  };
+
   const dialogActions = {
     busy,
     onDone: () => setDialog(null),
@@ -1159,7 +1292,11 @@ export default function HoldingsPanel() {
                   lot={l}
                   dialogFor={dialogFor}
                   busy={busy}
+                  pools={pools()}
+                  showPool={pools().length > 1}
+                  onPoolChange={onLotPoolChange}
                   onSellDialog={(lot) => setDialog({ type: "sellCall", lot })}
+                  onCloseDialog={(lot) => setDialog({ type: "closeLot", lot })}
                   onDialogDone={() => setDialog(null)}
                   onSellCall={(lot, fields) =>
                     onAdd(
@@ -1167,6 +1304,15 @@ export default function HoldingsPanel() {
                       `Sold ${fields.symbol} ${fields.strike}C ×${fields.contracts} — Refresh marks to price.`
                     )
                   }
+                  onCloseLot={async (lot, shares, price, poolId) => {
+                    const res = await run(() => closeLot(lot.id, shares, price, poolId));
+                    if (!res) return;
+                    flash(
+                      `Closed ${shares} sh ${lot.symbol} — $${(shares * price).toFixed(2)} to the pool.`
+                    );
+                    setDialog(null);
+                    await load();
+                  }}
                 />
               )}
             </For>
@@ -1215,6 +1361,7 @@ export default function HoldingsPanel() {
     >
       {id === "lots" ? (
         <AddLotForm
+          pools={pools()}
           busy={busy}
           onDone={() => setDialog(null)}
           onAdd={(f) => onAdd(f, `Recorded ${f.shares} sh ${f.symbol}.`)}

@@ -38,7 +38,9 @@ frontend build.
   - `src/greeks.rs` — Black-Scholes Greeks (cumulative_normal,
     black_scholes_put, put_delta, implied_volatility)
   - `src/tiger/` — Tiger API client (RSA-signed; option chains, earnings
-    calendar, quotes)
+    calendar, quotes, extended-session closes via kline `trade_session` —
+    the real-time `brief` snapshot is permission-gated per market, probed
+    2026-09-26)
   - `src/store/` — SQLite persistence (candle, max_drop, sharpe_ratio,
     price_percentile, trend, option_chain, earnings, sqlite)
   - `src/constants.rs` — tunables incl `API_BATCH_SIZE`,
@@ -55,10 +57,17 @@ frontend build.
   cash: /api/holdings CRUD with `kind` dispatch, PATCH cash, DELETE
   everywhere, POST refresh via the `MarkBatch{marks, spots}` seam
   (per-side chain queries + lot-symbol spot map), single-rewrite
-  assignment (`assigned_from`) and called-away FIFO reduction; named
+  assignment (`assigned_from`) and called-away FIFO reduction; manual lot
+  close (`POST /api/holdings/close` — partial/full reduction + pool
+  proceeds) and called-away strike credits; lots price at the latest known
+  price (extended-session kline closes via kline `trade_session`,
+  session-tagged, gated by `et_market_session` — 2026-09-26); named
   cash pools (2026-09-23): `cash_pools` array + `pool_id` on puts/lots,
   per-pool reserved/free, pool CRUD + pool-aware PATCH, puts reserve
-  strike×100×contracts against their pool server-side; schema
+  strike×100×contracts against their pool server-side; pool-consistency
+  model (2026-09-26): pools are broker accounts — lot creation debits its
+  cost from a chosen pool, assignment debit and calls follow the put/lot's
+  pool, lots PATCH-reassignable, close credits the lot's pool; schema
   stays v1 by additive serde defaults — docs/adr/0002; JSON document per
   Firebase UID under /data/webapp/holdings/),
   `assets.rs` embedded frontend) + vite/Solid frontend under `frontend/`

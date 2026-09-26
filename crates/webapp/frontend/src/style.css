@@ -1403,6 +1403,27 @@ details.adjust .hint-custom { color: var(--accent); }
   margin-top: 0.1rem;
 }
 .hp-lot-row-sub b { font-variant-numeric: tabular-nums; }
+.hp-lot-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.15rem;
+}
+.holdings-preview {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-style: normal;
+}
+.hp-pool-tag {
+  display: inline-block;
+  padding: 0 0.35rem;
+  border-radius: 0.5rem;
+  background: var(--band-bg);
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 600;
+  margin-left: 0.3rem;
+  vertical-align: 0.05em;
+}
 .hp-spot-session {
   font-style: normal;
   font-weight: 400;
@@ -1503,10 +1524,20 @@ details.adjust .hint-custom { color: var(--accent); }
      wrap-by-accident depending on name lengths is not okay. */
   .hp-list-pos { justify-content: flex-start; }
   .hp-list-pos .hp-pool-pick { margin-left: auto; }
+  .hp-list-pos .hp-pool-tag { margin-left: auto; }
   .hp-list-pos > i { flex: 1 1 100%; }
   .hp-list-pace { display: flex; flex-direction: column; gap: 0.15rem; }
   .hp-list-status { flex-direction: row; flex-wrap: wrap; }
   .hp-list-row .holdings-close-btn { align-self: flex-end; }
+  /* Lot row: pool picker pinned to the row-head's right edge, matching
+     the put row (the price stays rightmost, picker beside it). */
+  .hp-lot-row-top > span:first-of-type {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex: 1;
+  }
+  .hp-lot-row-top .hp-pool-pick { margin-left: auto; }
 }
 @media (max-width: 720px) {
   .hp-cash-editor { margin-left: 0; }

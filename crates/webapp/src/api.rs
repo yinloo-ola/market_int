@@ -91,6 +91,10 @@ pub fn build_router(state: AppState) -> axum::Router {
             axum::routing::post(crate::holdings::holdings_called_away),
         )
         .route(
+            "/api/holdings/close",
+            axum::routing::post(crate::holdings::holdings_close),
+        )
+        .route(
             "/api/holdings/{id}",
             axum::routing::patch(crate::holdings::holdings_patch)
                 .delete(crate::holdings::holdings_delete),

@@ -90,3 +90,15 @@ Retire rules that no longer apply during finalizing.
   **semantics**. Before trusting a new query mode in production, probe the
   real endpoint once with the actual parameters: a server-side filter can
   return empty rows for exactly the cases the feature exists to surface.
+  The probe must also cover the endpoint's **name and the account's
+  entitlement** — a documented capability can ship under a different wire
+  name, and a recognized method can still be permission-gated per market
+  (design parsers against captured live bodies, never against docs alone).
+
+## Product Modeling
+
+- In a bookkeeping UI, offer a location/account choice only where the
+  physical movement genuinely varies; derive the destination from where the
+  position physically lives, and route proceeds back to that same place.
+  A choice the user cannot exercise in reality is a fiction the ledger
+  will eventually record.

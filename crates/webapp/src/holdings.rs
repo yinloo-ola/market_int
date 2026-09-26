@@ -734,7 +734,7 @@ fn covered_contracts(doc: &HoldingsDocument, symbol: &str) -> u32 {
         .sum()
 }
 
-fn lot_json(l: &market_int_core::holdings::ShareLot, today: chrono::NaiveDate, covered: u32) -> serde_json::Value {
+fn lot_json(l: &market_int_core::holdings::ShareLot, today: chrono::NaiveDate, covered: u32, doc: &HoldingsDocument) -> serde_json::Value {
     let mark = l.mark.as_ref().map(|m| {
         // Extended-hours fields ride additively (absent when None, matching
         // the persisted document's skip_serializing_if shape).
@@ -768,6 +768,9 @@ fn lot_json(l: &market_int_core::holdings::ShareLot, today: chrono::NaiveDate, c
     if let Some(pool) = &l.pool_id {
         v["pool_id"] = json!(pool);
     }
+    // Shape parity with puts/calls: the resolved pool name rides along
+    // (the lot pill's text; "Main" while the ledger is the legacy shape).
+    v["pool_name"] = json!(pool_name_of(doc, &l.pool_id));
     v
 }
 
@@ -790,7 +793,7 @@ fn ledger_json(doc: &HoldingsDocument, today: chrono::NaiveDate) -> serde_json::
         "lots": doc
             .lots
             .iter()
-            .map(|l| lot_json(l, today, covered_contracts(doc, &l.symbol)))
+            .map(|l| lot_json(l, today, covered_contracts(doc, &l.symbol), doc))
             .collect::<Vec<_>>(),
         // The manual balance and its derived numbers (R3/R6): `cash` is
         // null until first set — `cash_free` then stays null with it,
@@ -1079,7 +1082,7 @@ async fn add_lot(st: crate::api::AppState, uid: String, v: &serde_json::Value) -
     materialize_default_pool(&mut doc);
     // The assignment's cash move happens on the PUT's pool: strike×100
     // leaves the pool that reserved it (cash pools R4/R6).
-    let mut assigned_cash_move: Option<(String, f64)> = None;
+    let mut assigned_cash_move: Option<f64> = None;
     let mut lot = lot;
     if let Some(put_id) = &assigned_from {
         let Some(put) = doc.positions.iter().find(|p| p.id == *put_id) else {
@@ -1099,10 +1102,7 @@ async fn add_lot(st: crate::api::AppState, uid: String, v: &serde_json::Value) -
                 ),
             );
         }
-        assigned_cash_move = Some((
-            effective_pool_id(&doc, &put.pool_id),
-            put.strike * 100.0 * put.contracts as f64,
-        ));
+            assigned_cash_move = Some(put.strike * 100.0 * put.contracts as f64);
         if lot.pool_id.is_none() {
             lot.pool_id = put.pool_id.clone();
         }
@@ -1121,18 +1121,24 @@ async fn add_lot(st: crate::api::AppState, uid: String, v: &serde_json::Value) -
         None => None,
     };
     lot.pool_id = pool_id;
-    // Strike×100 leaves the put's pool only when the put itself carried
-    // one (a None-pool put against the default pool still moves ITS
-    // effective pool's cash).
-    if let Some((pool_id, amount)) = assigned_cash_move {
-        match doc.cash_pools.iter_mut().find(|p| p.id == pool_id) {
+    // The cash move leaves the lot's FINAL pool (an explicit override
+    // moves the debit with it): an assignment spends strike×100 — the
+    // shares the put delivered; a manual purchase spends its cost
+    // (shares × basis). Only the put's-pool dangling case is unreachable
+    // by validation — moving the money silently would hide it.
+    let debit = if assigned_from.is_some() {
+        assigned_cash_move
+    } else {
+        Some(lot.shares as f64 * lot.basis_per_share)
+    };
+    if let Some(amount) = debit {
+        let debit_pool = effective_pool_id(&doc, &lot.pool_id);
+        match doc.cash_pools.iter_mut().find(|p| p.id == debit_pool) {
             Some(pool) => pool.cash -= amount,
-            // Only reachable via hand-edited data (a put naming a pool that
-            // no longer exists) — moving the money silently would hide it.
             None => {
                 return error_response(
                     StatusCode::CONFLICT,
-                    &format!("the put's pool {pool_id:?} no longer exists — reassign the put's pool first"),
+                    &format!("the put's pool {debit_pool:?} no longer exists — reassign the put's pool first"),
                 )
             }
         }
@@ -1148,17 +1154,14 @@ async fn add_lot(st: crate::api::AppState, uid: String, v: &serde_json::Value) -
     // Covered count from the post-mutation document — the 201 reflects the
     // real coverage, not a placeholder.
     let covered = covered_contracts(&doc, &lot.symbol);
+    let body = json!({ "lot": lot_json(&lot, today_et(st.clock), covered, &doc) });
     if let Err(err) = write_ledger_off_thread(st.holdings_dir.clone(), uid, doc).await {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("ledger write failed: {err}"),
         );
     }
-    (
-        StatusCode::CREATED,
-        Json(json!({ "lot": lot_json(&lot, today_et(st.clock), covered) })),
-    )
-        .into_response()
+    (StatusCode::CREATED, Json(body)).into_response()
 }
 
 /// Per-process sequence for server-generated ids (NEXT_SEQ precedent).
@@ -1321,10 +1324,11 @@ pub(crate) async fn holdings_delete(
 }
 
 /// `PATCH /api/holdings/{id}` — reassign an open put to a cash pool
-/// (`{pool_id}`; cash pools R4). Puts only: covered calls inherit the
-/// covering lot's pool and a lot IS the shares' pool, so neither takes a
-/// picker. A put's reservation is derived from `pool_id` at read time, so
-/// the move is a field rewrite — no stored cash changes hands.
+/// (`{pool_id}`; cash pools R4 + pool-consistency pass). Puts and lots
+/// take a picker — a put's reservation and a lot's future called-away
+/// scoping are both derived from `pool_id` at read time, so the move is a
+/// field rewrite with no stored cash changing hands. Covered calls inherit
+/// the covering lot's pool and take no picker.
 pub(crate) async fn holdings_patch(
     State(st): State<crate::api::AppState>,
     AxPath(id): AxPath<String>,
@@ -1357,22 +1361,32 @@ pub(crate) async fn holdings_patch(
             "covered calls inherit the shares' pool — reassign the covering lot",
         );
     }
-    if doc.lots.iter().any(|l| l.id == id) {
+    if !doc.cash_pools.iter().any(|p| p.id == pool_id) {
         return error_response(
             StatusCode::BAD_REQUEST,
-            "a lot IS the shares' pool — covered calls follow it",
+            &format!("unknown pool_id {pool_id:?}"),
         );
+    }
+    // Lot reassignment (pool-consistency pass): a lot IS the shares' pool;
+    // moving it moves future called-away scoping — stored cash never moves.
+    if let Some(li) = doc.lots.iter().position(|l| l.id == id) {
+        doc.lots[li].pool_id = Some(pool_id.clone());
+        let lot = doc.lots[li].clone();
+        let body =
+            json!({ "lot": lot_json(&lot, today_et(st.clock), covered_contracts(&doc, &lot.symbol), &doc) });
+        sync_scalar_cash(&mut doc);
+        if let Err(err) = write_ledger_off_thread(st.holdings_dir.clone(), uid, doc).await {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("ledger write failed: {err}"),
+            );
+        }
+        return Json(body).into_response();
     }
     let updated = {
         let Some(pos) = doc.positions.iter_mut().find(|p| p.id == id) else {
             return error_response(StatusCode::NOT_FOUND, "no such holding");
         };
-        if !doc.cash_pools.iter().any(|p| p.id == pool_id) {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("unknown pool_id {pool_id:?}"),
-            );
-        }
         pos.pool_id = Some(pool_id.clone());
         pos.clone()
     };
@@ -1469,6 +1483,97 @@ pub(crate) async fn holdings_patch_cash(
     .into_response()
 }
 
+/// `POST /api/holdings/close` — a manual lot close (close-lot R1): reduce
+/// the lot by `shares` (removed at zero) and credit the proceeds
+/// (`price × shares`) to the lot's pool in ONE rewrite. Unknown lot → 404;
+/// zero/negative shares, shares beyond the lot, or a non-positive price →
+/// 400; nothing writes on any error.
+pub(crate) async fn holdings_close(
+    State(st): State<crate::api::AppState>,
+    req: Request,
+) -> Response {
+    let uid = uid_of(&req);
+    let bytes = match axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "unreadable body"),
+    };
+    let v: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "body is not JSON"),
+    };
+    let Some(lot_id) = v.get("lot_id").and_then(|x| x.as_str()).map(|s| s.to_string()) else {
+        return error_response(StatusCode::BAD_REQUEST, "missing lot_id");
+    };
+    // as_u64 rejects negatives and fractions in one move; zero is a no-op,
+    // not a close.
+    let Some(shares) = v.get("shares").and_then(|x| x.as_u64()) else {
+        return error_response(StatusCode::BAD_REQUEST, "shares must be a positive integer");
+    };
+    if shares == 0 {
+        return error_response(StatusCode::BAD_REQUEST, "shares must be positive");
+    }
+    let Some(price) = v.get("price").and_then(|x| x.as_f64()).filter(|p| *p > 0.0) else {
+        return error_response(StatusCode::BAD_REQUEST, "price must be positive");
+    };
+    let mut doc = match read_ledger_off_thread(st.holdings_dir.clone(), uid.clone()).await {
+        Ok(d) => d,
+        Err(err) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("ledger read failed: {err}"),
+            )
+        }
+    };
+    let Some(idx) = doc.lots.iter().position(|l| l.id == lot_id) else {
+        return error_response(StatusCode::NOT_FOUND, "no such lot");
+    };
+    let held = doc.lots[idx].shares as u64;
+    if shares > held {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("close shares exceed held shares ({held})"),
+        );
+    }
+    let proceeds = price * shares as f64;
+
+    // One rewrite: reduce the lot (drop at zero) and credit ITS pool —
+    // proceeds return to the same pool the shares belong to (user
+    // decision; the dangling-pool fallback below stays as a safety net).
+    materialize_default_pool(&mut doc);
+    let pool_id = effective_pool_id(&doc, &doc.lots[idx].pool_id);
+    let reduced_shares = doc.lots[idx].shares - shares as u32;
+    if reduced_shares == 0 {
+        doc.lots.remove(idx);
+    } else {
+        doc.lots[idx].shares = reduced_shares;
+    }
+    // Credit the lot's pool; a dangling pool_id (its pool was deleted)
+    // falls back to the default pool so proceeds can never vanish.
+    let pool_slot = match doc.cash_pools.iter_mut().find(|p| p.id == pool_id) {
+        Some(pool) => Some(pool),
+        None => doc.cash_pools.first_mut(),
+    };
+    if let Some(pool) = pool_slot {
+        pool.cash += proceeds;
+    }
+    sync_scalar_cash(&mut doc);
+
+    if let Err(err) = write_ledger_off_thread(st.holdings_dir.clone(), uid, doc.clone()).await {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("ledger write failed: {err}"),
+        );
+    }
+    let mut body = ledger_json(&doc, today_et(st.clock));
+    if let serde_json::Value::Object(map) = &mut body {
+        map.insert(
+            "close".to_string(),
+            json!({ "closed": true, "shares": shares, "proceeds": proceeds }),
+        );
+    }
+    Json(body).into_response()
+}
+
 /// `POST /api/holdings/called-away` — the call was assigned: remove it and
 /// reduce the covering lot by `contracts × 100` shares (FIFO, core
 /// `apply_called_away`) in ONE rewrite (R9). No covering lot is a 200
@@ -1503,7 +1608,7 @@ pub(crate) async fn holdings_called_away(
     let Some(call_h) = doc.calls.iter().find(|c| c.id == call_id) else {
         return error_response(StatusCode::NOT_FOUND, "no such call");
     };
-    let (symbol, contracts) = (call_h.symbol.clone(), call_h.contracts);
+    let (symbol, contracts, call_strike) = (call_h.symbol.clone(), call_h.contracts, call_h.strike);
     let need = contracts as u64 * 100;
 
     // One rewrite: the call goes and the FIFO reduction applies together —
@@ -1543,6 +1648,15 @@ pub(crate) async fn holdings_called_away(
                 }
             }
             doc.lots = merged;
+            // The shares were sold at the strike (close-lot R2): the
+            // proceeds credit the call's pool in the same rewrite — the
+            // assignment debited strike×100×contracts there on entry.
+            materialize_default_pool(&mut doc);
+            let proceeds = call_strike * 100.0 * contracts as f64;
+            if let Some(pool) = doc.cash_pools.iter_mut().find(|p| p.id == call_pool) {
+                pool.cash += proceeds;
+            }
+            sync_scalar_cash(&mut doc);
             (true, None)
         }
         None => (
@@ -2275,6 +2389,252 @@ mod tests {
         );
         assert!(!file.contains("\"session\""), "no extended data persisted: {file}");
     }
+
+    // ── close-lot: feature-acceptance E2E ──────────────────────────
+    // Design doc `## Feature acceptance`: partial close reduces the lot and
+    // credits the pool; full close removes it; called-away credits strike
+    // proceeds in the same rewrite; invalid closes never write.
+
+    fn write_close_ledger(dir: &std::path::Path, uid: &str) {
+        let holdings_dir = dir.join("holdings");
+        std::fs::create_dir_all(&holdings_dir).unwrap();
+        std::fs::write(
+            holdings_dir.join(format!("{uid}.json")),
+            r#"{"schema_version":1,"positions":[],"calls":[{"id":"c1","symbol":"GOOG","strike":360.0,"premium":1.2,"contracts":2,"sold":"2026-09-04","expiry":"2026-09-30"}],"lots":[{"id":"l1","symbol":"GOOG","shares":200,"basis_per_share":349.0,"acquired":"2026-08-12","pool_id":"p1"}],"cash":null,"cash_pools":[{"id":"p1","name":"IBKR","cash":10000.0},{"id":"p2","name":"Tastytrade","cash":0.0}]}"#,
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn feature_acceptance_close_lot() {
+        let dir = tempfile::tempdir().unwrap();
+        write_close_ledger(dir.path(), "test-uid");
+
+        // ── Scenario 1: partial close 100 @ 360 → lot 100 sh, pool +36,000.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings/close",
+            Some(json!({"lot_id": "l1", "shares": 100, "price": 360.0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "partial close: {v}");
+        assert_eq!(v["close"]["closed"], true);
+        assert_eq!(v["close"]["shares"], 100);
+        assert_eq!(v["close"]["proceeds"], 36000.0);
+        assert_eq!(v["lots"][0]["shares"], 100);
+        assert_eq!(v["cash_pools"][0]["cash"], 46000.0, "proceeds credited");
+        let lot_view = &v["lots"][0]["view"];
+        assert_eq!(lot_view["covered"], 2, "covered = the written calls");
+        assert_eq!(lot_view["capacity"], 1, "capacity recomputes from shares");
+
+        // ── Scenario 2: close the remaining 100 → lot gone, call remains.
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings/close",
+            Some(json!({"lot_id": "l1", "shares": 100, "price": 360.0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "full close: {v}");
+        assert_eq!(v["lots"].as_array().unwrap().len(), 0, "lot removed at 0");
+        assert_eq!(v["cash_pools"][0]["cash"], 82000.0, "46,000 + 36,000");
+        assert_eq!(v["cash_pools"][1]["cash"], 0.0, "other pool untouched");
+        assert_eq!(v["calls"].as_array().unwrap().len(), 1, "call untouched");
+
+        // ── Scenario 4: invalid closes — 404/400, byte-unchanged file.
+        let file_before =
+            std::fs::read_to_string(dir.path().join("holdings/test-uid.json")).unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(
+            app,
+            "POST",
+            "/api/holdings/close",
+            Some(json!({"lot_id": "nope", "shares": 1, "price": 1.0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "unknown lot");
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(
+            app,
+            "POST",
+            "/api/holdings/close",
+            Some(json!({"lot_id": "l1", "shares": 0, "price": 1.0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "zero shares");
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(
+            app,
+            "POST",
+            "/api/holdings/close",
+            Some(json!({"lot_id": "l1", "shares": -5, "price": 1.0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "negative shares");
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(
+            app,
+            "POST",
+            "/api/holdings/close",
+            Some(json!({"lot_id": "l1", "shares": 1, "price": 0.0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "non-positive price");
+        let file_after =
+            std::fs::read_to_string(dir.path().join("holdings/test-uid.json")).unwrap();
+        assert_eq!(file_before, file_after, "failed closes never write");
+
+        // ── Scenario 3: called-away reduces AND credits strike proceeds in
+        // one rewrite (fresh ledger: 200 sh lot + 360×2 call, pool 10,000).
+        let dir2 = tempfile::tempdir().unwrap();
+        write_close_ledger(dir2.path(), "test-uid");
+        let app = crate::api::build_router(test_state(dir2.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings/called-away",
+            Some(json!({"call_id": "c1"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "called away: {v}");
+        assert_eq!(v["reduced"], true);
+        // The called-away response is minimal; the ledger state is read back
+        // (what the UI's reload does).
+        let app = crate::api::build_router(test_state(dir2.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["lots"].as_array().unwrap().len(), 0, "200 − 200 = gone");
+        assert_eq!(
+            v["cash_pools"][0]["cash"], 82000.0,
+            "strike 360 × 200 sh credited"
+        );
+    }
+
+    /// Called-away's strike credit on a LEGACY scalar ledger (no pools):
+    /// the default pool materializes seeded with the scalar, the credit
+    /// lands there, and the scalar resyncs to the pool sum (close-lot R2).
+    #[tokio::test]
+    async fn called_away_credit_materializes_the_default_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let holdings_dir = dir.path().join("holdings");
+        std::fs::create_dir_all(&holdings_dir).unwrap();
+        std::fs::write(
+            holdings_dir.join("test-uid.json"),
+            r#"{"schema_version":1,"positions":[],"calls":[{"id":"c1","symbol":"GOOG","strike":360.0,"premium":1.2,"contracts":1,"sold":"2026-09-04","expiry":"2026-09-30"}],"lots":[{"id":"l1","symbol":"GOOG","shares":100,"basis_per_share":349.0,"acquired":"2026-08-12"}],"cash":5000.0}"#,
+        )
+        .unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings/called-away",
+            Some(json!({"call_id": "c1"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["reduced"], true);
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let pools = v["cash_pools"].as_array().unwrap();
+        assert_eq!(pools.len(), 1, "the default pool materialized");
+        assert_eq!(pools[0]["id"], "main");
+        assert_eq!(pools[0]["cash"], 41000.0, "5000 + strike 360 × 100");
+        assert_eq!(v["cash"], 41000.0, "legacy scalar resynced to the pool sum");
+    }
+
+    /// PATCH on a lot reassigns its pool (lot pill = picker): a field
+    /// rewrite — stored cash never moves, coverage unchanged.
+    #[tokio::test]
+    async fn patch_lot_pool_reassigns() {
+        let dir = tempfile::tempdir().unwrap();
+        write_close_ledger(dir.path(), "test-uid");
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "PATCH",
+            "/api/holdings/l1",
+            Some(json!({"pool_id": "p2"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["lot"]["pool_id"], "p2");
+        assert_eq!(v["lot"]["pool_name"], "Tastytrade");
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (_, v) = call(app, "GET", "/api/holdings", None).await;
+        assert_eq!(v["lots"][0]["pool_name"], "Tastytrade", "persisted");
+        assert_eq!(v["cash_pools"][0]["cash"], 10000.0, "no cash moves");
+        assert_eq!(v["cash_pools"][1]["cash"], 0.0, "no cash moves (p2)");
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, _) = call(
+            app,
+            "PATCH",
+            "/api/holdings/c1",
+            Some(json!({"pool_id": "p2"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "calls stay inherited");
+    }
+
+    /// Manual lot creation debits its cost from the chosen pool
+    /// (pool-consistency pass): 200 × 349 = 69,800 leaves p1; the other
+    /// pool is untouched; the scalar resyncs.
+    #[tokio::test]
+    async fn lot_add_debits_cost_from_chosen_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        write_close_ledger(dir.path(), "test-uid");
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings",
+            Some(json!({
+                "kind": "lot", "symbol": "MSFT", "shares": 200,
+                "basis_per_share": 349.0, "acquired": "2026-09-01",
+                "pool_id": "p1"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "lot add: {v}");
+        assert_eq!(v["lot"]["pool_name"], "IBKR", "pool_name shape parity");
+        // Debit verified via GET (the add response carries the lot only).
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (_, v) = call(app, "GET", "/api/holdings", None).await;
+        let pools = v["cash_pools"].as_array().unwrap();
+        assert_eq!(pools[0]["cash"], 10000.0 - 69800.0, "cost debited");
+        assert_eq!(pools[1]["cash"], 0.0, "other pool untouched");
+        assert_eq!(v["cash"], -59800.0, "scalar resynced (negative is honest)");
+    }
+
+    /// A lot whose pool_id dangles (its pool was deleted) still credits:
+    /// the proceeds fall back to the default pool — never vanish.
+    #[tokio::test]
+    async fn close_with_dangling_pool_id_credits_the_default_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let holdings_dir = dir.path().join("holdings");
+        std::fs::create_dir_all(&holdings_dir).unwrap();
+        std::fs::write(
+            holdings_dir.join("test-uid.json"),
+            r#"{"schema_version":1,"positions":[],"calls":[],"lots":[{"id":"l1","symbol":"GOOG","shares":100,"basis_per_share":349.0,"acquired":"2026-08-12","pool_id":"gone"}],"cash":1000.0,"cash_pools":[{"id":"main","name":"Main","cash":1000.0}]}"#,
+        )
+        .unwrap();
+        let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+        let (status, v) = call(
+            app,
+            "POST",
+            "/api/holdings/close",
+            Some(json!({"lot_id": "l1", "shares": 100, "price": 350.0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        let pools = v["cash_pools"].as_array().unwrap();
+        assert_eq!(pools[0]["cash"], 36000.0, "1000 + 350 × 100, fallback pool");
+        assert_eq!(v["lots"].as_array().unwrap().len(), 0, "full close removes");
+    }
+
 
     /// 2026-09-12 (Saturday) 16:00 UTC = noon ET — weekend daytime.
     fn frozen_weekend_noon() -> DateTime<Utc> {
@@ -3027,18 +3387,19 @@ mod tests {
         assert_eq!(v["reduced"], true);
 
         // End state: everything closed. The assignment moved strike×100
-        // (cash pools R4) out of the default pool into the lot's basis, so
-        // the balance sits at 150,000 − 70,000 = 80,000 — the shares were
-        // called away, not sold, so no cash came back.
+        // (cash pools R4) out of the default pool into the lot's basis
+        // (150,000 − 70,000 = 80,000), and the call's assignment now also
+        // credits the sale proceeds — strike 360 × 200 sh = 72,000 — so the
+        // balance lands at 152,000 (close-lot R2).
         let app = crate::api::build_router(test_state(dir.path(), fetcher.clone()));
         let (status, v) = call(app, "GET", "/api/holdings", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(v["positions"].as_array().unwrap().len(), 0);
         assert_eq!(v["calls"].as_array().unwrap().len(), 0);
         assert_eq!(v["lots"].as_array().unwrap().len(), 0);
-        assert_eq!(v["cash"], 80000.0);
+        assert_eq!(v["cash"], 152000.0);
         assert_eq!(v["cash_reserved"], 0.0);
-        assert_eq!(v["cash_free"], 80000.0);
+        assert_eq!(v["cash_free"], 152000.0);
 
         // No orphan ids, one document per uid.
         let file =
@@ -3364,7 +3725,7 @@ mod tests {
     /// no cash (the shares were bought back by the broker, the ledger only
     /// reduces the lot).
     #[tokio::test]
-    async fn pool_validation_and_called_away_cash_neutrality() {
+    async fn pool_validation_and_called_away_credits_strike() {
         let dir = tempfile::tempdir().unwrap();
         let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
         let (status, _) = call(
@@ -3426,6 +3787,13 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "plain lot with pool: {v}");
+        // Cost debit (pool-consistency pass): 100 × 99 = 9,900 leaves IBKR.
+        {
+            let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
+            let (_, v) = call(app, "GET", "/api/holdings", None).await;
+            let pools = v["cash_pools"].as_array().unwrap();
+            assert_eq!(pools[1]["cash"], 10100.0, "20000 − cost 9900");
+        }
         let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
         let (status, v) = call(
             app,
@@ -3455,7 +3823,10 @@ mod tests {
         let app = crate::api::build_router(test_state(dir.path(), goog_fetcher(0.5)));
         let (status, v) = call(app, "GET", "/api/holdings", None).await;
         let pools = v["cash_pools"].as_array().unwrap();
-        assert_eq!(pools[1]["cash"], 20000.0, "called-away moved no cash");
+        assert_eq!(
+            pools[1]["cash"], 21100.0,
+            "10100 after cost debit, + strike 110 × 100 credit"
+        );
         assert_eq!(v["lots"].as_array().unwrap().len(), 0, "lot fully reduced");
     }
 
@@ -3922,8 +4293,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "called away: {v}");
         assert_eq!(v["reduced"], true, "the IBKR lot covers and reduces");
 
-        // End state: the fully-reduced lot is gone, IBKR intact, pools sum
-        // to totals, no orphans.
+        // End state: the fully-reduced lot is gone, pools sum to totals
+        // with the strike credit (110 × 100 = 11,000 → IBKR), no orphans.
         let app = crate::api::build_router(test_state(dir.path(), no_marks.clone()));
         let (status, v) = call(app, "GET", "/api/holdings", None).await;
         assert_eq!(status, StatusCode::OK);
@@ -3932,7 +4303,7 @@ mod tests {
         assert_eq!(v["lots"].as_array().unwrap().len(), 0, "100 sh fully called away");
         let pools = v["cash_pools"].as_array().unwrap();
         assert_eq!(pools[0]["cash"], 80000.0);
-        assert_eq!(pools[1]["cash"], 40000.0);
+        assert_eq!(pools[1]["cash"], 51000.0, "40000 + strike 110 × 100");
         let total_free: f64 = pools.iter().map(|p| p["free"].as_f64().unwrap()).sum();
         assert_eq!(v["cash_free"], total_free, "aggregate = sum of pools");
 

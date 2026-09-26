@@ -172,6 +172,22 @@ export async function patchCash(fields) {
 /// The call was assigned: one server rewrite removes the call and FIFO-
 /// reduces the covering lot. `reduced: false` + `reason` means no single
 /// lot covered it — the call is gone regardless (a 200 outcome, not an error).
+export async function closeLot(lotId, shares, price, poolId) {
+  const res = await authorizedFetch("/api/holdings/close", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      lot_id: lotId,
+      shares,
+      price,
+      ...(poolId ? { pool_id: poolId } : {}),
+    }),
+  });
+  const v = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(v?.error ?? `POST /api/holdings/close -> ${res.status}`);
+  return v;
+}
+
 export async function calledAway(callId) {
   const res = await authorizedFetch("/api/holdings/called-away", {
     method: "POST",

@@ -911,21 +911,69 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
   const LOT_PLAIN = {
     ...LOT_EXT,
     id: "l-plain",
+    pool_id: "ibkr",
+    pool_name: "IBKR",
     mark: { spot: 249.87, as_of: "2026-09-08T15:00:00Z" },
     view: {
       ...LOT_EXT.view,
       value: 24987.0, pl_dollars: 1847.0, pl_pct: 1847 / 23140, spot: 249.87,
     },
   };
-  const extLedger = {
-    schema_version: 1, positions: [], calls: [],
-    lots: [LOT_EXT, LOT_PLAIN], cash: null, cash_pools: [],
+  const CALL_POOLLED = {
+    id: "c-pool", symbol: "AAPL", strike: 260, premium: 1.5, contracts: 1,
+    sold: "2026-09-08", expiry: "2026-09-30", pool_id: "ibkr", pool_name: "IBKR",
+    mark: { mid: 1.2, as_of: "2026-09-08T19:00:00Z", underlying_price: 249.5 },
+    view: {
+      pl_dollars: -30.0, pl_pct: -0.2, pace_per_day_dollars: -15.0,
+      pace_per_day_pct: -0.15, days_elapsed: 2, days_total: 15,
+      target_pct: 0.4, pace_met: false,
+      spot_pct_vs_strike: (249.5 - 260) / 260,
+    },
   };
-  globalThis.fetch = async () =>
-    new Response(JSON.stringify(extLedger), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+  const extLedger = {
+    schema_version: 1, positions: [], calls: [CALL_POOLLED],
+    lots: [LOT_EXT, LOT_PLAIN], cash: null,
+    cash_pools: [
+      { id: "main", name: "Main", cash: 0 },
+      { id: "ibkr", name: "IBKR", cash: 500 },
+    ],
+  };
+  const jsonRes = (v) =>
+    new Response(JSON.stringify(v), { status: 200, headers: { "Content-Type": "application/json" } });
+  const closeCalls = [];
+  const patchCalls = [];
+  // Server-faithful close mock: reduce/remove the lot, credit the pool,
+  // answer with the ledger + the close outcome (what the real API does).
+  globalThis.fetch = async (path, opts = {}) => {
+    const method = opts.method ?? "GET";
+    if (method === "PATCH" && String(path).startsWith("/api/holdings/")) {
+      const body = JSON.parse(opts.body);
+      const id = String(path).split("/").pop();
+      patchCalls.push({ id, pool_id: body.pool_id });
+      const lot = extLedger.lots.find((l) => l.id === id);
+      if (lot) {
+        lot.pool_id = body.pool_id;
+        lot.pool_name = extLedger.cash_pools.find((p) => p.id === body.pool_id)?.name ?? "Main";
+      }
+      return jsonRes({ lot });
+    }
+    if (method === "POST" && path === "/api/holdings/close") {
+      const b = JSON.parse(opts.body);
+      closeCalls.push(b);
+      const lot = extLedger.lots.find((l) => l.id === b.lot_id);
+      if (lot) {
+        lot.shares -= b.shares;
+        if (lot.shares <= 0) extLedger.lots = extLedger.lots.filter((l) => l.id !== b.lot_id);
+        const pool = extLedger.cash_pools.find((p) => p.id === (b.pool_id ?? extLedger.cash_pools[0]?.id));
+        if (pool) pool.cash += b.shares * b.price;
+      }
+      return jsonRes({
+        ...extLedger,
+        close: { closed: true, shares: b.shares, proceeds: b.shares * b.price },
+      });
+    }
+    return jsonRes(extLedger);
+  };
   const div = document.createElement("div");
   div.id = "ext-root";
   document.body.appendChild(div);
@@ -933,6 +981,97 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
   await tick();
   const rows = qa("#ext-root .hp-lot-row");
   ok("two lot rows render", rows.length === 2);
+  // The CALLS pane shows the same pool pill.
+  Array.from(qa("#ext-root .hp-tab-tile"))
+    .find((t) => t.textContent.includes("CALLS"))
+    ?.click();
+  await tick();
+  ok(
+    "call rows carry the pool pill too",
+    qa("#ext-root .hp-list-pos .hp-pool-tag").some((t) => t.textContent === "IBKR")
+  );
+  Array.from(qa("#ext-root .hp-tab-tile"))
+    .find((t) => t.textContent.includes("LOTS"))
+    ?.click();
+  await tick();
+
+  // close… opens the dialog prefilled; price gates the submit; the preview
+  // names the pool; submit fires the POST and closes the dialog.
+  // (Fresh query: the pane round-trip above replaced the row nodes.)
+  const freshRows = qa("#ext-root .hp-lot-row");
+  const slot0 = freshRows[0]?.closest(".hp-slot");
+  const closeBtn = () =>
+    Array.from(slot0.querySelectorAll(".holdings-close-btn")).find((b) =>
+      b.textContent.includes("close…")
+    );
+  closeBtn()?.click();
+  await tick();
+  const dialog = () => document.querySelector("#ext-root .holdings-outcome");
+  ok("close dialog opens on the lot", !!dialog() && dialog().textContent.includes("Close lot · 100 sh AAPL"));
+  const sharesInput = dialog()?.querySelector('input[inputmode="numeric"]');
+  const priceInput = dialog()?.querySelector('input[inputmode="decimal"]');
+  ok("shares prefilled to all held", sharesInput?.value === "100");
+  ok("no pool dropdown in the close form (proceeds stay in the lot's pool)", !dialog().querySelector("select"));
+  const submitBtn = () => dialog()?.querySelector('button[type="submit"]');
+  ok("submit gated until the price lands", !!submitBtn() && submitBtn().disabled);
+  priceInput.value = "249.50";
+  priceInput.dispatchEvent(new Event("input", { bubbles: true }));
+  await tick();
+  ok(
+    "proceeds preview names the lot's own pool",
+    dialog()?.querySelector(".holdings-preview")?.textContent.trim() ===
+      "100 sh × $249.50 → $24950.00 → pool Main"
+  );
+  ok("submit enables with a valid form", !!submitBtn() && !submitBtn().disabled);
+  submitBtn()?.click();
+  await tick();
+  await tick();
+  ok(
+    "submit POSTs exactly the form's shares and price (no pool override)",
+    closeCalls.length === 1 &&
+      closeCalls[0].lot_id === "l-ext" &&
+      closeCalls[0].shares === 100 &&
+      closeCalls[0].price === 249.5 &&
+      closeCalls[0].pool_id === undefined
+  );
+  ok("dialog closes after submit", !dialog());
+  ok("the ledger reloads with the lot gone", qa("#ext-root .hp-lot-row").length === 1);
+  // Lot picker PATCHes the lot's pool (field rewrite, no cash move).
+  const lotPicker = qa("#ext-root .hp-pool-pick")[0];
+  lotPicker.value = "main";
+  lotPicker.dispatchEvent(new Event("change", { bubbles: true }));
+  await tick();
+  await tick();
+  ok("lot picker fired PATCH with the chosen pool", patchCalls.some(
+    (c) => c.id === "l-plain" && c.pool_id === "main"
+  ));
+
+  // Sell-call form has NO pool dropdown — the call inherits the lot's pool.
+  const sellBtn = Array.from(qa("#ext-root .holdings-close-btn")).find((b) =>
+    b.textContent.includes("sell call…")
+  );
+  sellBtn?.click();
+  await tick();
+  const sellDialog = document.querySelector("#ext-root .holdings-outcome");
+  ok(
+    "sell-call form has no pool dropdown (inherits the lot's pool)",
+    !!sellDialog && !sellDialog.querySelector("select")
+  );
+  sellDialog?.querySelector("button.btn:not(.btn-primary)")?.click();
+  await tick();
+  ok("sell-call cancel closes with no request", !document.querySelector("#ext-root .holdings-outcome") && closeCalls.length === 1);
+
+  // Escape cancels without a request.
+  const closeBtn2 = () =>
+    Array.from(qa("#ext-root .holdings-close-btn")).find((b) =>
+      b.textContent.includes("close…")
+    );
+  closeBtn2()?.click();
+  await tick();
+  const form2 = document.querySelector("#ext-root .holdings-add");
+  form2?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await tick();
+  ok("Escape closes the dialog with no request", !dialog() && closeCalls.length === 1);
   const head = rows[0]?.querySelector(".hp-lot-row-top b");
   ok(
     "headline shows the latest price tagged with its source session",
@@ -943,11 +1082,82 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
     "no per-session line remains anywhere",
     !document.querySelector("#ext-root .hp-lot-row-ext")
   );
+  ok(
+    "lot rows carry pool pickers (multi-pool ledger), lot's pool preselected",
+    rows[0]?.querySelector(".hp-pool-pick")?.value === "main" &&
+      rows[1]?.querySelector(".hp-pool-pick")?.value === "ibkr"
+  );
   const plainHead = rows[1]?.querySelector(".hp-lot-row-top b");
   ok(
     "plain lot shows the regular price with no tag",
     !!plainHead && plainHead.textContent.includes("$249.87") &&
       !plainHead.querySelector(".hp-spot-session")
+  );
+}
+
+// ── pool-consistency: a manually sold call names its pool ──
+{
+  const HP = (await import("./components/HoldingsPanel")).default;
+  const callLedger = {
+    schema_version: 1, positions: [], calls: [], lots: [], cash: null,
+    cash_pools: [
+      { id: "main", name: "Main", cash: 0 },
+      { id: "ibkr", name: "IBKR", cash: 500 },
+    ],
+  };
+  const addCalls = [];
+  const jsonRes2 = (v) =>
+    new Response(JSON.stringify(v), { status: 200, headers: { "Content-Type": "application/json" } });
+  globalThis.fetch = async (path, opts = {}) => {
+    const method = opts.method ?? "GET";
+    if (method === "POST" && path === "/api/holdings") {
+      const b = JSON.parse(opts.body);
+      addCalls.push(b);
+      return jsonRes2({ ...callLedger, calls: [b] });
+    }
+    return jsonRes2(callLedger);
+  };
+  const div = document.createElement("div");
+  div.id = "callpool-root";
+  document.body.appendChild(div);
+  render(() => <HP />, div);
+  await tick();
+  await tick();
+  await tick();
+  Array.from(qa("#callpool-root .hp-tab-tile"))
+    .find((t) => t.textContent.includes("CALLS"))
+    ?.click();
+  await tick();
+  await tick();
+  await tick();
+  Array.from(qa("#callpool-root .hp-toolbar-row button"))
+    .find((b) => b.textContent.includes("Sell call"))
+    ?.click();
+  await tick();
+  const form = document.querySelector("#callpool-root .holdings-add");
+  ok(
+    "manual call form shows the pool dropdown (2 pools)",
+    !!form?.querySelector("select") && form.querySelectorAll("option").length === 2
+  );
+  const setInput = (sel, v) => {
+    const el = form.querySelector(sel);
+    el.value = v;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  setInput('input[placeholder="SYMBOL"]', "AAPL");
+  setInput('input[placeholder="e.g. 355.00"]', "260");
+  setInput('input[placeholder="e.g. 1.80"]', "1.50");
+  setInput('input[inputmode="numeric"]', "1");
+  const sel = form.querySelector("select");
+  sel.value = "ibkr";
+  sel.dispatchEvent(new Event("input", { bubbles: true }));
+  await tick();
+  form.querySelector('button[type="submit"]').click();
+  await tick();
+  await tick();
+  ok(
+    "manual call POST carries the chosen pool_id",
+    addCalls.some((b) => b.kind === "call" && b.symbol === "AAPL" && b.pool_id === "ibkr")
   );
 }
 
