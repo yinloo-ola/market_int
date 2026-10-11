@@ -1391,7 +1391,18 @@ details.adjust .hint-custom { color: var(--accent); }
 .hp-rail-big { font-size: 1.6rem; font-weight: 700; color: var(--ok); }
 .hp-rail-sub { font-size: 0.72rem; opacity: 0.6; margin-top: 0.15rem; }
 
-.hp-lot-row { padding: 0.28rem 0; border-bottom: 1px solid var(--border); }
+/* One card per lot (mirrors .hp-list-row): the info block and its action
+   buttons share one bordered box, so "sell call…" can't read as belonging
+   to the next lot below it. */
+.hp-lot-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.55rem 0.8rem;
+}
 .hp-lot-row-top { display: flex; justify-content: space-between; gap: 0.6rem; font-size: 0.85rem; }
 .hp-lot-row-top b { font-variant-numeric: tabular-nums; }
 .hp-lot-row-sub {
@@ -1403,10 +1414,12 @@ details.adjust .hint-custom { color: var(--accent); }
   margin-top: 0.1rem;
 }
 .hp-lot-row-sub b { font-variant-numeric: tabular-nums; }
+/* Buttons pin to the card's bottom-right — the same side the option rows
+   put their close button, and far from the next card's left-aligned symbol. */
 .hp-lot-actions {
   display: flex;
   gap: 0.4rem;
-  margin-top: 0.15rem;
+  justify-content: flex-end;
 }
 .holdings-preview {
   font-size: 0.72rem;

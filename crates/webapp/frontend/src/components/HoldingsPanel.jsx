@@ -292,68 +292,73 @@ function LotRailRow(props) {
   // (e.g. `overnight` on a weekend). No tag = the regular-session price.
   return (
     <div class="hp-slot">
-      <div class="hp-lot-row">
-        <div class="hp-lot-row-top">
-          <span>
-            {l.shares} sh {l.symbol}
-            {/* Lot IS the shares' pool — the picker re-homes the lot (PATCH,
-                a field rewrite) exactly like a put's picker. */}
-            <Show
-              when={(props.pools?.length ?? 0) > 1}
-              fallback={<Show when={props.showPool}><span class="hp-pool-tag">{l.pool_name ?? "Main"}</span></Show>}
-            >
-              <select
-                class="hp-pool-pick"
-                aria-label={`cash pool for ${l.symbol} lot`}
-                value={l.pool_id ?? props.pools?.[0]?.id ?? ""}
-                onChange={(e) => props.onPoolChange?.(l, e.currentTarget.value)}
+      {/* One bordered card per lot — info AND its action buttons enclosed
+          together, so a button can't read as belonging to the next lot
+          below it (lots have no card otherwise, unlike the option rows). */}
+      <div class="hp-lot-card">
+        <div class="hp-lot-row">
+          <div class="hp-lot-row-top">
+            <span>
+              {l.shares} sh {l.symbol}
+              {/* Lot IS the shares' pool — the picker re-homes the lot (PATCH,
+                  a field rewrite) exactly like a put's picker. */}
+              <Show
+                when={(props.pools?.length ?? 0) > 1}
+                fallback={<Show when={props.showPool}><span class="hp-pool-tag">{l.pool_name ?? "Main"}</span></Show>}
               >
-                <For each={props.pools}>{(p) => <option value={p.id}>{p.name}</option>}</For>
-              </select>
-            </Show>
-          </span>
-          <b>
-            {v().spot == null ? "—" : money2(v().spot)}
-            <Show when={SPOT_SESSION_LABELS[l.mark?.session]}>
-              {(label) => <i class="hp-spot-session">{label()}</i>}
-            </Show>
-          </b>
+                <select
+                  class="hp-pool-pick"
+                  aria-label={`cash pool for ${l.symbol} lot`}
+                  value={l.pool_id ?? props.pools?.[0]?.id ?? ""}
+                  onChange={(e) => props.onPoolChange?.(l, e.currentTarget.value)}
+                >
+                  <For each={props.pools}>{(p) => <option value={p.id}>{p.name}</option>}</For>
+                </select>
+              </Show>
+            </span>
+            <b>
+              {v().spot == null ? "—" : money2(v().spot)}
+              <Show when={SPOT_SESSION_LABELS[l.mark?.session]}>
+                {(label) => <i class="hp-spot-session">{label()}</i>}
+              </Show>
+            </b>
+          </div>
+          <div class="hp-lot-row-sub">
+            <span>
+              bought {money2(l.basis_per_share)} · {l.acquired}
+            </span>
+            <b class={(v().pl_dollars ?? 0) >= 0 ? "holdings-pos" : "holdings-neg"}>
+              <Show when={v().pl_dollars != null} fallback="—">
+                {`${money(v().pl_dollars)} (${(v().pl_pct ?? 0) >= 0 ? "+" : ""}${pct(v().pl_pct, 1)})`}
+              </Show>
+            </b>
+          </div>
+          <div class="hp-lot-row-meta">
+            <i>last {ageText(l.mark?.as_of) || "—"}</i>
+            <i>
+              covered {v().covered}/{v().capacity}
+            </i>
+          </div>
         </div>
-        <div class="hp-lot-row-sub">
-          <span>
-            bought {money2(l.basis_per_share)} · {l.acquired}
-          </span>
-          <b class={(v().pl_dollars ?? 0) >= 0 ? "holdings-pos" : "holdings-neg"}>
-            <Show when={v().pl_dollars != null} fallback="—">
-              {`${money(v().pl_dollars)} (${(v().pl_pct ?? 0) >= 0 ? "+" : ""}${pct(v().pl_pct, 1)})`}
-            </Show>
-          </b>
-        </div>
-        <div class="hp-lot-row-meta">
-          <i>last {ageText(l.mark?.as_of) || "—"}</i>
-          <i>
-            covered {v().covered}/{v().capacity}
-          </i>
-        </div>
-      </div>
-      <div class="hp-lot-actions">
-        {/* pool pickers render inside both forms when the ledger has 2+ pools */}
-        <Show when={v().capacity > 0}>
+        <div class="hp-lot-actions">
+          {/* pool pickers render inside both forms when the ledger has 2+ pools */}
+          <Show when={v().capacity > 0}>
+            <button
+              type="button"
+              class="btn-ghost holdings-close-btn"
+              onClick={() => props.onSellDialog(l)}
+            >
+              sell call…
+            </button>
+          </Show>
           <button
             type="button"
             class="btn-ghost holdings-close-btn"
-            onClick={() => props.onSellDialog(l)}
+            onClick={() => props.onCloseDialog(l)}
           >
-            sell call…
+            close…
           </button>
-        </Show>
-        <button
-          type="button"
-          class="btn-ghost holdings-close-btn"
-          onClick={() => props.onCloseDialog(l)}
-        >
-          close…
-        </button>
+        </div>
       </div>
       <Show when={props.dialogFor("sellCall", l.id)} keyed>
         {(d) => (
