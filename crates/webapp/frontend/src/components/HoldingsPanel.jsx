@@ -432,23 +432,19 @@ function PoolRow(props) {
 const SPOT_SESSION_LABELS = { PreMarket: "pre", AfterHours: "post", OverNight: "overnight" };
 
 function LotRailRow(props) {
+  const [expanded, setExpanded] = createSignal(false);
   const l = props.lot;
   const v = () => l.view;
-  // The headline price IS the latest known price (extended-hours R3/R4):
-  // when the mark names a source session, a small muted tag says which one
-  // (e.g. `overnight` on a weekend). No tag = the regular-session price.
+
   return (
     <div class="hp-slot">
-      {/* One bordered card per lot — info AND its action buttons enclosed
-          together, so a button can't read as belonging to the next lot
-          below it (lots have no card otherwise, unlike the option rows). */}
-      <div class="hp-lot-card">
-        <div class="hp-lot-row">
-          <div class="hp-lot-row-top">
-            <span>
-              {l.shares} sh {l.symbol}
-              {/* Lot IS the shares' pool — the picker re-homes the lot (PATCH,
-                  a field rewrite) exactly like a put's picker. */}
+      <div class="hp-pos-card hp-lot-card hp-lot-row">
+        <div class="hp-card-summary" onClick={() => setExpanded((e) => !e)}>
+          <div class="hp-lot-row-top hp-card-top">
+            <span class="hp-card-symbol-line">
+              <span class="hp-card-symbol">
+                {l.shares} sh {l.symbol}
+              </span>
               <Show
                 when={(props.pools?.length ?? 0) > 1}
                 fallback={<Show when={props.showPool}><span class="hp-pool-tag">{l.pool_name ?? "Main"}</span></Show>}
@@ -457,6 +453,7 @@ function LotRailRow(props) {
                   class="hp-pool-pick"
                   aria-label={`cash pool for ${l.symbol} lot`}
                   value={l.pool_id ?? props.pools?.[0]?.id ?? ""}
+                  onClick={(e) => e.stopPropagation()}
                   onChange={(e) => props.onPoolChange?.(l, e.currentTarget.value)}
                 >
                   <For each={props.pools}>{(p) => <option value={p.id}>{p.name}</option>}</For>
@@ -470,41 +467,55 @@ function LotRailRow(props) {
               </Show>
             </b>
           </div>
-          <div class="hp-lot-row-sub">
+
+          <div class="hp-lot-row-sub hp-card-main">
             <span>
               bought {money2(l.basis_per_share)} · {l.acquired}
             </span>
-            <b class={(v().pl_dollars ?? 0) >= 0 ? "holdings-pos" : "holdings-neg"}>
+            <b class="hp-card-pl" classList={{ "holdings-pos": (v().pl_dollars ?? 0) >= 0, "holdings-neg": (v().pl_dollars ?? 0) < 0 }}>
               <Show when={v().pl_dollars != null} fallback="—">
                 {`${money(v().pl_dollars)} (${(v().pl_pct ?? 0) >= 0 ? "+" : ""}${pct(v().pl_pct, 1)})`}
               </Show>
             </b>
           </div>
+
+          <div class="hp-lot-actions hp-card-actions">
+            <Show when={v().capacity > 0}>
+              <button
+                type="button"
+                class="btn-ghost holdings-close-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  props.onSellDialog(l);
+                }}
+              >
+                sell call…
+              </button>
+            </Show>
+            <button
+              type="button"
+              class="btn-ghost holdings-close-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                props.onCloseDialog(l);
+              }}
+            >
+              close…
+            </button>
+          </div>
+        </div>
+
+        {/* Secondary details drawer */}
+        <div class="hp-card-drawer" hidden={!expanded()}>
           <div class="hp-lot-row-meta">
-            <i>last {ageText(l.mark?.as_of) || "—"}</i>
+            <i>last price {ageText(l.mark?.as_of) || "—"}</i>
             <i>
               covered {v().covered}/{v().capacity}
             </i>
           </div>
-        </div>
-        <div class="hp-lot-actions">
-          {/* pool pickers render inside both forms when the ledger has 2+ pools */}
-          <Show when={v().capacity > 0}>
-            <button
-              type="button"
-              class="btn-ghost holdings-close-btn"
-              onClick={() => props.onSellDialog(l)}
-            >
-              sell call…
-            </button>
-          </Show>
-          <button
-            type="button"
-            class="btn-ghost holdings-close-btn"
-            onClick={() => props.onCloseDialog(l)}
-          >
-            close…
-          </button>
+          <div class="holdings-preview">
+            Total Value: {v().value == null ? "—" : money(v().value)} · Account: {l.pool_name ?? "Main"}
+          </div>
         </div>
       </div>
       <Show when={props.dialogFor("sellCall", l.id)} keyed>
@@ -529,97 +540,120 @@ function LotRailRow(props) {
 /* ── list rows ─────────────────────────────────────────────────── */
 
 function OptionRow(props) {
+  const [expanded, setExpanded] = createSignal(false);
   const x = props.x; // { p, v }
   const itm = () => x.v.spot_pct_vs_strike != null && x.v.spot_pct_vs_strike > 0;
   const spotDanger = () =>
     x.p.kind === "call" ? x.v.spot_pct_vs_strike > 0 : x.v.spot_pct_vs_strike < 0;
+
   return (
     <div class="hp-slot">
-      <div class="hp-list-row" classList={{ "hp-row-met": x.v.pace_met }}>
-        <span class="hp-list-pos">
-          <span class="hp-kind" data-kind={x.p.kind}>
-            {x.p.kind.toUpperCase()}
-          </span>
-          <b>
-            {x.p.symbol} {x.p.strike}
-            {x.p.kind === "put" ? "P" : "C"} ×{x.p.contracts}
-          </b>
-          {/* Calls don't reserve cash and their pool is fixed at creation —
-              an indicator pill, not the put's reassignment picker. */}
-          <Show when={x.p.kind === "call" && props.showPool}>
-            <span class="hp-pool-tag">{x.p.pool_name}</span>
-          </Show>
-          {/* Which pool of cash this put spends (server-resolved name;
-              hidden on single-pool ledgers where there's nothing to tell).
-              Multi-pool ledgers get a picker — the reservation follows the
-              choice server-side (cash pools R4). */}
-          <Show when={x.p.kind === "put" && props.showPool}>
-            <select
-              class="hp-pool-pick"
-              aria-label={`cash pool for ${x.p.symbol} ${x.p.strike} put`}
-              value={props.pools?.find((p) => p.name === x.p.pool_name)?.id ?? ""}
-              disabled={props.dialogActions?.busy?.()}
-              onChange={(e) => props.onPoolChange?.(x.p.id, e.target.value)}
-            >
-              <For each={props.pools}>
-                {(p) => <option value={p.id}>{p.name}</option>}
-              </For>
-            </select>
-          </Show>
-          <i>
-            exp {x.p.expiry} · {x.v.days_elapsed}/{x.v.days_total} wd
-          </i>
-        </span>
-        <span class={x.v.pl_pct >= 0 ? "holdings-pos" : "holdings-neg"}>
-          {x.v.pl_pct == null ? "—" : `${x.v.pl_pct >= 0 ? "+" : ""}${pct(x.v.pl_pct, 1)}`}
-        </span>
-        <span class="hp-list-pace">
-          <MiniBar v={x.v} />
-          <i>target {pct(x.v.target_pct)}</i>
-        </span>
-        <span class="hp-list-status">
-          <Show when={x.v.pace_met} fallback={<span class="chip normal">holding</span>}>
-            <span class="chip high">buy back?</span>
-          </Show>
-          <Show when={x.p.kind === "call" && itm()}>
-            <span class="chip high">ITM — called away?</span>
-          </Show>
-        </span>
-        <button
-          type="button"
-          class="btn-ghost holdings-close-btn"
-          onClick={() => props.onClose(x)}
+      <div
+        class="hp-pos-card hp-list-row"
+        classList={{ "hp-row-met": x.v.pace_met }}
+      >
+        <div
+          class="hp-card-summary"
+          onClick={() => setExpanded((e) => !e)}
         >
-          close…
-        </button>
-        {/* Full stats line — sold at / now mid + age / spot vs strike
-            (danger-colored in the kind's ITM direction) / close captures. */}
-        <div class="holdings-card-stats hp-list-stats">
-          <div>
-            <span>sold at</span>
-            <b>{money2(x.p.premium)}</b>
+          <div class="hp-card-top">
+            <span class="hp-list-pos hp-card-symbol-line">
+              <span class="hp-kind" data-kind={x.p.kind}>
+                {x.p.kind.toUpperCase()}
+              </span>
+              <b class="hp-card-symbol">
+                {x.p.symbol} {x.p.strike}
+                {x.p.kind === "put" ? "P" : "C"} ×{x.p.contracts}
+              </b>
+              <Show when={x.p.kind === "call" && props.showPool}>
+                <span class="hp-pool-tag">{x.p.pool_name}</span>
+              </Show>
+              <Show when={x.p.kind === "put" && props.showPool}>
+                <select
+                  class="hp-pool-pick"
+                  aria-label={`cash pool for ${x.p.symbol} ${x.p.strike} put`}
+                  value={props.pools?.find((p) => p.name === x.p.pool_name)?.id ?? ""}
+                  disabled={props.dialogActions?.busy?.()}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => props.onPoolChange?.(x.p.id, e.target.value)}
+                >
+                  <For each={props.pools}>
+                    {(p) => <option value={p.id}>{p.name}</option>}
+                  </For>
+                </select>
+              </Show>
+            </span>
+            <span class="hp-card-pl" classList={{ "holdings-pos": x.v.pl_pct >= 0, "holdings-neg": x.v.pl_pct < 0 }}>
+              {x.v.pl_pct == null ? "—" : `${x.v.pl_pct >= 0 ? "+" : ""}${pct(x.v.pl_pct, 1)}`}
+              <Show when={x.v.pl_dollars != null}>
+                <span style={{ "font-size": "0.85rem", "font-weight": "600", "margin-left": "4px" }}>
+                  ({money(x.v.pl_dollars)})
+                </span>
+              </Show>
+            </span>
           </div>
-          <div>
-            <span>now (mid)</span>
-            <b>{x.p.mark == null ? "—" : x.p.mark.mid.toFixed(2)}</b>
-            <i>{x.p.mark == null ? "unpriced" : ageText(x.p.mark.as_of)}</i>
+
+          <div class="hp-card-main">
+            <span class="hp-card-meta">
+              exp {x.p.expiry} · {x.v.days_elapsed}/{x.v.days_total} wd
+            </span>
+            <span class="hp-list-status">
+              <Show when={x.v.pace_met} fallback={<span class="chip normal">holding</span>}>
+                <span class="chip high">buy back?</span>
+              </Show>
+              <Show when={x.p.kind === "call" && itm()}>
+                <span class="chip high">ITM — called away?</span>
+              </Show>
+            </span>
           </div>
-          <div>
-            <span>spot</span>
-            <Show when={x.p.mark?.underlying_price != null} fallback={<b>—</b>}>
-              <b>{x.p.mark.underlying_price.toFixed(2)}</b>
-              <i class={spotDanger() && x.v.spot_pct_vs_strike != null ? "holdings-neg" : "holdings-pos"}>
-                {x.v.spot_pct_vs_strike == null
-                  ? ""
-                  : `${x.v.spot_pct_vs_strike >= 0 ? "+" : ""}${pct(x.v.spot_pct_vs_strike, 1)} vs strike`}
-              </i>
-            </Show>
+
+          <div class="hp-card-actions">
+            <button
+              type="button"
+              class="btn-ghost holdings-close-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                props.onClose(x);
+              }}
+            >
+              close…
+            </button>
           </div>
-          <div>
-            <span>close captures</span>
-            <b class={(x.v.pl_dollars ?? 0) >= 0 ? "holdings-pos" : "holdings-neg"}>
-              {x.v.pl_dollars == null ? "—" : money2(x.v.pl_dollars)}
-            </b>
+        </div>
+
+        {/* Secondary details drawer */}
+        <div class="hp-card-drawer" hidden={!expanded()}>
+          <div class="hp-list-pace" style={{ display: "flex", "align-items": "center", gap: "10px" }}>
+            <MiniBar v={x.v} />
+            <i style={{ "font-size": "0.85rem", color: "var(--muted)" }}>target {pct(x.v.target_pct)}</i>
+          </div>
+          <div class="holdings-card-stats hp-list-stats">
+            <div>
+              <span>sold at</span>
+              <b>{money2(x.p.premium)}</b>
+            </div>
+            <div>
+              <span>now (mid)</span>
+              <b>{x.p.mark == null ? "—" : x.p.mark.mid.toFixed(2)}</b>
+              <i>{x.p.mark == null ? "unpriced" : ageText(x.p.mark.as_of)}</i>
+            </div>
+            <div>
+              <span>spot</span>
+              <Show when={x.p.mark?.underlying_price != null} fallback={<b>—</b>}>
+                <b>{x.p.mark.underlying_price.toFixed(2)}</b>
+                <i class={spotDanger() && x.v.spot_pct_vs_strike != null ? "holdings-neg" : "holdings-pos"}>
+                  {x.v.spot_pct_vs_strike == null
+                    ? ""
+                    : `${x.v.spot_pct_vs_strike >= 0 ? "+" : ""}${pct(x.v.spot_pct_vs_strike, 1)} vs strike`}
+                </i>
+              </Show>
+            </div>
+            <div>
+              <span>close captures</span>
+              <b class={(x.v.pl_dollars ?? 0) >= 0 ? "holdings-pos" : "holdings-neg"}>
+                {x.v.pl_dollars == null ? "—" : money2(x.v.pl_dollars)}
+              </b>
+            </div>
           </div>
         </div>
       </div>
