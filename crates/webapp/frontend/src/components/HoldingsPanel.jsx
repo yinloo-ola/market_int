@@ -68,6 +68,153 @@ function MiniBar(props) {
   );
 }
 
+/* ── mobile cash summary bar (<=900px) ─────────────────────────── */
+
+function CashSummaryBar(props) {
+  const sel = () => props.pool;
+  const cash = () => (sel() ? sel().cash : props.cash);
+  const reserved = () => (sel() ? sel().reserved : props.reserved);
+  const free = () => (sel() ? sel().free : props.free);
+  const poolName = () => (sel() ? sel().name : "All Pools");
+
+  return (
+    <div class="hp-cash-bar">
+      <div class="hp-cash-bar-headline">
+        <span class="hp-cash-bar-total">
+          {cash() == null ? "—" : money(cash())} <span style={{ "font-size": "0.85rem", "font-weight": "500", color: "var(--muted)" }}>cash</span>
+        </span>
+        <span class="hp-cash-bar-free">
+          {free() == null ? "—" : money(free())} <span style={{ "font-size": "0.85rem", "font-weight": "500", color: "var(--muted)" }}>free</span>
+        </span>
+      </div>
+      <div class="hp-cash-bar-subline">
+        <span class="hp-cash-bar-reserved">
+          {money(reserved())} reserved · {poolName()}
+        </span>
+        <button
+          type="button"
+          class="btn hp-pool-sheet-btn"
+          onClick={props.onOpenPools}
+        >
+          Accounts / Pools
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── mobile pool manager sheet modal ───────────────────────────── */
+
+function PoolManagerSheet(props) {
+  const [editing, setEditing] = createSignal(false);
+  const [editPool, setEditPool] = createSignal(null);
+  const [newName, setNewName] = createSignal("");
+  const pools = () => props.pools ?? [];
+  const sel = () => props.pool;
+  const cash = () => (sel() ? sel().cash : props.cash);
+  const reserved = () => (sel() ? sel().reserved : props.reserved);
+  const free = () => (sel() ? sel().free : props.free);
+  const neverSet = () => cash() == null;
+
+  const editCash = (poolId) => {
+    if (poolId && poolId !== sel()?.id) props.onSelectPool(poolId);
+    setEditPool(poolId ?? null);
+    setEditing(true);
+  };
+  const editorCash = () => {
+    const p = pools().find((x) => x.id === editPool());
+    return p ? p.cash : props.cash;
+  };
+  const submitAdd = async () => {
+    if (!newName().trim() || props.busy?.()) return;
+    if (await props.onAddPool(newName().trim())) setNewName("");
+  };
+
+  return (
+    <div class="hp-pool-sheet" hidden={!props.open}>
+      <div class="hp-sheet-backdrop" onClick={props.onClose} />
+      <div class="hp-sheet-container" role="dialog" aria-modal="true" aria-label="Manage Cash and Pools">
+        <div class="hp-sheet-header">
+          <div class="hp-sheet-title">Accounts & Cash Pools</div>
+          <button type="button" class="hp-sheet-close" aria-label="Close sheet" onClick={props.onClose}>
+            ×
+          </button>
+        </div>
+        <div class="hp-sheet-body">
+          <div class="hp-rail-block">
+            <div class="hp-rail-label">{sel() ? `${sel().name} — free to sell puts` : "Total Free Cash"}</div>
+            <div class="hp-rail-big">{free() == null ? "—" : money(free())}</div>
+            <div class="hp-rail-sub">
+              {cash() == null ? "—" : money(cash())} cash − {money(reserved())} reserved
+            </div>
+            <Show
+              when={!editing()}
+              fallback={
+                <CashEditor
+                  cash={editorCash()}
+                  busy={props.busy}
+                  onSave={async (n) => {
+                    const res = await props.onSaveCash(n, editPool());
+                    if (res) setEditing(false);
+                  }}
+                  onCancel={() => setEditing(false)}
+                />
+              }
+            >
+              <button
+                type="button"
+                class="btn-ghost hp-cash-edit"
+                onClick={() => editCash(sel()?.id ?? null)}
+              >
+                {neverSet() ? "set cash" : "edit cash"}
+              </button>
+            </Show>
+          </div>
+          <div class="hp-pool-section">
+            <Show when={pools().length > 0}>
+              <div class="hp-pool-list">
+                <For each={pools()}>
+                  {(p) => (
+                    <PoolRow
+                      pool={p}
+                      selected={sel()?.id === p.id}
+                      busy={props.busy}
+                      onSelect={() => {
+                        setEditing(false);
+                        props.onSelectPool(p.id);
+                      }}
+                      onEditCash={() => editCash(p.id)}
+                      onRename={(name) => props.onRenamePool(p.id, name)}
+                      onDelete={() => props.onDeletePool(p.id)}
+                    />
+                  )}
+                </For>
+              </div>
+            </Show>
+            <div class="hp-pool-row hp-pool-add" style={{ "margin-top": "0.5rem" }}>
+              <input
+                placeholder="new pool name"
+                aria-label="new pool name"
+                value={newName()}
+                onInput={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && submitAdd()}
+              />
+              <button type="button" class="btn" disabled={!newName().trim() || props.busy?.()} onClick={submitAdd}>
+                add
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="hp-sheet-footer">
+          <button type="button" class="btn btn-primary" onClick={props.onClose}>
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── rail ──────────────────────────────────────────────────────── */
 
 function CashEditor(props) {
@@ -1008,6 +1155,7 @@ function ClosePanel(props) {
 export default function HoldingsPanel() {
   const [ledger, setLedger] = createSignal(null);
   const [notice, setNotice] = createSignal("");
+  const [poolSheetOpen, setPoolSheetOpen] = createSignal(false);
   let flashTimer;
   // One timer at a time: an overlapping flash must not let the previous
   // timer wipe the newer message early (and nothing fires after unmount).
@@ -1421,6 +1569,47 @@ export default function HoldingsPanel() {
 
   return (
     <div class="holdings-panel hp-tabs-shell">
+      <CashSummaryBar
+        cash={ledger()?.cash ?? null}
+        reserved={ledger()?.cash_reserved ?? 0}
+        free={ledger()?.cash_free ?? null}
+        pools={pools()}
+        pool={selectedPool()}
+        onOpenPools={() => setPoolSheetOpen(true)}
+      />
+      <div class="hp-mobile-tabs">
+        <For each={paneDefs()}>
+          {(t) => (
+            <button
+              type="button"
+              class="hp-mobile-tile"
+              classList={{ active: pane() === t.id }}
+              onClick={() => setPane(t.id)}
+            >
+              <span class="hp-tab-tile-name">{t.label.toUpperCase()}</span>
+              <span class="hp-tab-tile-count">{t.count}</span>
+              <div class="hp-tab-tile-sub">{t.sub}</div>
+            </button>
+          )}
+        </For>
+      </div>
+      <Show when={poolSheetOpen()}>
+        <PoolManagerSheet
+          open={true}
+          onClose={() => setPoolSheetOpen(false)}
+          cash={ledger()?.cash ?? null}
+          reserved={ledger()?.cash_reserved ?? 0}
+          free={ledger()?.cash_free ?? null}
+          pools={pools()}
+          pool={selectedPool()}
+          busy={busy}
+          onSaveCash={onSaveCash}
+          onSelectPool={setPoolSelId}
+          onAddPool={onAddPool}
+          onRenamePool={onRenamePool}
+          onDeletePool={onDeletePool}
+        />
+      </Show>
       <div class="hp-tabs-grid">
         <aside class="hp-tabs-rail">
           <div class="hp-tabs-brand">Wheel ledger</div>
