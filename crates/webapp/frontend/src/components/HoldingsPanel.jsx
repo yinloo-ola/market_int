@@ -1297,20 +1297,63 @@ function ClosePanel(props) {
   );
 }
 
+/* ── floating viewport toast notice (R5) ────────────────────────── */
+
+function ToastNotice(props) {
+  return (
+    <div class="hp-toast-container" aria-live="polite">
+      <Show when={props.toast()} keyed>
+        {(t) => (
+          <div
+            class="hp-toast holdings-notice"
+            classList={{
+              "hp-toast-ok": t.kind === "ok",
+              "hp-toast-err": t.kind === "err",
+            }}
+            onClick={props.onDismiss}
+            role="alert"
+          >
+            <span class="hp-toast-msg">{t.msg}</span>
+            <button
+              type="button"
+              class="hp-toast-dismiss"
+              aria-label="Dismiss notice"
+              onClick={(e) => {
+                e.stopPropagation();
+                props.onDismiss();
+              }}
+            >
+              ×
+            </button>
+          </div>
+        )}
+      </Show>
+    </div>
+  );
+}
+
 /* ── the panel ─────────────────────────────────────────────────── */
 
 export default function HoldingsPanel() {
   const [ledger, setLedger] = createSignal(null);
-  const [notice, setNotice] = createSignal("");
+  const [toast, setToast] = createSignal(null); // { msg: string, kind: 'ok' | 'err' }
   const [poolSheetOpen, setPoolSheetOpen] = createSignal(false);
   let flashTimer;
-  // One timer at a time: an overlapping flash must not let the previous
-  // timer wipe the newer message early (and nothing fires after unmount).
-  const flash = (msg) => {
-    setNotice(msg);
+
+  const dismissToast = () => {
     clearTimeout(flashTimer);
-    flashTimer = setTimeout(() => setNotice(""), 4000);
+    setToast(null);
   };
+
+  // 8-second duration for successes, sticky for errors until dismissed
+  const flash = (msg, kind = "ok") => {
+    setToast({ msg, kind });
+    clearTimeout(flashTimer);
+    if (kind === "ok") {
+      flashTimer = setTimeout(() => setToast(null), 8000);
+    }
+  };
+  const notice = () => toast()?.msg ?? "";
   onCleanup(() => clearTimeout(flashTimer));
 
   // The one open panel: {type:'put'|'call'|'sellCall'|'addPut'|'addCall'
@@ -1325,7 +1368,7 @@ export default function HoldingsPanel() {
     try {
       setLedger(await getHoldings());
     } catch (err) {
-      flash(`Holdings API error: ${err.message}`);
+      flash(`Holdings API error: ${err.message}`, "err");
     }
   };
   onMount(load);
@@ -1355,7 +1398,7 @@ export default function HoldingsPanel() {
     try {
       return await fn();
     } catch (err) {
-      flash(err.message);
+      flash(err.message, "err");
       return null;
     } finally {
       setBusy(false);
@@ -1806,6 +1849,7 @@ export default function HoldingsPanel() {
           {paneRows(pane())}
         </main>
       </div>
+      <ToastNotice toast={toast} onDismiss={dismissToast} />
     </div>
   );
 }

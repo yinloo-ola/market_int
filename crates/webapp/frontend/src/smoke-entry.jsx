@@ -1310,6 +1310,7 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
 
   // 4. Floating Viewport Toast
   ok("E2E: toast container is mounted in DOM", !!div.querySelector(".hp-toast-container"));
+  ok("R5: toast container has aria-live polite", div.querySelector(".hp-toast-container")?.getAttribute("aria-live") === "polite");
 }
 
 console.log(JSON.stringify({ total: checks.length }));
