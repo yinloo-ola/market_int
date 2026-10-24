@@ -520,17 +520,27 @@ function LotRailRow(props) {
       </div>
       <Show when={props.dialogFor("sellCall", l.id)} keyed>
         {(d) => (
-          <SellCallForm lot={d.lot} onDone={props.onDialogDone} onSell={props.onSellCall} />
+          <HoldingsActionSheet
+            title={`Sell covered call · ${d.lot.shares} sh ${d.lot.symbol}`}
+            onDone={props.onDialogDone}
+          >
+            <SellCallForm lot={d.lot} onDone={props.onDialogDone} onSell={props.onSellCall} />
+          </HoldingsActionSheet>
         )}
       </Show>
       <Show when={props.dialogFor("closeLot", l.id)} keyed>
         {(d) => (
-          <CloseLotForm
-            lot={d.lot}
-            busy={props.busy}
+          <HoldingsActionSheet
+            title={`Close lot · ${d.lot.shares} sh ${d.lot.symbol}`}
             onDone={props.onDialogDone}
-            onClose={props.onCloseLot}
-          />
+          >
+            <CloseLotForm
+              lot={d.lot}
+              busy={props.busy}
+              onDone={props.onDialogDone}
+              onClose={props.onCloseLot}
+            />
+          </HoldingsActionSheet>
         )}
       </Show>
     </div>
@@ -658,8 +668,45 @@ function OptionRow(props) {
         </div>
       </div>
       <Show when={props.dialogFor(x.p.kind, x.p.id)} keyed>
-        {(d) => <ClosePanel d={d} pools={props.pools} {...props.dialogActions} />}
+        {(d) => (
+          <HoldingsActionSheet
+            title={
+              d.type === "put" && d.stage === "lot"
+                ? "Record assigned shares"
+                : `Close ${d.pos.symbol} ${d.pos.strike}${d.type === "put" ? "P" : "C"} ×${d.pos.contracts}`
+            }
+            onDone={props.dialogActions?.onDone}
+          >
+            <ClosePanel d={d} pools={props.pools} {...props.dialogActions} />
+          </HoldingsActionSheet>
+        )}
       </Show>
+    </div>
+  );
+}
+
+/* ── focused mobile action sheet container ──────────────────────── */
+
+function HoldingsActionSheet(props) {
+  return (
+    <div class="hp-action-sheet" role="dialog" aria-modal="true" aria-label={props.title || "Position Action"}>
+      <div class="hp-sheet-backdrop" onClick={props.onDone} />
+      <div class="hp-sheet-container">
+        <div class="hp-sheet-header">
+          <div class="hp-sheet-title">{props.title}</div>
+          <button
+            type="button"
+            class="hp-sheet-close hp-sheet-cancel"
+            aria-label="Close"
+            onClick={props.onDone}
+          >
+            ×
+          </button>
+        </div>
+        <div class="hp-sheet-body">
+          {props.children}
+        </div>
+      </div>
     </div>
   );
 }
@@ -690,6 +737,14 @@ function OptionForm(props) {
     [f().strike, f().premium, f().contracts].every((x) => Number(x) > 0) &&
     f().expiry > f().sold &&
     f().sold <= todayET();
+  const hint = () => {
+    if (!f().symbol.trim()) return "Please enter a stock symbol (e.g. AAPL, NVDA).";
+    if (!f().strike || Number(f().strike) <= 0) return "Please enter a positive strike price.";
+    if (!f().premium || Number(f().premium) <= 0) return "Please enter a positive option premium.";
+    if (!f().contracts || Number(f().contracts) < 1) return "Contracts must be at least 1.";
+    if (f().expiry <= f().sold) return "Expiration date must be after the sold date.";
+    return null;
+  };
   return (
     <form
       class="holdings-add"
@@ -749,10 +804,13 @@ function OptionForm(props) {
       <label>
         expiry <input type="date" value={f().expiry} onInput={set("expiry")} />
       </label>
+      <Show when={hint()}>
+        <div class="hp-form-hint">{hint()}</div>
+      </Show>
       <button type="submit" class="btn btn-primary" disabled={!valid() || props.busy?.()}>
         {kind === "call" ? "Sell call" : "Sell put"}
       </button>
-      <button type="button" class="btn" onClick={props.onDone}>
+      <button type="button" class="btn hp-sheet-cancel" onClick={props.onDone}>
         Cancel
       </button>
       <Show when={kind === "call"}>
@@ -776,6 +834,12 @@ function AddLotForm(props) {
   const set = (k) => (e) => setF({ ...f(), [k]: e.target.value });
   const valid = () =>
     f().symbol.trim() && Number(f().shares) > 0 && Number(f().basis_per_share) > 0;
+  const hint = () => {
+    if (!f().symbol.trim()) return "Please enter a stock symbol (e.g. AAPL, GOOG).";
+    if (!f().shares || Number(f().shares) <= 0) return "Shares must be at least 1.";
+    if (!f().basis_per_share || Number(f().basis_per_share) <= 0) return "Please enter a positive cost basis per share.";
+    return null;
+  };
   return (
     <form
       class="holdings-add"
@@ -815,10 +879,13 @@ function AddLotForm(props) {
       <label>
         acquired <input type="date" value={f().acquired} onInput={set("acquired")} />
       </label>
+      <Show when={hint()}>
+        <div class="hp-form-hint">{hint()}</div>
+      </Show>
       <button type="submit" class="btn btn-primary" disabled={!valid() || props.busy?.()}>
         Record lot
       </button>
-      <button type="button" class="btn" onClick={props.onDone}>
+      <button type="button" class="btn hp-sheet-cancel" onClick={props.onDone}>
         Cancel
       </button>
     </form>
@@ -843,6 +910,14 @@ function SellCallForm(props) {
     Number(f().contracts) >= 1 &&
     Number(f().contracts) <= capacity() &&
     f().expiry > todayET();
+  const hint = () => {
+    if (!f().strike || Number(f().strike) <= 0) return "Please enter a positive strike price.";
+    if (!f().premium || Number(f().premium) <= 0) return "Please enter a positive premium.";
+    if (!f().contracts || Number(f().contracts) < 1) return "Contracts must be at least 1.";
+    if (Number(f().contracts) > capacity()) return `Contracts cannot exceed lot capacity of ${capacity()}.`;
+    if (f().expiry <= todayET()) return "Expiration date must be in the future.";
+    return null;
+  };
   return (
     <div class="holdings-outcome">
       <div class="holdings-outcome-head">
@@ -878,10 +953,13 @@ function SellCallForm(props) {
         <label>
           expiry <input type="date" value={f().expiry} onInput={set("expiry")} />
         </label>
+        <Show when={hint()}>
+          <div class="hp-form-hint">{hint()}</div>
+        </Show>
         <button type="submit" class="btn btn-primary" disabled={!valid() || props.busy?.()}>
           Sell call
         </button>
-        <button type="button" class="btn" onClick={props.onDone}>
+        <button type="button" class="btn hp-sheet-cancel" onClick={props.onDone}>
           Cancel
         </button>
       </form>
@@ -897,6 +975,11 @@ function CloseLotForm(props) {
   const price = () => Number(f().price);
   const valid = () =>
     Number.isInteger(shares()) && shares() >= 1 && shares() <= lot.shares && price() > 0;
+  const hint = () => {
+    if (!shares() || shares() < 1 || shares() > lot.shares) return `Shares to close must be between 1 and ${lot.shares}.`;
+    if (!price() || price() <= 0) return "Please enter a positive sale price per share.";
+    return null;
+  };
   const proceeds = () => (valid() ? shares() * price() : null);
   // Proceeds return to the lot's own pool — no override (the money
   // physically lands in the account where the shares were held).
@@ -929,10 +1012,13 @@ function CloseLotForm(props) {
             {`${shares()} sh × $${price().toFixed(2)} → $${proceeds().toFixed(2)} → pool ${lot.pool_name ?? "Main"}`}
           </i>
         </Show>
+        <Show when={hint()}>
+          <div class="hp-form-hint">{hint()}</div>
+        </Show>
         <button type="submit" class="btn btn-primary" disabled={!valid() || props.busy?.()}>
           Close {shares() === lot.shares ? "lot" : `${shares()} sh`}
         </button>
-        <button type="button" class="btn" onClick={props.onDone}>
+        <button type="button" class="btn hp-sheet-cancel" onClick={props.onDone}>
           Cancel
         </button>
       </form>
@@ -946,6 +1032,12 @@ function PutCloseDialog(props) {
   const pos = props.d.pos;
   const [outcome, setOutcome] = createSignal("bought-back");
   const [price, setPrice] = createSignal(pos.mark?.mid?.toFixed(2) ?? "");
+  const hint = () => {
+    if (outcome() !== "expired" && (!price() || !Number.isFinite(Number(price())) || Number(price()) < 0)) {
+      return "Please enter a valid price per share.";
+    }
+    return null;
+  };
   // Realized P&L preview — the one client-side computation (see file header).
   const realized = () => {
     if (outcome() === "expired") return pos.premium * 100 * pos.contracts;
@@ -1000,8 +1092,11 @@ function PutCloseDialog(props) {
           </b>
         </Show>
       </div>
+      <Show when={hint()}>
+        <div class="hp-form-hint">{hint()}</div>
+      </Show>
       <div class="holdings-outcome-actions">
-        <button type="button" class="btn" onClick={props.onDone}>
+        <button type="button" class="btn hp-sheet-cancel" onClick={props.onDone}>
           Cancel
         </button>
         <button
@@ -1035,6 +1130,12 @@ function AssignedLotForm(props) {
   const set = (k) => (e) => setF({ ...f(), [k]: e.target.value });
   const valid = () =>
     f().symbol.trim() && Number(f().shares) > 0 && Number(f().basis_per_share) > 0;
+  const hint = () => {
+    if (!f().symbol.trim()) return "Please enter a stock symbol.";
+    if (!f().shares || Number(f().shares) <= 0) return "Shares must be greater than 0.";
+    if (!f().basis_per_share || Number(f().basis_per_share) <= 0) return "Cost basis must be greater than 0.";
+    return null;
+  };
   return (
     <div class="holdings-outcome">
       <div class="holdings-outcome-head">Record assigned shares</div>
@@ -1080,10 +1181,13 @@ function AssignedLotForm(props) {
         <label>
           acquired <input type="date" value={f().acquired} onInput={set("acquired")} />
         </label>
+        <Show when={hint()}>
+          <div class="hp-form-hint">{hint()}</div>
+        </Show>
         <button type="submit" class="btn btn-primary" disabled={!valid() || props.busy?.()}>
           Record lot
         </button>
-        <button type="button" class="btn" onClick={props.onDone}>
+        <button type="button" class="btn hp-sheet-cancel" onClick={props.onDone}>
           Cancel
         </button>
       </form>
@@ -1095,6 +1199,12 @@ function CallCloseDialog(props) {
   const pos = props.d.pos;
   const [outcome, setOutcome] = createSignal("bought-back");
   const [price, setPrice] = createSignal(pos.mark?.mid?.toFixed(2) ?? "");
+  const hint = () => {
+    if (outcome() !== "expired" && (!price() || !Number.isFinite(Number(price())) || Number(price()) < 0)) {
+      return "Please enter a valid price per share.";
+    }
+    return null;
+  };
   const realized = () => {
     if (outcome() === "expired") return pos.premium * 100 * pos.contracts;
     const close = Number(price());
@@ -1148,8 +1258,11 @@ function CallCloseDialog(props) {
           </b>
         </Show>
       </div>
+      <Show when={hint()}>
+        <div class="hp-form-hint">{hint()}</div>
+      </Show>
       <div class="holdings-outcome-actions">
-        <button type="button" class="btn" onClick={props.onDone}>
+        <button type="button" class="btn hp-sheet-cancel" onClick={props.onDone}>
           Cancel
         </button>
         <button
@@ -1546,34 +1659,39 @@ export default function HoldingsPanel() {
       }
       keyed
     >
-      {id === "lots" ? (
-        <AddLotForm
-          pools={pools()}
-          busy={busy}
-          onDone={() => setDialog(null)}
-          onAdd={(f) => onAdd(f, `Recorded ${f.shares} sh ${f.symbol}.`)}
-        />
-      ) : (
-        <OptionForm
-          kind={id === "puts" ? "put" : "call"}
-          pools={pools()}
-          busy={busy}
-          onDone={() => setDialog(null)}
-          onAdd={(f) =>
-            onAdd(
-              f,
-              `Sold ${f.symbol} ${f.strike}${id === "puts" ? "P" : "C"} ×${f.contracts} — Refresh marks to price.`
-            )
-          }
-        />
-      )}
+      <HoldingsActionSheet
+        title={id === "lots" ? "Record Share Lot" : id === "puts" ? "Sell Put Option" : "Sell Call Option"}
+        onDone={() => setDialog(null)}
+      >
+        {id === "lots" ? (
+          <AddLotForm
+            pools={pools()}
+            busy={busy}
+            onDone={() => setDialog(null)}
+            onAdd={(f) => onAdd(f, `Recorded ${f.shares} sh ${f.symbol}.`)}
+          />
+        ) : (
+          <OptionForm
+            kind={id === "puts" ? "put" : "call"}
+            pools={pools()}
+            busy={busy}
+            onDone={() => setDialog(null)}
+            onAdd={(f) =>
+              onAdd(
+                f,
+                `Sold ${f.symbol} ${f.strike}${id === "puts" ? "P" : "C"} ×${f.contracts} — Refresh marks to price.`
+              )
+            }
+          />
+        )}
+      </HoldingsActionSheet>
     </Show>
   );
   const paneToolbar = (id) => (
     <div class="hp-toolbar-row">
       <button
         type="button"
-        class="btn"
+        class="btn hp-add-btn"
         onClick={() => setDialog({ type: paneAdd[id].type })}
       >
         {paneAdd[id].label}
