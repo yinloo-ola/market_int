@@ -3,6 +3,7 @@
 /data
 .DS_Store
 .commandcode/
+.zcode/
 
 # JS deps only — dist must stay tracked: rust-embed honors .gitignore when
 # embedding frontend/dist into the release binary, so ignoring it here would

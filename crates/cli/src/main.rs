@@ -1,11 +1,12 @@
 // CLI entrypoint: argument parsing and dispatch. All domain work lives in
 // `market_int_core`; this crate owns only the Telegram publish half
 // (publish.rs) and the backtest simulation (backtest.rs).
-mod publish;
 mod backtest;
+mod publish;
+mod repair;
 
-use chrono::{Datelike, Local};
 use chrono::NaiveDate;
+use chrono::{Datelike, Local};
 use chrono_tz::America::New_York;
 use clap::{Parser, Subcommand};
 use dotenv::dotenv;
@@ -13,9 +14,7 @@ use dotenv::dotenv;
 use market_int_core::model::OptionChainSide;
 use market_int_core::option::ExpiryTimeframe;
 use market_int_core::tiger::api_caller::Requester;
-use market_int_core::{
-    constants, model, quotes, sectors, store, symbols, tiger,
-};
+use market_int_core::{constants, model, quotes, sectors, store, symbols, tiger};
 
 // Helper function to calculate the target expiration date (next Friday + 7 days)
 fn calculate_target_expiration_date() -> chrono::DateTime<chrono_tz::Tz> {
@@ -30,6 +29,14 @@ fn calculate_target_expiration_date() -> chrono::DateTime<chrono_tz::Tz> {
     target_expiration_date.with_timezone(&New_York)
 }
 
+// Explicit --expiry probe target: YYYY-MM-DD at 16:00 New York. None when the
+// date is malformed or the 16:00 time is missing/ambiguous (DST transition).
+fn parse_expiry_target(date: &str) -> Option<chrono::DateTime<chrono_tz::Tz>> {
+    let day = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    let naive = day.and_hms_opt(16, 0, 0)?;
+    naive.and_local_timezone(New_York).single()
+}
+
 // Helper function to query option chain and log the results
 async fn query_and_log_option_chain(
     requester: &Requester,
@@ -37,6 +44,7 @@ async fn query_and_log_option_chain(
     expiration_date_ny: &chrono::DateTime<chrono_tz::Tz>,
     side: &OptionChainSide,
     strike: Option<f64>,
+    strike_to: Option<f64>,
     underlying: Option<f64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let symbol = symbol_list[0];
@@ -64,8 +72,9 @@ async fn query_and_log_option_chain(
     underlying_prices.insert(symbol.to_string(), underlying_price);
 
     // Degenerate (strike, strike) = the refresh's "price OUR strike" query
-    // shape (OI minimum 0 there, too); the legacy band stays the example.
-    let (min_strike, max_strike) = strike.map_or((225.0, 235.0), |s| (s, s));
+    // shape (OI minimum 0 there, too); --strike-to widens it into a band.
+    // The legacy band stays the example.
+    let (min_strike, max_strike) = strike.map_or((225.0, 235.0), |s| (s, strike_to.unwrap_or(s)));
 
     log::info!(
         "Chain probe: {symbol} side={:?} strikes [{min_strike}, {max_strike}] underlying={underlying_price}",
@@ -78,7 +87,11 @@ async fn query_and_log_option_chain(
             &[(symbol, (min_strike, max_strike))],
             &underlying_prices,
             expiration_date_ny,
-            if strike.is_some() { 0 } else { constants::MIN_OPEN_INTEREST },
+            if strike.is_some() {
+                0
+            } else {
+                constants::MIN_OPEN_INTEREST
+            },
             side,
         )
         .await?;
@@ -148,11 +161,50 @@ enum Commands {
         /// strike. Omitted = the legacy 225–235 example band.
         #[arg(long)]
         strike: Option<f64>,
+        /// With --strike, probe the full band (strike, strike_to) instead of
+        /// the degenerate (strike, strike) shape.
+        #[arg(long)]
+        strike_to: Option<f64>,
+        /// Probe this listed expiry (YYYY-MM-DD) instead of the
+        /// next-Friday+7 default — snapped to the nearest listed date.
+        #[arg(long)]
+        expiry: Option<String>,
         /// Underlying last close attached to the rows. With a --strike
         /// probe this is fetched from Tiger quotes when omitted — the
         /// production refresh always sends the real close.
         #[arg(long)]
         underlying: Option<f64>,
+    },
+    // Stock-repair analyzer: payoff table for explicit legs, or a
+    // short-strike ratio scan, against a live Tiger chain.
+    Repair {
+        /// Symbol to analyze (first of a comma list).
+        symbols: String,
+        /// Share lot's bought price (cost basis).
+        #[arg(long)]
+        bought: f64,
+        /// Expiry to probe (YYYY-MM-DD) — snapped to the nearest listed date.
+        #[arg(long)]
+        expiry: String,
+        /// Long call strike (buy 1 contract).
+        #[arg(long)]
+        buy: f64,
+        /// Short leg as STRIKE:QTY (e.g. 115:2). Repeatable; repeated
+        /// strikes merge. Omit when using --scan.
+        #[arg(long = "sell")]
+        sells: Vec<String>,
+        /// Enumerate short strikes × quantities instead of explicit legs.
+        #[arg(long)]
+        scan: bool,
+        /// Quantities tried per short strike in --scan (comma list).
+        #[arg(long, default_value = "1,2,3")]
+        sell_qtys: String,
+        /// --scan skips short strikes with open interest below this.
+        #[arg(long, default_value_t = 50)]
+        min_oi: u32,
+        /// Emit CSV instead of markdown.
+        #[arg(long, default_value_t = false)]
+        csv: bool,
     },
     // Backtest simulation
     Backtest {
@@ -298,14 +350,16 @@ async fn main() {
             // their historical wording there, and its sole outer Err
             // (requester-init) is logged there too. The arm stays silent,
             // matching the old behavior exactly.
-            let _ = market_int_core::pipeline::perform_all(&mut conn, &symbols_file_path, opts)
-                .await;
+            let _ =
+                market_int_core::pipeline::perform_all(&mut conn, &symbols_file_path, opts).await;
         }
 
         Commands::PublishOptionChain { symbols_file_path } => {
             let sectors = sectors::load_sectors("data/symbols.csv").unwrap_or_default();
             let regime = market_int_core::regime::MarketRegime::from_spy_trend(1.05);
-            match publish::publish_option_chains(&symbols_file_path, conn, 5, &regime, &sectors).await {
+            match publish::publish_option_chains(&symbols_file_path, conn, 5, &regime, &sectors)
+                .await
+            {
                 Ok(_) => log::info!("Successfully published option chains"),
                 Err(err) => log::error!("Error publishing option chains: {}", err),
             }
@@ -315,6 +369,8 @@ async fn main() {
             symbols,
             side,
             strike,
+            strike_to,
+            expiry,
             underlying,
         } => {
             // Split the comma-separated symbols into a vector
@@ -341,8 +397,20 @@ async fn main() {
             log::info!("Successfully connected to Tiger API");
 
             // Test option chain
-            // Calculate target expiration date
-            let target_expiration_date_ny = calculate_target_expiration_date();
+            // Calculate target expiration date — an explicit --expiry wins;
+            // otherwise next Friday + 7.
+            let target_expiration_date_ny = match expiry.as_deref() {
+                Some(date) => match parse_expiry_target(date) {
+                    Some(target) => target,
+                    None => {
+                        log::error!(
+                            "invalid --expiry {date:?} (want YYYY-MM-DD, unambiguous 16:00 New York)"
+                        );
+                        return;
+                    }
+                },
+                None => calculate_target_expiration_date(),
+            };
 
             // Get actual expiration dates from API and find the nearest one
             let expirations = match requester.option_expiration(&symbol_list).await {
@@ -374,6 +442,7 @@ async fn main() {
                 &nearest_expiration,
                 &side,
                 strike,
+                strike_to,
                 underlying,
             )
             .await
@@ -415,6 +484,37 @@ async fn main() {
             }
         }
 
+        Commands::Repair {
+            symbols,
+            bought,
+            expiry,
+            buy,
+            sells,
+            scan,
+            sell_qtys,
+            min_oi,
+            csv,
+        } => {
+            let qtys: Vec<u32> = sell_qtys
+                .split(',')
+                .filter_map(|q| q.trim().parse().ok())
+                .collect();
+            let args = repair::RepairArgs {
+                symbol: symbols,
+                bought,
+                expiry,
+                buy,
+                sells,
+                scan,
+                sell_qtys: qtys,
+                min_oi,
+                csv,
+            };
+            if let Err(err) = repair::run(args).await {
+                log::error!("repair: {err}");
+            }
+        }
+
         Commands::Backtest {
             symbols_file_path,
             from,
@@ -447,7 +547,8 @@ async fn main() {
                     return;
                 }
             };
-            let sectors = market_int_core::sectors::load_sectors(&symbols_file_path).unwrap_or_default();
+            let sectors =
+                market_int_core::sectors::load_sectors(&symbols_file_path).unwrap_or_default();
 
             let earnings_by_symbol = match &earnings {
                 Some(path) => match backtest::load_earnings(path) {
@@ -458,7 +559,8 @@ async fn main() {
                     Err(e) => {
                         log::error!(
                             "Failed to load earnings from '{}': {}. Running earnings-blind.",
-                            path, e
+                            path,
+                            e
                         );
                         std::collections::HashMap::new()
                     }
@@ -474,7 +576,12 @@ async fn main() {
                     to_date
                 );
                 let rows = backtest::run_safety_calibration(
-                    &conn, &symbols, &sectors, &earnings_by_symbol, from_date, to_date,
+                    &conn,
+                    &symbols,
+                    &sectors,
+                    &earnings_by_symbol,
+                    from_date,
+                    to_date,
                 );
                 println!("{}", backtest::print_safety_calibration(&rows));
                 match backtest::write_calibration_csv(&output, &rows) {
@@ -529,7 +636,13 @@ async fn main() {
             for cfg in &configs {
                 log::info!("Running config: {}", cfg.name);
                 let metrics = backtest::run_backtest(
-                    cfg, &conn, &symbols, &sectors, &earnings_by_symbol, from_date, to_date,
+                    cfg,
+                    &conn,
+                    &symbols,
+                    &sectors,
+                    &earnings_by_symbol,
+                    from_date,
+                    to_date,
                 );
                 println!("{}", backtest::format_metrics(&metrics));
                 all_metrics.push(metrics);
@@ -562,7 +675,14 @@ async fn main() {
                     return;
                 }
             };
-            match market_int_core::option::fetch_earnings_to_file(&mut requester, from_date, to_date, &output).await {
+            match market_int_core::option::fetch_earnings_to_file(
+                &mut requester,
+                from_date,
+                to_date,
+                &output,
+            )
+            .await
+            {
                 Ok(n) => log::info!("Wrote {} earnings entries to {}", n, output),
                 Err(e) => log::error!("Failed to fetch earnings: {}", e),
             }
