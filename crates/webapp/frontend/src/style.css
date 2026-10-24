@@ -1226,6 +1226,9 @@ details.adjust .hint-custom { color: var(--accent); }
   font-size: 14px;
   line-height: 1.4;
 }
+.hp-main > .holdings-notice {
+  display: none !important;
+}
 
 .holdings-pos { color: var(--ok); }
 .holdings-neg { color: var(--err); }
@@ -1375,7 +1378,7 @@ details.adjust .hint-custom { color: var(--accent); }
   line-height: 1.45;
 }
 .hp-tabs-grid {
-  display: grid; grid-template-columns: 14rem 1fr;
+  display: grid; grid-template-columns: minmax(16.5rem, 18rem) 1fr;
   gap: 1.25rem; align-items: start;
 }
 .hp-tabs-rail {
@@ -1419,6 +1422,8 @@ details.adjust .hint-custom { color: var(--accent); }
   margin-bottom: 0.35rem;
 }
 .hp-rail-big { font-size: 1.65rem; font-weight: 800; color: var(--ok); line-height: 1.2; }
+.hp-rail-big.holdings-neg { color: var(--err) !important; }
+.hp-cash-bar-free.holdings-neg { color: var(--err) !important; }
 .hp-rail-sub { font-size: 0.85rem; color: var(--muted); margin-top: 0.25rem; }
 
 /* Position Card (Universal progressive-disclosure card for Lots, Puts, Calls) */
@@ -1717,16 +1722,16 @@ details.adjust .hint-custom { color: var(--accent); }
   width: 100%;
   max-width: 540px;
   max-height: 85vh;
-  overflow-y: auto;
+  overflow: hidden;
   background: var(--panel);
   border: 1px solid var(--border);
   border-top-left-radius: 16px;
   border-top-right-radius: 16px;
-  padding: 1.25rem 1.4rem;
+  padding: 1.25rem 1.4rem 0;
   box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.35);
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 0.75rem;
 }
 
 .hp-sheet-header {
@@ -1735,6 +1740,7 @@ details.adjust .hint-custom { color: var(--accent); }
   justify-content: space-between;
   border-bottom: 1px solid var(--border);
   padding-bottom: 0.75rem;
+  flex: 0 0 auto;
 }
 .hp-sheet-title {
   font-size: 1.2rem;
@@ -1759,6 +1765,10 @@ details.adjust .hint-custom { color: var(--accent); }
   display: flex;
   flex-direction: column;
   gap: 0.85rem;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding-bottom: 1.25rem;
 }
 .hp-sheet-footer {
   display: flex;
@@ -1931,6 +1941,19 @@ details.adjust .hint-custom { color: var(--accent); }
   .hp-sheet-container {
     border-radius: 16px;
     max-height: 80vh;
+    max-width: 600px;
+  }
+  .hp-action-sheet .holdings-add {
+    display: grid !important;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 14px;
+  }
+  .hp-action-sheet .holdings-add .hp-form-full,
+  .hp-action-sheet .holdings-add .hp-form-hint,
+  .hp-action-sheet .holdings-add .btn,
+  .hp-action-sheet .holdings-add .hp-dialog-note,
+  .hp-action-sheet .holdings-add .holdings-preview {
+    grid-column: 1 / -1 !important;
   }
 }
 
@@ -1963,6 +1986,8 @@ details.adjust .hint-custom { color: var(--accent); }
   line-height: 1.4;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
   animation: hpToastIn 0.25s ease-out;
+  margin-bottom: 0 !important;
+  border-left: none !important;
 }
 @keyframes hpToastIn {
   from { opacity: 0; transform: translateY(16px); }
@@ -2084,7 +2109,7 @@ details.adjust .hint-custom { color: var(--accent); }
   .hp-pool-sheet-btn,
   .hp-sheet-close,
   .hp-toast-dismiss {
-    min-height: 44px;
+    min-height: 44px !important;
     min-width: 44px;
     font-size: 14px;
   }

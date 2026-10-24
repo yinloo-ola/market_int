@@ -142,6 +142,16 @@ async function main() {
     });
     console.log("Saved gui-test-screenshots/holdings-desktop.png");
 
+    // Open Sell Put action modal on desktop to verify 2-column layout
+    await desktopPage.locator(".hp-add-btn").first().click();
+    await desktopPage.waitForSelector(".hp-action-sheet:not([hidden])");
+    await desktopPage.waitForTimeout(300);
+    await desktopPage.screenshot({
+      path: resolve(OUTPUT_DIR, "holdings-desktop-action.png"),
+      fullPage: false,
+    });
+    console.log("Saved gui-test-screenshots/holdings-desktop-action.png");
+
     await desktopContext.close();
     await browser.close();
 

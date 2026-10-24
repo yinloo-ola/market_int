@@ -83,7 +83,10 @@ function CashSummaryBar(props) {
         <span class="hp-cash-bar-total">
           {cash() == null ? "—" : money(cash())} <span style={{ "font-size": "0.85rem", "font-weight": "500", color: "var(--muted)" }}>cash</span>
         </span>
-        <span class="hp-cash-bar-free">
+        <span
+          class="hp-cash-bar-free"
+          classList={{ "holdings-neg": (free() ?? 0) < 0 }}
+        >
           {free() == null ? "—" : money(free())} <span style={{ "font-size": "0.85rem", "font-weight": "500", color: "var(--muted)" }}>free</span>
         </span>
       </div>
@@ -143,7 +146,12 @@ function PoolManagerSheet(props) {
         <div class="hp-sheet-body">
           <div class="hp-rail-block">
             <div class="hp-rail-label">{sel() ? `${sel().name} — free to sell puts` : "Total Free Cash"}</div>
-            <div class="hp-rail-big">{free() == null ? "—" : money(free())}</div>
+            <div
+              class="hp-rail-big"
+              classList={{ "holdings-neg": (free() ?? 0) < 0 }}
+            >
+              {free() == null ? "—" : money(free())}
+            </div>
             <div class="hp-rail-sub">
               {cash() == null ? "—" : money(cash())} cash − {money(reserved())} reserved
             </div>
@@ -283,7 +291,12 @@ function CashStrip(props) {
   return (
     <div class="hp-rail-block">
       <div class="hp-rail-label">free to sell puts</div>
-      <div class="hp-rail-big">{free() == null ? "—" : money(free())}</div>
+      <div
+        class="hp-rail-big"
+        classList={{ "holdings-neg": (free() ?? 0) < 0 }}
+      >
+        {free() == null ? "—" : money(free())}
+      </div>
       <div class="hp-rail-sub">
         {cash() == null ? "—" : money(cash())} cash − {money(reserved())}{" "}
         reserved
@@ -770,6 +783,9 @@ function OptionForm(props) {
         symbol <input placeholder="SYMBOL" value={f().symbol} onInput={set("symbol")} />
       </label>
       <label>
+        contracts <input inputmode="numeric" value={f().contracts} onInput={set("contracts")} />
+      </label>
+      <label>
         strike
         <input
           inputmode="decimal"
@@ -788,22 +804,19 @@ function OptionForm(props) {
         />
       </label>
       <label>
-        contracts <input inputmode="numeric" value={f().contracts} onInput={set("contracts")} />
+        sold <input type="date" value={f().sold} onInput={set("sold")} />
+      </label>
+      <label>
+        expiry <input type="date" value={f().expiry} onInput={set("expiry")} />
       </label>
       <Show when={pools().length > 1}>
-        <label>
+        <label class="hp-form-full">
           pool
           <select value={f().pool_id} onInput={set("pool_id")}>
             <For each={pools()}>{(p) => <option value={p.id}>{p.name}</option>}</For>
           </select>
         </label>
       </Show>
-      <label>
-        sold <input type="date" value={f().sold} onInput={set("sold")} />
-      </label>
-      <label>
-        expiry <input type="date" value={f().expiry} onInput={set("expiry")} />
-      </label>
       <Show when={hint()}>
         <div class="hp-form-hint">{hint()}</div>
       </Show>
@@ -868,17 +881,17 @@ function AddLotForm(props) {
         basis / share
         <input inputmode="decimal" placeholder="e.g. 349.00" value={f().basis_per_share} onInput={set("basis_per_share")} />
       </label>
+      <label>
+        acquired <input type="date" value={f().acquired} onInput={set("acquired")} />
+      </label>
       <Show when={pools().length > 1}>
-        <label>
+        <label class="hp-form-full">
           pool (deduct {Math.trunc(Number(f().shares) * Number(f().basis_per_share) || 0).toLocaleString()} from)
           <select value={f().pool_id} onInput={set("pool_id")}>
             <For each={pools()}>{(p) => <option value={p.id}>{p.name}</option>}</For>
           </select>
         </label>
       </Show>
-      <label>
-        acquired <input type="date" value={f().acquired} onInput={set("acquired")} />
-      </label>
       <Show when={hint()}>
         <div class="hp-form-hint">{hint()}</div>
       </Show>
@@ -1057,7 +1070,10 @@ function PutCloseDialog(props) {
           <input
             type="radio"
             checked={outcome() === "bought-back"}
-            onChange={() => setOutcome("bought-back")}
+            onChange={() => {
+              setOutcome("bought-back");
+              if (pos.mark?.mid != null) setPrice(pos.mark.mid.toFixed(2));
+            }}
           />
           bought back
         </label>
@@ -1073,7 +1089,10 @@ function PutCloseDialog(props) {
           <input
             type="radio"
             checked={outcome() === "assigned"}
-            onChange={() => setOutcome("assigned")}
+            onChange={() => {
+              setOutcome("assigned");
+              if (pos.mark?.underlying_price != null) setPrice(pos.mark.underlying_price.toFixed(2));
+            }}
           />
           assigned
         </label>
@@ -1166,14 +1185,6 @@ function AssignedLotForm(props) {
         <label>
           shares <input inputmode="numeric" value={f().shares} onInput={set("shares")} />
         </label>
-        <Show when={pools().length > 1}>
-          <label>
-            pool (deduct strike × 100 × contracts from)
-            <select value={f().pool_id} onInput={set("pool_id")}>
-              <For each={pools()}>{(p) => <option value={p.id}>{p.name}</option>}</For>
-            </select>
-          </label>
-        </Show>
         <label>
           basis / share
           <input inputmode="decimal" value={f().basis_per_share} onInput={set("basis_per_share")} />
@@ -1181,6 +1192,14 @@ function AssignedLotForm(props) {
         <label>
           acquired <input type="date" value={f().acquired} onInput={set("acquired")} />
         </label>
+        <Show when={pools().length > 1}>
+          <label class="hp-form-full">
+            pool (deduct strike × 100 × contracts from)
+            <select value={f().pool_id} onInput={set("pool_id")}>
+              <For each={pools()}>{(p) => <option value={p.id}>{p.name}</option>}</For>
+            </select>
+          </label>
+        </Show>
         <Show when={hint()}>
           <div class="hp-form-hint">{hint()}</div>
         </Show>
@@ -1223,7 +1242,10 @@ function CallCloseDialog(props) {
           <input
             type="radio"
             checked={outcome() === "bought-back"}
-            onChange={() => setOutcome("bought-back")}
+            onChange={() => {
+              setOutcome("bought-back");
+              if (pos.mark?.mid != null) setPrice(pos.mark.mid.toFixed(2));
+            }}
           />
           bought back
         </label>
@@ -1239,7 +1261,10 @@ function CallCloseDialog(props) {
           <input
             type="radio"
             checked={outcome() === "called-away"}
-            onChange={() => setOutcome("called-away")}
+            onChange={() => {
+              setOutcome("called-away");
+              if (pos.mark?.underlying_price != null) setPrice(pos.mark.underlying_price.toFixed(2));
+            }}
           />
           called away
         </label>
@@ -1758,7 +1783,7 @@ export default function HoldingsPanel() {
   );
   const noticeLine = () => (
     <Show when={notice()}>
-      <div class="holdings-notice">{notice()}</div>
+      <div class="holdings-notice" style={{ display: "none" }}>{notice()}</div>
     </Show>
   );
 
