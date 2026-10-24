@@ -1161,6 +1161,157 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
   );
 }
 
+// ── R1: Senior-friendly typography and touch target styling tokens ──
+{
+  const testTile = document.createElement("button");
+  testTile.className = "hp-tab-tile";
+  document.body.appendChild(testTile);
+  const cs = window.getComputedStyle(testTile);
+  ok("R1: tab tile min-height is at least 44px", parseFloat(cs.minHeight) >= 44);
+
+  const testBtn = document.createElement("button");
+  testBtn.className = "holdings-close-btn";
+  document.body.appendChild(testBtn);
+  const csBtn = window.getComputedStyle(testBtn);
+  ok("R1: close button min-height is at least 44px", parseFloat(csBtn.minHeight) >= 44);
+  ok("R1: close button font size is at least 12px", parseFloat(csBtn.fontSize) >= 12);
+}
+
+// ── Feature Acceptance: Elderly-Friendly Mobile Holdings E2E ──
+{
+  const HP = (await import("./components/HoldingsPanel")).default;
+  const e2eLedger = {
+    schema_version: 1,
+    cash: 50000,
+    cash_pools: [
+      { id: "main", name: "Main", cash: 30000 },
+      { id: "ibkr", name: "IBKR", cash: 20000 },
+    ],
+    positions: [
+      {
+        id: "e2e-p1",
+        symbol: "NVDA",
+        strike: 120,
+        expiry: "2026-10-30",
+        premium: 2.5,
+        contracts: 1,
+        sold: "2026-10-15",
+        pool_id: "main",
+        mark: { mid: 1.0, as_of: "2026-10-20T19:00:00Z", underlying_price: 135.0 },
+        view: {
+          pl_dollars: 150.0,
+          pl_pct: 0.6,
+          pace_per_day_dollars: 30.0,
+          pace_per_day_pct: 0.12,
+          days_elapsed: 5,
+          days_total: 15,
+          target_pct: 0.33,
+          pace_met: true,
+          spot_pct_vs_strike: (135 - 120) / 120,
+        },
+      },
+    ],
+    lots: [
+      {
+        id: "e2e-l1",
+        symbol: "AAPL",
+        shares: 100,
+        basis_per_share: 220.0,
+        acquired: "2026-10-01",
+        pool_id: "ibkr",
+        mark: { as_of: "2026-10-20T19:00:00Z" },
+        view: {
+          value: 23500.0,
+          pl_dollars: 1500.0,
+          pl_pct: 1500 / 22000,
+          capacity: 1,
+          covered: 0,
+          spot: 235.0,
+          spot_as_of: "2026-10-20T19:00:00Z",
+          age_days: 19,
+        },
+      },
+    ],
+    calls: [
+      {
+        id: "e2e-c1",
+        symbol: "MSFT",
+        strike: 450,
+        expiry: "2026-11-06",
+        premium: 3.0,
+        contracts: 1,
+        sold: "2026-10-18",
+        pool_id: "main",
+        mark: { mid: 1.5, as_of: "2026-10-20T19:00:00Z", underlying_price: 440.0 },
+        view: {
+          pl_dollars: 150.0,
+          pl_pct: 0.5,
+          pace_per_day_dollars: 75.0,
+          pace_per_day_pct: 0.25,
+          days_elapsed: 2,
+          days_total: 19,
+          target_pct: 0.1,
+          pace_met: true,
+          spot_pct_vs_strike: (440 - 450) / 450,
+        },
+      },
+    ],
+  };
+
+  const jsonRes = (v) =>
+    new Response(JSON.stringify(v), { status: 200, headers: { "Content-Type": "application/json" } });
+  globalThis.fetch = async (path, opts = {}) => {
+    return jsonRes(e2eLedger);
+  };
+
+  const div = document.createElement("div");
+  div.id = "e2e-root";
+  document.body.appendChild(div);
+  render(() => <HP />, div);
+  await tick();
+  await tick();
+  await tick();
+
+  // 1. Mobile Cash Summary Bar & Pool Manager Sheet
+  const cashBar = div.querySelector(".hp-cash-bar");
+  ok("E2E: mobile cash summary bar renders with accounts button", !!cashBar && !!cashBar.querySelector(".hp-pool-sheet-btn"));
+  const poolSheetBtn = cashBar?.querySelector(".hp-pool-sheet-btn");
+  poolSheetBtn?.click();
+  await tick();
+  const poolSheet = div.querySelector(".hp-pool-sheet");
+  ok("E2E: pool manager sheet opens on button tap", !!poolSheet && !poolSheet.hidden);
+  poolSheet?.querySelector(".hp-sheet-close")?.click();
+  await tick();
+  ok("E2E: pool manager sheet closes", !div.querySelector(".hp-pool-sheet:not([hidden])"));
+
+  // 2. Position Cards with Progressive Disclosure
+  const posCards = div.querySelectorAll(".hp-pos-card");
+  ok("E2E: position cards render in collapsed state", posCards.length >= 1 && !posCards[0].querySelector(".hp-card-drawer:not([hidden])"));
+  const firstCardBody = posCards[0]?.querySelector(".hp-card-summary") || posCards[0];
+  firstCardBody?.click();
+  await tick();
+  ok("E2E: tapping position card toggles secondary drawer open", !!div.querySelector(".hp-pos-card .hp-card-drawer:not([hidden])"));
+  firstCardBody?.click();
+  await tick();
+  ok("E2E: tapping position card collapses secondary drawer", !div.querySelector(".hp-pos-card .hp-card-drawer:not([hidden])"));
+
+  // 3. Focused Action Sheet & Validation Hints
+  const sellPutBtn = div.querySelector(".hp-add-btn");
+  sellPutBtn?.click();
+  await tick();
+  const actionSheet = div.querySelector(".hp-action-sheet");
+  ok("E2E: action button opens focused action sheet", !!actionSheet && !actionSheet.hidden);
+  const hint = actionSheet?.querySelector(".hp-form-hint");
+  const submitBtn = actionSheet?.querySelector('button[type="submit"]');
+  ok("E2E: action sheet shows validation helper and disables submit when inputs incomplete", !!hint && submitBtn?.disabled);
+  actionSheet?.querySelector(".hp-sheet-cancel")?.click();
+  await tick();
+  ok("E2E: cancel button closes action sheet", !div.querySelector(".hp-action-sheet:not([hidden])"));
+
+  // 4. Floating Viewport Toast
+  ok("E2E: toast container is mounted in DOM", !!div.querySelector(".hp-toast-container"));
+}
+
 console.log(JSON.stringify({ total: checks.length }));
 let failedCount = 0;
 for (const [name, passed] of checks) {

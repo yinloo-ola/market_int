@@ -1200,66 +1200,83 @@ details.adjust .hint-custom { color: var(--accent); }
 }
 
 /* ── Holdings panel (2026-09-11-holdings, variant B) ─────────────────
+   Senior-friendly typography & touch tokens (2026-10-24).
    Cards sorted most-ahead-of-pace first; the pace bar (fill vs the amber
    target tick) is the close decision; stat strip anchors it in dollars. */
 
-
-
-
-.holdings-refresh { flex: 0 0 auto; }
+.holdings-refresh {
+  flex: 0 0 auto;
+  min-height: 44px;
+  font-size: 14px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 14px;
+}
 
 .holdings-notice {
   border: 1px solid var(--border);
   background: var(--panel);
-  border-left: 3px solid var(--accent);
-  padding: 6px 10px;
-  border-radius: 6px;
-  margin-bottom: 10px;
-  color: var(--muted);
+  border-left: 4px solid var(--accent);
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.4;
 }
 
 .holdings-pos { color: var(--ok); }
 .holdings-neg { color: var(--err); }
 
-
 /* add-position form: an inline row on desktop */
 .holdings-add {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
   flex-wrap: wrap;
   border: 1px dashed var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
+  border-radius: 10px;
+  padding: 12px 14px;
   background: var(--panel);
   flex: 1;
 }
 .holdings-add label {
   display: inline-flex;
-  gap: 4px;
+  gap: 6px;
   align-items: center;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 13.5px;
+  font-weight: 600;
 }
 .holdings-add input {
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 4px 6px;
+  padding: 6px 10px;
   font: inherit;
+  font-size: 14px;
   background: var(--page);
   color: var(--ink);
-  max-width: 110px;
+  min-height: 40px;
+  max-width: 120px;
 }
 .holdings-add input:first-child { text-transform: uppercase; }
 
-
-
-.holdings-close-btn { font-size: 11px; }
+.holdings-close-btn {
+  font-size: 13px;
+  font-weight: 600;
+  min-height: 44px;
+  padding: 6px 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 
 /* the decision bar: fill = profit%, tick = pace target */
 .holdings-bar {
   position: relative;
-  height: 10px;
+  height: 12px;
   border-radius: 999px;
   background: var(--pace-track);
   overflow: visible;
@@ -1269,56 +1286,61 @@ details.adjust .hint-custom { color: var(--accent); }
   inset: 0 auto 0 0;
   border-radius: 999px;
   background: var(--accent);
-  opacity: 0.85;
+  opacity: 0.95;
 }
 .holdings-bar-mark {
   position: absolute;
-  top: -3px;
-  bottom: -3px;
-  width: 2px;
+  top: -4px;
+  bottom: -4px;
+  width: 3px;
   background: var(--warn);
+  border-radius: 1px;
 }
 
 /* sold at / now (mid) / close captures */
 .holdings-card-stats {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 6px;
+  gap: 8px;
   border-top: 1px solid var(--border);
-  padding-top: 8px;
+  padding-top: 10px;
 }
 .holdings-card-stats div { display: flex; flex-direction: column; min-width: 0; }
 .holdings-card-stats span {
-  font-size: 10px;
+  font-size: 12px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
   color: var(--muted);
 }
-.holdings-card-stats b { font-variant-numeric: tabular-nums; font-size: 12.5px; }
-.holdings-card-stats i { font-style: normal; font-size: 10.5px; color: var(--muted); }
+.holdings-card-stats b { font-variant-numeric: tabular-nums; font-size: 14px; }
+.holdings-card-stats i { font-style: normal; font-size: 12px; color: var(--muted); }
 
 /* outcome-confirm dialog (bought back / expired / assigned) */
 .holdings-outcome {
   border: 1px solid var(--accent);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--panel);
-  padding: 10px 12px;
+  padding: 14px 16px;
   margin-top: 10px;
-  max-width: 420px;
+  max-width: 440px;
 }
-.holdings-outcome-head { font-weight: 600; margin-bottom: 8px; }
-.holdings-outcome-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
-.holdings-outcome-row label { display: inline-flex; gap: 5px; align-items: center; font-size: 12px; }
-.holdings-outcome-price { display: flex; gap: 6px; align-items: center; font-size: 12px; margin-bottom: 8px; }
+.holdings-outcome-head { font-weight: 700; font-size: 15px; margin-bottom: 10px; }
+.holdings-outcome-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; }
+.holdings-outcome-row label { display: inline-flex; gap: 6px; align-items: center; font-size: 13.5px; }
+.holdings-outcome-price { display: flex; gap: 8px; align-items: center; font-size: 13.5px; margin-bottom: 10px; }
 .holdings-outcome-price input {
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 4px 6px;
+  padding: 6px 10px;
   font: inherit;
-  width: 90px;
+  font-size: 14px;
+  min-height: 40px;
+  width: 110px;
 }
-.holdings-outcome-realized { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-.holdings-outcome-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.holdings-outcome-realized { font-size: 13.5px; color: var(--muted); margin-bottom: 10px; }
+.holdings-outcome-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.holdings-outcome-actions .btn { min-height: 40px; padding: 6px 14px; font-size: 14px; }
 
 @media (max-width: 720px) {
   /* Four stat cells wrap to a 2×2 grid on phones. */
@@ -1328,17 +1350,17 @@ details.adjust .hint-custom { color: var(--accent); }
   .holdings-add {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 8px 10px;
+    gap: 10px 12px;
     width: 100%;
   }
   .holdings-add label {
     display: flex;
     flex-direction: column;
     align-items: stretch;
-    gap: 2px;
+    gap: 4px;
   }
-  .holdings-add input { max-width: none; width: 100%; }
-  .holdings-add .btn, .holdings-add .btn-primary { grid-column: 1 / -1; }
+  .holdings-add input { max-width: none; width: 100%; min-height: 44px; }
+  .holdings-add .btn, .holdings-add .btn-primary { grid-column: 1 / -1; min-height: 44px; }
 }
 
 /* ── Wheel holdings, side-rail sub-tabs (2026-09-19-holdings-subtabs,
@@ -1346,219 +1368,568 @@ details.adjust .hint-custom { color: var(--accent); }
    LOTS | PUTS | CALLS as tile buttons in a sticky rail beside the active
    pane column; cash strip + Refresh marks + notice reachable from every
    tab; dialogs anchor inline under the entry that opened them. Below
-   900px the rail collapses to a horizontal tile strip (user-approved
-   prototype); list rows stack there as before. */
-.hp-tabs-shell { padding: 16px 0 0; }
+   900px the rail collapses into a compact CashSummaryBar and tile strip. */
+.hp-tabs-shell {
+  padding: 16px 0 0;
+  font-size: 14px;
+  line-height: 1.45;
+}
 .hp-tabs-grid {
-  display: grid; grid-template-columns: 13rem 1fr;
-  gap: 1.1rem; align-items: start;
+  display: grid; grid-template-columns: 14rem 1fr;
+  gap: 1.25rem; align-items: start;
 }
 .hp-tabs-rail {
-  display: flex; flex-direction: column; gap: 0.55rem;
+  display: flex; flex-direction: column; gap: 0.65rem;
   position: sticky; top: 10px;
 }
 .hp-tabs-brand {
-  font-size: 0.62rem; opacity: 0.6; text-transform: uppercase;
-  letter-spacing: 0.05em; padding: 2px 4px;
+  font-size: 0.82rem; font-weight: 700; color: var(--muted); text-transform: uppercase;
+  letter-spacing: 0.05em; padding: 4px 6px;
 }
 .hp-tab-tile {
   width: 100%; text-align: left; appearance: none; font: inherit; cursor: pointer;
   background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-  padding: 0.6rem 0.8rem; color: var(--muted);
+  padding: 0.75rem 0.95rem; color: var(--muted);
+  min-height: 52px;
+  transition: border-color 0.15s, box-shadow 0.15s, color 0.15s;
 }
 .hp-tab-tile.active { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); color: var(--ink); }
-.hp-tab-tile-name { font-weight: 700; font-size: 0.8rem; letter-spacing: 0.04em; }
-.hp-tab-tile-count { float: right; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
-.hp-tab-tile-sub { font-size: 0.68rem; margin-top: 2px; }
-.hp-tabs-main { display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; }
-.hp-pane-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
-.hp-pane-title { font-weight: 700; font-size: 0.95rem; }
+.hp-tab-tile-name { font-weight: 700; font-size: 0.95rem; letter-spacing: 0.04em; }
+.hp-tab-tile-count { float: right; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; font-size: 0.95rem; }
+.hp-tab-tile-sub { font-size: 0.82rem; margin-top: 3px; color: var(--muted); }
+.hp-tabs-main { display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
+.hp-pane-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.5rem; }
+.hp-pane-title { font-weight: 700; font-size: 1.15rem; color: var(--ink); }
 .hp-pane-head .holdings-refresh { margin-left: auto; }
-.hp-pane-hint { margin-left: auto; font-size: 0.72rem; opacity: 0.6; }
+.hp-pane-hint { margin-left: auto; font-size: 0.85rem; color: var(--muted); }
 .hp-rail-block {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 0.7rem 0.9rem;
+  padding: 0.85rem 1rem;
 }
 .hp-rail-label {
-  font-size: 0.68rem;
-  opacity: 0.6;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  margin-bottom: 0.3rem;
+  margin-bottom: 0.35rem;
 }
-.hp-rail-big { font-size: 1.6rem; font-weight: 700; color: var(--ok); }
-.hp-rail-sub { font-size: 0.72rem; opacity: 0.6; margin-top: 0.15rem; }
+.hp-rail-big { font-size: 1.65rem; font-weight: 800; color: var(--ok); line-height: 1.2; }
+.hp-rail-sub { font-size: 0.85rem; color: var(--muted); margin-top: 0.25rem; }
 
-/* One card per lot (mirrors .hp-list-row): the info block and its action
-   buttons share one bordered box, so "sell call…" can't read as belonging
-   to the next lot below it. */
+/* Position Card (Universal progressive-disclosure card for Lots, Puts, Calls) */
+.hp-pos-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.hp-pos-card:hover {
+  border-color: var(--accent);
+}
+.hp-pos-card.hp-row-met {
+  border-color: var(--ok);
+}
+.hp-card-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.85rem 1.1rem;
+  cursor: pointer;
+  user-select: none;
+}
+.hp-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.hp-card-symbol-line {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.hp-card-symbol {
+  font-size: 1.15rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+}
+.hp-card-main {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.hp-card-meta {
+  font-size: 0.9rem;
+  color: var(--muted);
+  font-weight: 500;
+}
+.hp-card-pl {
+  font-size: 1.05rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+}
+.hp-card-actions {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  justify-content: flex-end;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--border);
+  margin-top: 0.2rem;
+}
+.hp-card-actions .btn,
+.hp-card-actions .holdings-close-btn {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 8px 16px;
+  font-size: 13.5px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+}
+.hp-card-drawer {
+  padding: 0.85rem 1.1rem;
+  background: var(--page);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+.hp-card-drawer[hidden] {
+  display: none !important;
+}
+
+/* One card per lot (mirrors .hp-list-row) */
 .hp-lot-card {
   display: flex;
   flex-direction: column;
-  gap: 0.45rem;
+  gap: 0.55rem;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 0.55rem 0.8rem;
+  border-radius: 12px;
+  padding: 0.85rem 1.1rem;
 }
-.hp-lot-row-top { display: flex; justify-content: space-between; gap: 0.6rem; font-size: 0.85rem; }
-.hp-lot-row-top b { font-variant-numeric: tabular-nums; }
+.hp-lot-row-top { display: flex; justify-content: space-between; gap: 0.75rem; font-size: 1.05rem; }
+.hp-lot-row-top b { font-variant-numeric: tabular-nums; font-size: 1.1rem; }
 .hp-lot-row-sub {
   display: flex;
   justify-content: space-between;
-  gap: 0.6rem;
-  font-size: 0.72rem;
-  opacity: 0.78;
-  margin-top: 0.1rem;
+  gap: 0.75rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+  margin-top: 0.2rem;
 }
-.hp-lot-row-sub b { font-variant-numeric: tabular-nums; }
-/* Buttons pin to the card's bottom-right — the same side the option rows
-   put their close button, and far from the next card's left-aligned symbol. */
+.hp-lot-row-sub b { font-variant-numeric: tabular-nums; font-size: 1rem; }
 .hp-lot-actions {
   display: flex;
-  gap: 0.4rem;
+  gap: 0.6rem;
   justify-content: flex-end;
+  align-items: center;
+}
+.hp-lot-actions .btn,
+.hp-lot-actions .holdings-close-btn {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 8px 16px;
+  font-size: 13.5px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .holdings-preview {
-  font-size: 0.72rem;
+  font-size: 0.9rem;
   color: var(--muted);
   font-style: normal;
+  line-height: 1.4;
 }
 .hp-pool-tag {
   display: inline-block;
-  padding: 0 0.35rem;
-  border-radius: 0.5rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
   background: var(--band-bg);
+  border: 1px solid var(--border);
   color: var(--muted);
-  font-size: 0.62rem;
-  font-weight: 600;
-  margin-left: 0.3rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  margin-left: 0.35rem;
   vertical-align: 0.05em;
+  white-space: nowrap;
 }
 .hp-spot-session {
   font-style: normal;
-  font-weight: 400;
-  font-size: 0.68rem;
+  font-weight: 600;
+  font-size: 0.8rem;
   color: var(--muted);
-  margin-left: 0.3rem;
+  margin-left: 0.35rem;
 }
 .hp-lot-row-meta {
   display: flex;
   justify-content: space-between;
-  gap: 0.6rem;
-  font-size: 0.68rem;
-  opacity: 0.55;
-  margin-top: 0.1rem;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-top: 0.2rem;
 }
 .hp-lot-row-meta i { font-style: normal; }
-.hp-toolbar-row { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.4rem; }
+.hp-toolbar-row { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 0.5rem; }
+.hp-toolbar-row .btn {
+  min-height: 44px;
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 8px;
+}
 
 /* Bottom margin keeps the last row clear of the viewport edge on mobile. */
-.hp-list { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 0.75rem; }
+.hp-list { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem; }
 .hp-list-row {
   display: grid;
-  grid-template-columns: minmax(14rem, 1.4fr) 5rem minmax(9rem, 1fr) 8rem auto;
-  gap: 0.8rem;
+  grid-template-columns: minmax(14rem, 1.4fr) 5.5rem minmax(9rem, 1fr) 8.5rem auto;
+  gap: 0.9rem;
   align-items: center;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 0.55rem 0.8rem;
+  border-radius: 12px;
+  padding: 0.75rem 1rem;
 }
 .hp-list-row.hp-row-met { border-color: var(--ok); }
 .hp-list-head {
   background: transparent;
   border: 0;
-  padding: 0.1rem 0.8rem;
-  font-size: 0.68rem;
-  opacity: 0.55;
+  padding: 0.2rem 1rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
-.hp-list-pos { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+.hp-list-pos { display: flex; align-items: baseline; gap: 0.55rem; flex-wrap: wrap; }
 .hp-list-pos i,
-.hp-list-pace i { font-style: normal; font-size: 0.72rem; opacity: 0.6; }
+.hp-list-pace i { font-style: normal; font-size: 0.85rem; color: var(--muted); }
 .hp-kind {
-  font-size: 0.6rem;
+  font-size: 0.75rem;
   font-weight: 700;
   letter-spacing: 0.06em;
-  border-radius: 5px;
-  padding: 0.1rem 0.35rem;
+  border-radius: 6px;
+  padding: 0.15rem 0.5rem;
 }
 .hp-kind[data-kind="put"] { background: var(--kind-put-bg); color: var(--kind-put-ink); }
 .hp-kind[data-kind="call"] { background: var(--kind-call-bg); color: var(--kind-call-ink); }
-.hp-list-pace .holdings-bar { min-width: 7rem; }
-.hp-slot { display: flex; flex-direction: column; gap: 0.45rem; min-width: 0; }
-.hp-list-status { display: flex; flex-direction: column; gap: 0.25rem; align-items: flex-start; }
-.hp-list-stats { grid-column: 1 / -1; margin-top: 0.15rem; }
-.hp-cash-edit { margin-left: auto; font-size: 0.75rem; }
-.hp-cash-editor { margin-left: auto; display: flex; gap: 0.35rem; align-items: center; }
+.hp-list-pace .holdings-bar { min-width: 7.5rem; }
+.hp-slot { display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
+.hp-list-status { display: flex; flex-direction: column; gap: 0.35rem; align-items: flex-start; }
+.hp-list-stats { grid-column: 1 / -1; margin-top: 0.25rem; }
+.hp-cash-edit { margin-left: auto; font-size: 0.85rem; min-height: 44px; display: inline-flex; align-items: center; }
+.hp-cash-editor { margin-left: auto; display: flex; gap: 0.5rem; align-items: center; }
 .hp-cash-editor input {
-  flex: 1 1 6rem;
+  flex: 1 1 7rem;
   min-width: 0;
   font: inherit;
-  padding: 0.25rem 0.45rem;
+  font-size: 14px;
+  padding: 0.4rem 0.6rem;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--panel);
   color: inherit;
+  min-height: 40px;
 }
-.hp-cash-editor .btn { font-size: 0.7rem; padding: 0.25rem 0.5rem; }
+.hp-cash-editor .btn { font-size: 13.5px; padding: 0.4rem 0.8rem; min-height: 40px; }
 .hp-dialog-note {
-  font-size: 0.72rem;
-  opacity: 0.65;
-  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-top: 0.6rem;
   border-top: 1px solid var(--border);
-  padding-top: 0.4rem;
+  padding-top: 0.5rem;
 }
+
+/* ── Mobile Cash Summary Bar (<=900px) ────────────────────────────── */
+.hp-cash-bar {
+  display: none;
+}
+
+/* ── Mobile Pool Manager Sheet Modal ─────────────────────────────── */
+.hp-pool-sheet {
+  display: flex;
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  align-items: flex-end;
+  justify-content: center;
+}
+.hp-pool-sheet[hidden] {
+  display: none !important;
+}
+
+/* ── Focused Mobile Action Sheet Container ────────────────────────── */
+.hp-action-sheet {
+  display: flex;
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  align-items: flex-end;
+  justify-content: center;
+}
+.hp-action-sheet[hidden] {
+  display: none !important;
+}
+
+.hp-sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(2px);
+}
+
+.hp-sheet-container {
+  position: relative;
+  width: 100%;
+  max-width: 540px;
+  max-height: 85vh;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-top-left-radius: 16px;
+  border-top-right-radius: 16px;
+  padding: 1.25rem 1.4rem;
+  box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.hp-sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.75rem;
+}
+.hp-sheet-title {
+  font-size: 1.2rem;
+  font-weight: 800;
+  color: var(--ink);
+}
+.hp-sheet-close {
+  background: transparent;
+  border: none;
+  font-size: 1.5rem;
+  color: var(--muted);
+  cursor: pointer;
+  min-height: 44px;
+  min-width: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+}
+
+.hp-sheet-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+.hp-sheet-footer {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: flex-end;
+  border-top: 1px solid var(--border);
+  padding-top: 0.85rem;
+}
+.hp-sheet-footer .btn {
+  min-height: 48px;
+  padding: 0 1.25rem;
+  font-size: 15px;
+  font-weight: 700;
+  border-radius: 10px;
+}
+
+/* Explicit validation helper hint */
+.hp-form-hint {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--err);
+  background: var(--err-wash, rgba(224, 112, 92, 0.1));
+  border: 1px solid var(--err-line, rgba(224, 112, 92, 0.3));
+  border-radius: 8px;
+  padding: 0.6rem 0.85rem;
+  line-height: 1.35;
+}
+
+/* ── Floating Viewport Toast (R5) ─────────────────────────────────── */
+.hp-toast-container {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+  width: 90%;
+  max-width: 460px;
+}
+.hp-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 18px;
+  border-radius: 12px;
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  animation: hpToastIn 0.25s ease-out;
+}
+@keyframes hpToastIn {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.hp-toast-ok {
+  background: var(--ok);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+.hp-toast-err {
+  background: var(--err);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+.hp-toast-dismiss {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: 1.4rem;
+  cursor: pointer;
+  min-height: 44px;
+  min-width: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  opacity: 0.9;
+}
+.hp-toast-dismiss:hover {
+  opacity: 1;
+}
+
 @media (max-width: 900px) {
-  /* The rail collapses to a horizontal tile strip (brand line, full-width
-     cash strip, three flex tiles) and the list rows stack — further
-     compaction happens below 720px. */
+  /* Mobile layout: Cash summary bar replaces desktop sidebar rail */
   .hp-tabs-grid { grid-template-columns: 1fr; }
-  .hp-tabs-rail { position: static; flex-direction: row; flex-wrap: wrap; align-items: stretch; }
-  .hp-tabs-brand { width: 100%; }
-  .hp-tabs-rail .hp-rail-block {
-    flex: 1 1 100%;
-    display: flex; align-items: baseline; gap: 0.6rem;
-    flex-wrap: wrap;
+  .hp-tabs-rail { display: none; }
+
+  .hp-cash-bar {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.6rem;
   }
-  .hp-tabs-rail .hp-rail-big { font-size: 1.15rem; }
-  /* The pool list wraps to its own full-width line under the figures. */
-  .hp-tabs-rail .hp-pool-section { flex: 1 1 100%; }
-  .hp-tab-tile { flex: 1; width: auto; }
-  .hp-pane-head .hp-pane-title { display: none; }
-  .hp-list-row.hp-list-head { display: none; }
-  .hp-list-row { display: flex; flex-direction: column; align-items: stretch; gap: 0.45rem; }
-  /* Deterministic two-line head: kind + symbol + pool picker on the first
-     line (picker pinned right), exp meta always on its own line below —
-     wrap-by-accident depending on name lengths is not okay. */
-  .hp-list-pos { justify-content: flex-start; }
-  .hp-list-pos .hp-pool-pick { margin-left: auto; }
-  .hp-list-pos .hp-pool-tag { margin-left: auto; }
-  .hp-list-pos > i { flex: 1 1 100%; }
-  .hp-list-pace { display: flex; flex-direction: column; gap: 0.15rem; }
-  .hp-list-status { flex-direction: row; flex-wrap: wrap; }
-  .hp-list-row .holdings-close-btn { align-self: flex-end; }
-  /* Lot row: pool picker pinned to the row-head's right edge, matching
-     the put row (the price stays rightmost, picker beside it). */
-  .hp-lot-row-top > span:first-of-type {
+  .hp-cash-bar-headline {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.5rem;
+  }
+  .hp-cash-bar-total {
+    font-size: 1.25rem;
+    font-weight: 800;
+    color: var(--ink);
+  }
+  .hp-cash-bar-free {
+    font-size: 1.15rem;
+    font-weight: 800;
+    color: var(--ok);
+  }
+  .hp-cash-bar-subline {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .hp-cash-bar-reserved {
+    font-size: 0.88rem;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  .hp-pool-sheet-btn {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0 1rem;
+    font-size: 13.5px;
+    font-weight: 700;
+    border-radius: 8px;
     display: inline-flex;
     align-items: center;
-    gap: 0.3rem;
-    flex: 1;
+    justify-content: center;
+    background: var(--band-bg);
+    border: 1px solid var(--border);
+    color: var(--ink);
+    cursor: pointer;
   }
-  .hp-lot-row-top .hp-pool-pick { margin-left: auto; }
-}
-@media (max-width: 720px) {
-  .hp-cash-editor { margin-left: 0; }
+
+  /* Mobile sub-tabs tile strip under cash bar */
+  .hp-mobile-tabs {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.6rem;
+  }
+  .hp-mobile-tabs .hp-tab-tile {
+    flex: 1;
+    min-height: 52px;
+    padding: 0.6rem 0.5rem;
+    text-align: center;
+  }
+  .hp-mobile-tabs .hp-tab-tile-count {
+    float: none;
+    margin-left: 0.35rem;
+  }
+
+  .hp-pane-head .hp-pane-title { display: none; }
+  .hp-list-row.hp-list-head { display: none; }
+
+  /* Mobile touch target minimum 44px enforcement */
+  .holdings-close-btn,
+  .hp-pool-act,
+  .hp-pool-del,
+  .hp-pool-pick,
+  .hp-tabs-main .btn,
+  .hp-pool-sheet-btn,
+  .hp-sheet-close,
+  .hp-toast-dismiss {
+    min-height: 44px;
+    min-width: 44px;
+    font-size: 14px;
+  }
 }
 
 @media (max-width: 480px) {
-  .hp-tab-tile { padding: 0.5rem 0.6rem; }
-  .hp-tab-tile-sub { font-size: 0.62rem; }
+  .hp-tab-tile { padding: 0.55rem 0.5rem; }
+  .hp-tab-tile-sub { font-size: 0.8rem; }
 }
 
 /* ── Dark mode (2026-09-23-dark-mode) ─────────────────────────────────
@@ -1722,54 +2093,71 @@ html[data-theme="light"] {
 }
 
 /* ── cash pools rail UI (2026-09-23-holdings-cash-pools; list UX after
-   preview feedback — always-visible rows, no manage toggle) ── */
-.hp-pool-section { display: flex; flex-direction: column; gap: 0.3rem; margin-top: 0.45rem; }
-.hp-pool-list { display: flex; flex-direction: column; gap: 0.25rem; }
+   preview feedback — always-visible rows, accessible touch tokens) ── */
+.hp-pool-section { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.65rem; }
+.hp-pool-list { display: flex; flex-direction: column; gap: 0.45rem; }
 .hp-pool-item {
   border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 0.25rem 0.4rem;
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  background: var(--panel);
 }
 .hp-pool-item.active { border-color: var(--accent); }
 /* The name takes a full line with the delete button at its right; cash +
-   actions wrap onto a second line — in the 13rem rail one line for all of
-   it leaves the name zero-width. */
-.hp-pool-line { display: flex; flex-wrap: wrap; gap: 0.3rem 0.45rem; align-items: center; min-width: 0; }
-.hp-pool-name-row { display: flex; gap: 0.3rem; align-items: center; min-width: 0; flex: 1 1 100%; }
+   actions wrap onto a second line */
+.hp-pool-line { display: flex; flex-wrap: wrap; gap: 0.5rem 0.65rem; align-items: center; min-width: 0; }
+.hp-pool-name-row { display: flex; gap: 0.5rem; align-items: center; min-width: 0; flex: 1 1 100%; }
 .hp-pool-name {
-  font: inherit; font-size: 0.72rem; font-weight: 700; color: var(--ink);
+  font: inherit; font-size: 0.95rem; font-weight: 700; color: var(--ink);
   background: transparent; border: none; padding: 0; cursor: pointer;
   flex: 1; min-width: 0; text-align: left;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .hp-pool-item.active .hp-pool-name { color: var(--accent); }
 .hp-pool-cash {
-  font-size: 0.66rem; opacity: 0.7; white-space: nowrap;
+  font-size: 0.88rem; color: var(--muted); white-space: nowrap;
   font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
-.hp-pool-act { font-size: 0.6rem; padding: 0.05rem 0.3rem; }
-.hp-pool-row { display: flex; gap: 0.3rem; align-items: center; }
+.hp-pool-act {
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0.25rem 0.6rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.hp-pool-row { display: flex; gap: 0.45rem; align-items: center; }
 .hp-pool-row input {
-  flex: 1; min-width: 0; font: inherit; font-size: 0.7rem;
-  padding: 0.15rem 0.35rem; border: 1px solid var(--border); border-radius: 5px;
+  flex: 1; min-width: 0; font: inherit; font-size: 0.85rem;
+  padding: 0.35rem 0.55rem; border: 1px solid var(--border); border-radius: 6px;
   background: var(--panel); color: var(--ink);
+  min-height: 38px;
 }
-.hp-pool-row .btn { font-size: 0.66rem; padding: 0.12rem 0.45rem; }
-.hp-pool-del { color: var(--err); font-size: 0.66rem; padding: 0.05rem 0.3rem; }
+.hp-pool-row .btn { font-size: 0.82rem; padding: 0.3rem 0.7rem; min-height: 38px; font-weight: 600; }
+.hp-pool-del {
+  color: var(--err);
+  font-size: 1.1rem;
+  font-weight: 800;
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+  border-radius: 6px;
+}
 /* Which-pool tag on put rows (multi-pool ledgers only). */
 .hp-pool-tag {
-  font-size: 0.6rem; font-weight: 700; letter-spacing: 0.03em;
+  font-size: 0.78rem; font-weight: 700; letter-spacing: 0.03em;
   color: var(--muted); background: transparent; border: 1px solid var(--border);
-  border-radius: 999px; padding: 0.06rem 0.4rem; white-space: nowrap;
+  border-radius: 999px; padding: 0.15rem 0.5rem; white-space: nowrap;
 }
 /* The put-row pool picker (same slot the tag held) — selects where the
    put's strike×100×contracts reservation lands. */
 .hp-pool-pick {
-  font: inherit; font-size: 0.62rem; font-weight: 700; letter-spacing: 0.03em;
+  font: inherit; font-size: 0.82rem; font-weight: 700; letter-spacing: 0.03em;
   color: var(--muted); background: var(--panel); border: 1px solid var(--border);
-  border-radius: 999px; padding: 0.06rem 0.4rem; white-space: nowrap; cursor: pointer;
+  border-radius: 999px; padding: 0.2rem 0.6rem; white-space: nowrap; cursor: pointer;
+  min-height: 38px;
 }
 .holdings-add select {
-  font: inherit; padding: 5px 6px; border: 1px solid var(--border);
-  border-radius: 5px; background: var(--panel); color: var(--ink);
+  font: inherit; font-size: 0.9rem; padding: 6px 10px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--panel); color: var(--ink);
+  min-height: 40px;
 }
