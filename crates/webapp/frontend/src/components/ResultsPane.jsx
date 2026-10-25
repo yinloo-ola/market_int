@@ -19,6 +19,7 @@ import { rescoreRow, topPicks } from "../lib/scoring";
 import ColumnPicker from "./ColumnPicker";
 import Pagination from "./Pagination";
 import ResultsTable from "./ResultsTable";
+import CandidateCard from "./CandidateCard";
 import { comma, isNullValue } from "../lib/format";
 import { defaultSort, sortRows } from "../lib/sort";
 
@@ -128,6 +129,35 @@ export default function ResultsPane(props) {
     setPage(1);
   };
 
+  const [viewMode, setViewMode] = createSignal(
+    typeof window !== "undefined" && window.innerWidth <= 900 ? "cards" : "table"
+  );
+
+  const onSelectSort = (key) => {
+    if (key === "score") {
+      setSortKey(null);
+      setSortDir("asc");
+    } else {
+      setSortKey(key);
+      if (
+        key === "rate_of_return" ||
+        key === "realized_vol" ||
+        key === "strike" ||
+        key === "underlying_price"
+      ) {
+        setSortDir("desc");
+      } else {
+        setSortDir("asc");
+      }
+    }
+    setPage(1);
+  };
+
+  const toggleSortDir = () => {
+    setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    setPage(1);
+  };
+
   // Ticket 19 expansion state: exactly one open row per pane; collapses on
   // sort/filter/scored-only/page change and on tab switch (§6.4).
   const [openKey, setOpenKey] = createSignal(null);
@@ -224,6 +254,53 @@ export default function ResultsPane(props) {
           />
           scored only
         </label>
+        <div class="sort-control">
+          <label class="sort-label">
+            Sort:
+            <select
+              class="sort-select"
+              aria-label="Sort candidates by"
+              value={sortKey() ?? "score"}
+              onChange={(e) => onSelectSort(e.currentTarget.value)}
+            >
+              <option value="score">Score</option>
+              <option value="rate_of_return">Rate of Return</option>
+              <option value="underlying">Symbol (A–Z)</option>
+              <option value="strike">Strike</option>
+              <option value="underlying_price">Spot Price</option>
+              <option value="realized_vol">Realized Vol</option>
+              <option value="delta">Delta</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            class="btn sort-dir-btn"
+            aria-label={`Toggle sort direction, currently ${sortDir() === "asc" ? "ascending" : "descending"}`}
+            onClick={toggleSortDir}
+          >
+            {sortDir() === "asc" ? "↑ Asc" : "↓ Desc"}
+          </button>
+        </div>
+        <div class="view-switch" role="group" aria-label="Display format">
+          <button
+            type="button"
+            class="btn view-btn"
+            classList={{ active: viewMode() === "cards" }}
+            aria-pressed={viewMode() === "cards"}
+            onClick={() => setViewMode(viewMode() === "cards" ? "auto" : "cards")}
+          >
+            Cards
+          </button>
+          <button
+            type="button"
+            class="btn view-btn"
+            classList={{ active: viewMode() === "table" }}
+            aria-pressed={viewMode() === "table"}
+            onClick={() => setViewMode(viewMode() === "table" ? "auto" : "table")}
+          >
+            Table
+          </button>
+        </div>
         <ColumnPicker store={props.columns} />
         {/* honest count: visible after every hiding rule, vs the raw total;
             under custom weights, also the re-admission tally */}
@@ -237,23 +314,46 @@ export default function ResultsPane(props) {
         </span>
       </div>
 
-      {/* The data view is the table — unchanged at every width (scope
-          correction 2026-09-09: the rescore feature adds only the drawer). */}
       <Show when={pageRows().length > 0}>
-        <div class="scroll-region">
-          <ResultsTable
-            visibleCols={props.columns.visible}
-            rows={pageRows}
-            sortKey={sortKey}
-            sortDir={sortDir}
-            onSort={onSort}
-            thresholds={props.thresholds}
-            pickRankOf={pickRankOf}
-            openKey={openKey}
-            onToggleRow={onToggleRow}
-            hiddenDefs={hiddenDefs}
-            customScores={props.scoring.isCustom}
-          />
+        <div class="scroll-region results-view-region">
+          <Show
+            when={viewMode() === "cards"}
+            fallback={
+              <div class="results-table-wrapper">
+                <ResultsTable
+                  visibleCols={props.columns.visible}
+                  rows={pageRows}
+                  sortKey={sortKey}
+                  sortDir={sortDir}
+                  onSort={onSort}
+                  thresholds={props.thresholds}
+                  pickRankOf={pickRankOf}
+                  openKey={openKey}
+                  onToggleRow={onToggleRow}
+                  hiddenDefs={hiddenDefs}
+                  customScores={props.scoring.isCustom}
+                />
+              </div>
+            }
+          >
+            <div class="results-cards-wrapper">
+              <div class="candidate-cards-list">
+                <For each={pageRows()}>
+                  {(row) => (
+                    <CandidateCard
+                      row={row}
+                      thresholds={props.thresholds}
+                      pickRank={pickRankOf(row)}
+                      isOpen={openKey() === `${row.underlying}|${row.strike}`}
+                      onToggle={onToggleRow}
+                      hiddenDefs={hiddenDefs}
+                      customScores={props.scoring.isCustom}
+                    />
+                  )}
+                </For>
+              </div>
+            </div>
+          </Show>
         </div>
       </Show>
       <Show when={pageRows().length === 0}>

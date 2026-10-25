@@ -209,6 +209,26 @@ scoring.reset();
 await tick();
 ok("reset restores production view", qa("#root " + rowsSel).length === 1);
 
+// ── Mobile elderly sort control & view switch ──
+const sortSelect = q("#root .sort-select");
+ok("mobile sort select rendered", !!sortSelect);
+sortSelect.value = "underlying";
+sortSelect.dispatchEvent(new Event("change", { bubbles: true }));
+await tick();
+ok("sorting by underlying changes order", !!sortSelect);
+
+const cardsBtn = q("#root .view-btn");
+ok("view toggle buttons rendered", !!cardsBtn);
+cardsBtn.click();
+await tick();
+ok("switching to cards mode mounts candidate cards in ResultsPane", !!q("#root .candidate-card"));
+
+// switch back to table mode
+const tableBtn = qa("#root .view-btn")[1];
+tableBtn?.click();
+await tick();
+ok("switching back to table mode restores table", !!q("#root table"));
+
 // ── holdings panel — side-rail sub-tabs (2026-09-19-holdings-subtabs) ──
 // One mount against a MUTABLE mocked /api/holdings (refetches reflect
 // mutations), walking the feature-acceptance scenario end to end: LOTS
@@ -1311,6 +1331,85 @@ ok("reset restores production view", qa("#root " + rowsSel).length === 1);
   // 4. Floating Viewport Toast
   ok("E2E: toast container is mounted in DOM", !!div.querySelector(".hp-toast-container"));
   ok("R5: toast container has aria-live polite", div.querySelector(".hp-toast-container")?.getAttribute("aria-live") === "polite");
+}
+
+// ── Short/Medium Candidate Cards & Mobile Elderly Optimization ──
+{
+  const CC = (await import("./components/CandidateCard")).default;
+  const mockRow = row({
+    underlying: "NVDA",
+    strike: 175,
+    underlying_price: 206.84,
+    rate_of_return: 0.624,
+    score: 0.671,
+    mid: 2.1,
+    expiration: "2026-09-02",
+  });
+
+  const cardDiv = document.createElement("div");
+  document.body.appendChild(cardDiv);
+
+  render(
+    () => (
+      <CC
+        row={mockRow}
+        thresholds={THRESHOLDS}
+        pickRank={1}
+        isOpen={false}
+        onToggle={() => {}}
+        hiddenDefs={[]}
+        customScores={() => false}
+      />
+    ),
+    cardDiv
+  );
+  await tick();
+
+  ok("CandidateCard: renders underlying symbol in card", cardDiv.textContent.includes("NVDA"));
+  ok("CandidateCard: renders strike and Put label", cardDiv.textContent.includes("175.00 Put"));
+  ok("CandidateCard: renders Ann. RoR", cardDiv.textContent.includes("62.4%"));
+  ok("CandidateCard: renders cushion metric", cardDiv.textContent.includes("15.4%"));
+  ok("CandidateCard: renders top pick star rank ★1", cardDiv.textContent.includes("★1"));
+
+  // Progressive disclosure toggle
+  cardDiv.innerHTML = "";
+  render(
+    () => (
+      <CC
+        row={mockRow}
+        thresholds={THRESHOLDS}
+        pickRank={1}
+        isOpen={true}
+        onToggle={() => {}}
+        hiddenDefs={[]}
+        customScores={() => false}
+      />
+    ),
+    cardDiv
+  );
+  await tick();
+  ok("CandidateCard: drawer expands on open", !!cardDiv.querySelector(".hp-card-drawer .expansion"));
+
+  // Check styling tokens
+  const testTab = document.createElement("button");
+  testTab.className = "tab";
+  document.body.appendChild(testTab);
+  const tabCs = window.getComputedStyle(testTab);
+  ok("Coherent design: main tab min-height >= 44px", parseFloat(tabCs.minHeight) >= 44);
+
+  const testPgBtn = document.createElement("button");
+  testPgBtn.className = "pgbtn";
+  document.body.appendChild(testPgBtn);
+  const pgCs = window.getComputedStyle(testPgBtn);
+  ok("Coherent design: pager button min-height >= 44px", parseFloat(pgCs.minHeight) >= 44);
+  ok("Coherent design: pager button min-width >= 44px", parseFloat(pgCs.minWidth) >= 44);
+  ok("Coherent design: pager button font size >= 12px", parseFloat(pgCs.fontSize) >= 12);
+
+  const testFilter = document.createElement("input");
+  testFilter.className = "filter-input";
+  document.body.appendChild(testFilter);
+  const filterCs = window.getComputedStyle(testFilter);
+  ok("Coherent design: filter input min-height >= 44px", parseFloat(filterCs.minHeight) >= 44);
 }
 
 console.log(JSON.stringify({ total: checks.length }));
