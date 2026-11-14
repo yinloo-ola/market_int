@@ -39,6 +39,44 @@ pub const TREND_TIGHTEN_CAP: f64 = 0.10;
 pub const TREND_TIGHTEN_PEAK: f64 = 1.05;
 pub const TREND_EASE_BACK: f64 = 0.5;
 
+// ── Run-up stretch (2026-11-14 dose-response calibration) ─────
+// Breach probability is flat vs the past-5d return through +2.2%, departs at
+// ~+2.8..3.4%, and reaches 2.36× baseline by +8% — while the max_drop band
+// self-corrects after crashes (band-top breach 7-11% post-crash) but NOT
+// after rips (~23% ≈ quiet names). The stretch inflates the drop stats for
+// extended names so the band responds to rips like it already responds to
+// drops. Calibrated on 195,121 observations, 233 symbols:
+// .scratch/research/2026-11-14-max-drop-5day-runup.md §4-5.
+/// Past-5d return above which the stretch ramps (measured departure point).
+pub const RUNUP_STRETCH_FLOOR: f64 = 0.03;
+/// Stretch slope: 1 + SLOPE × (runup − FLOOR). Relaxed from initial fit of 20
+/// to 6.0: slope 20 hit the 1.5 cap too abruptly at +5.5% run-up and destroyed
+/// ripper premium. Slope 6.0 reaches the 1.5 cap at +11.3% run-up, cutting Q20
+/// breach from 19.9% to 9.0% while preserving healthy options income.
+pub const RUNUP_STRETCH_SLOPE: f64 = 6.0;
+/// Stretch ceiling — a policy choice, not a fit: capped so a post-rip band
+/// delivers roughly the same band-top breach (~8%) as the post-crash band
+/// naturally does (Q1 ≈ 7.3%). The measured extreme-bucket ratio was 2.36,
+/// but stretching that far (cap 2.4 → Q20 band-top breach 2.3%) pushes
+/// strikes so deep the premium dries up; validation sweep
+/// (.scratch/research/2026-11-14-max-drop-5day-runup.md §7): cap 1.5 → 7.9%.
+pub const RUNUP_STRETCH_CAP: f64 = 1.5;
+/// Candles needed to compute the past-5d return (5 return days + current).
+pub const RUNUP_LOOKBACK_CANDLES: u32 = 6;
+/// Run-up measurement window in trading days (the Short timeframe period).
+pub const RUNUP_STRETCH_DAYS: usize = 5;
+
+// ── Run-up stretch for 20-day (Medium timeframe) ──────────────
+// For 20-day returns, downside risk is flat through +9.9% (Q10–Q17 breach 23-29%).
+// Departure begins at ~+10% (Q18+). Calibrated on 188,131 observations:
+// floor 0.10, slope 2.0, cap 1.20 cuts Q20 touch breach from 22.9% to 16.6%
+// while preserving $4.72 premium and +$3.42 net P&L per share.
+pub const RUNUP_20D_STRETCH_FLOOR: f64 = 0.10;
+pub const RUNUP_20D_STRETCH_SLOPE: f64 = 2.0;
+pub const RUNUP_20D_STRETCH_CAP: f64 = 1.20;
+pub const RUNUP_20D_LOOKBACK_CANDLES: u32 = 21;
+pub const RUNUP_20D_STRETCH_DAYS: usize = 20;
+
 // ── Pre-filters ───────────────────────────────────────────────
 pub const MIN_RATE_OF_RETURN: f64 = 0.20;
 /// Unused in production (no upper cap since 2026-07). Retained for backtest presets.

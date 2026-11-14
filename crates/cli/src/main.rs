@@ -238,6 +238,42 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         calibrate_safety: bool,
     },
+    // Run-up → breach quintile backtest (research, 2026-11): does a large
+    // short-term run-up raise the probability that the forward 5-day min-low
+    // breaches put-strike lines? Read-only; no production scoring change.
+    BacktestRunup {
+        symbols_file_path: String,
+        /// Number of run-up buckets (5 = quintiles, 10 = deciles for a
+        /// dose-response curve).
+        #[arg(long, default_value_t = 5)]
+        buckets: usize,
+        /// Start date (YYYY-MM-DD, inclusive) — train/validate split lever.
+        #[arg(long)]
+        from: Option<String>,
+        /// End date (YYYY-MM-DD, inclusive).
+        #[arg(long)]
+        to: Option<String>,
+        /// Research override: stretch floor (default constants::RUNUP_STRETCH_FLOOR).
+        #[arg(long)]
+        floor: Option<f64>,
+        /// Research override: stretch slope.
+        #[arg(long)]
+        slope: Option<f64>,
+        /// Research override: stretch cap.
+        #[arg(long)]
+        cap: Option<f64>,
+        /// Condition window in trading days (default 5 = the Short horizon;
+        /// pass 20 to measure the Medium-horizon dose-response).
+        #[arg(long, default_value_t = 5)]
+        condition_days: usize,
+        /// Outcome window in trading days (default 5; pass 20 to match).
+        #[arg(long, default_value_t = 5)]
+        horizon_days: usize,
+        /// Grid-search floor×slope×cap (ranked by worst-bucket band-top P&L)
+        /// instead of printing one table. Ignores --floor/--slope/--cap.
+        #[arg(long, default_value_t = false)]
+        grid: bool,
+    },
     // Fetch the earnings calendar from Tiger to a CSV (feeds `backtest --earnings`)
     FetchEarnings {
         /// Start date (YYYY-MM-DD)
@@ -653,6 +689,89 @@ async fn main() {
                 Err(e) => log::error!("Failed to write CSV: {}", e),
             }
         }
+        Commands::BacktestRunup {
+            symbols_file_path,
+            buckets,
+            from,
+            to,
+            floor,
+            slope,
+            cap,
+            condition_days,
+            horizon_days,
+            grid,
+        } => {
+            let parse_date = |label: &str, s: &Option<String>| -> Option<chrono::NaiveDate> {
+                s.as_ref().and_then(|s| match chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                    Ok(d) => Some(d),
+                    Err(e) => {
+                        log::error!("Invalid --{} date '{}': {}", label, s, e);
+                        None
+                    }
+                })
+            };
+            let from_date = parse_date("from", &from);
+            let to_date = parse_date("to", &to);
+            let (from_ts, to_ts) = (
+                from_date.map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() as u32),
+                to_date.map(|d| d.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp() as u32),
+            );
+            let symbols = match symbols::read_symbols_from_file(&symbols_file_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("Failed to read symbols: {}", e);
+                    return;
+                }
+            };
+            let candles_map = backtest::load_all_candles(&conn, &symbols);
+            let params = runup::RunupParams {
+                quintiles: buckets,
+                condition_days,
+                horizon_days,
+                ..runup::RunupParams::default()
+            };
+            let mut series = Vec::new();
+            let mut symbols_used = 0usize;
+            for (symbol, candles) in &candles_map {
+                let points = runup::extract_runup_series(candles, &params);
+                if points.is_empty() {
+                    log::warn!("No eligible observations for {}", symbol);
+                    continue;
+                }
+                symbols_used += 1;
+                series.extend(runup::filter_observations(&points, from_ts, to_ts));
+            }
+            if series.is_empty() {
+                log::error!("No observations across {} symbols — run pull-quotes first?", symbols.len());
+                return;
+            }
+            log::info!(
+                "{} observations from {} symbols ({} in universe)",
+                series.len(),
+                symbols_used,
+                symbols.len()
+            );
+            if grid {
+                let results = runup::grid_search(&series, &params, &runup::default_grid());
+                println!("{}", runup::print_grid(&results));
+            } else {
+                let cfg = if condition_days >= 20 {
+                    runup::StretchConfig {
+                        floor: floor.unwrap_or(constants::RUNUP_20D_STRETCH_FLOOR),
+                        slope: slope.unwrap_or(constants::RUNUP_20D_STRETCH_SLOPE),
+                        cap: cap.unwrap_or(constants::RUNUP_20D_STRETCH_CAP),
+                    }
+                } else {
+                    runup::StretchConfig {
+                        floor: floor.unwrap_or(constants::RUNUP_STRETCH_FLOOR),
+                        slope: slope.unwrap_or(constants::RUNUP_STRETCH_SLOPE),
+                        cap: cap.unwrap_or(constants::RUNUP_STRETCH_CAP),
+                    }
+                };
+                let table = runup::breach_table_for_stretch(&series, &params, &cfg);
+                println!("{}", runup::print_breach_table(&table, symbols_used, &params));
+            }
+        }
         Commands::FetchEarnings { from, to, output } => {
             let from_date = match NaiveDate::parse_from_str(&from, "%Y-%m-%d") {
                 Ok(d) => d,
@@ -689,3 +808,5 @@ async fn main() {
         }
     }
 }
+
+mod runup;

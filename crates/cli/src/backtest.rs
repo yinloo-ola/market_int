@@ -1231,7 +1231,7 @@ impl BacktestMetrics {
 // ── Simulation Engine ──────────────────────────────────────────
 
 /// Load all candles for each symbol into memory.
-fn load_all_candles(
+pub(crate) fn load_all_candles(
     conn: &rusqlite::Connection,
     symbols: &[String],
 ) -> HashMap<String, Vec<model::Candle>> {
@@ -1447,6 +1447,12 @@ pub fn run_safety_calibration(
 
             let dte = period as u32;
             let trend_factor = config.compute_trend_factor(trend_short);
+            let runup_days = if period >= 20 {
+                constants::RUNUP_20D_STRETCH_DAYS
+            } else {
+                constants::RUNUP_STRETCH_DAYS
+            };
+            let runup = market_int_core::option::past_return(&closes, runup_days);
             let (min_strike, max_strike) = market_int_core::option::calculate_adjusted_strike_range(
                 price,
                 percentile_drop,
@@ -1454,6 +1460,7 @@ pub fn run_safety_calibration(
                 dte,
                 period,
                 trend_factor,
+                runup,
             );
 
             if min_strike <= 0.0 || max_strike <= 0.0 || max_strike <= min_strike {
@@ -1845,6 +1852,12 @@ pub fn run_backtest(
             // Compute strike range
             let dte = period as u32;
             let trend_factor = config.compute_trend_factor(trend_short);
+            let runup_days = if period >= 20 {
+                constants::RUNUP_20D_STRETCH_DAYS
+            } else {
+                constants::RUNUP_STRETCH_DAYS
+            };
+            let runup = market_int_core::option::past_return(&closes, runup_days);
             let (min_strike, max_strike) = market_int_core::option::calculate_adjusted_strike_range(
                 price,
                 percentile_drop,
@@ -1852,6 +1865,7 @@ pub fn run_backtest(
                 dte,
                 period,
                 trend_factor,
+                runup,
             );
 
             if min_strike <= 0.0 || max_strike <= 0.0 || max_strike <= min_strike {

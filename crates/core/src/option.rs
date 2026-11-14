@@ -42,9 +42,56 @@ fn calculate_trading_days_to_expiry(from_date: NewYorkDateTime, to_date: NewYork
     trading_days
 }
 
+/// Dynamic run-up stretch multiplier for the drop stats (2026-11 calibration,
+/// `constants::RUNUP_STRETCH_*`). 1.0 below the floor — including negative
+/// runups, where the band already self-corrects from fresh crash data.
+pub fn runup_stretch(runup_5d: f64) -> f64 {
+    runup_stretch_for_period(runup_5d, constants::RUNUP_STRETCH_DAYS)
+}
+
+/// Dynamic run-up stretch multiplier choosing timeframe-appropriate constants
+/// (5d Short vs 20d Medium).
+pub fn runup_stretch_for_period(runup: f64, period: usize) -> f64 {
+    if period >= 20 {
+        runup_stretch_with(
+            runup,
+            constants::RUNUP_20D_STRETCH_FLOOR,
+            constants::RUNUP_20D_STRETCH_SLOPE,
+            constants::RUNUP_20D_STRETCH_CAP,
+        )
+    } else {
+        runup_stretch_with(
+            runup,
+            constants::RUNUP_STRETCH_FLOOR,
+            constants::RUNUP_STRETCH_SLOPE,
+            constants::RUNUP_STRETCH_CAP,
+        )
+    }
+}
+
+/// Parameterized variant — the research tool sweeps floor/slope/cap without
+/// recompiling production constants.
+pub fn runup_stretch_with(runup_5d: f64, floor: f64, slope: f64, cap: f64) -> f64 {
+    let excess = (runup_5d - floor).max(0.0);
+    (1.0 + slope * excess).min(cap)
+}
+
+/// Past-N-day close return of a candle series ordered oldest-first:
+/// close[last] / close[last − days] − 1. 0.0 when there aren't enough closes
+/// (insufficient history is treated as "no run-up", not as a crash).
+pub fn past_return(closes: &[f64], days: usize) -> f64 {
+    if closes.len() < days + 1 {
+        return 0.0;
+    }
+    closes[closes.len() - 1] / closes[closes.len() - 1 - days] - 1.0
+}
+
 /// Calculates adjusted strike range based on DTE, period, and trend factor.
 /// The drop stats are scaled from their native `period` to the option's DTE by
 /// `√(DTE/period)` (max drawdown grows ~as the square root of the horizon).
+/// A large positive `runup` (past close return over the timeframe's window)
+/// inflates both drop stats by [`runup_stretch_for_period`] — the band deepens for
+/// extended names, closing the post-rip blind spot (2026-11 calibration; see `RUNUP_*`).
 /// Trend tightening is applied only to the upper bound (strike_to),
 /// keeping the lower bound (strike_from) un-tightened so more lower strikes are available.
 pub fn calculate_adjusted_strike_range(
@@ -54,16 +101,18 @@ pub fn calculate_adjusted_strike_range(
     dte: u32,
     period: usize,
     trend_factor: f64,
+    runup: f64,
 ) -> (f64, f64) {
     let effective_dte = dte.max(1);
     // √(DTE/period): max drawdown grows ~as the square root of the horizon
     // (zero-drift Brownian motion), not linearly. Linear scaling overstates
     // drops for longer expiries and understates them for shorter ones.
     let adjustment_factor = (effective_dte as f64 / period as f64).sqrt();
+    let stretch = runup_stretch_for_period(runup, period);
 
     // Compute drops without trend tightening
-    let adjusted_percentile_drop = percentile_drop * adjustment_factor;
-    let adjusted_ema_drop = ema_drop * adjustment_factor;
+    let adjusted_percentile_drop = percentile_drop * stretch * adjustment_factor;
+    let adjusted_ema_drop = ema_drop * stretch * adjustment_factor;
 
     // Calculate strike prices
     let v1 = underlying_price * (1.0 - adjusted_ema_drop);
@@ -223,13 +272,23 @@ async fn fetch_option_chains_in_batches(
             expiry_timeframe
         );
 
+        let (runup_days, lookback_candles) = if period >= 20 {
+            (constants::RUNUP_20D_STRETCH_DAYS, constants::RUNUP_20D_LOOKBACK_CANDLES)
+        } else {
+            (constants::RUNUP_STRETCH_DAYS, constants::RUNUP_LOOKBACK_CANDLES)
+        };
+
         let mut symbol_strike_ranges: Vec<(&str, (f64, f64))> = Vec::new();
         let mut underlying_prices: HashMap<String, f64> = HashMap::new();
 
         for symbol in chunk {
             let (percentile_drop, ema_drop) = max_drop::get_max_drop(conn, symbol, period)?;
-            let latest_candle = &candle::get_candles(conn, symbol, 1)?[0];
+            let candles = candle::get_candles(conn, symbol, lookback_candles)?;
+            // get_candles returns oldest-first — the latest candle is last.
+            let latest_candle = candles.last().expect("get_candles returned no rows");
             underlying_prices.insert(symbol.to_string(), latest_candle.close);
+            let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
+            let runup = past_return(&closes, runup_days);
 
             let trend_factor = 1.0;
 
@@ -240,6 +299,7 @@ async fn fetch_option_chains_in_batches(
                 dte,
                 period,
                 trend_factor,
+                runup,
             );
 
             symbol_strike_ranges.push((symbol, (min_strike, max_strike)));
@@ -628,11 +688,81 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_runup_stretch_calibrated_curve() {
+        // Curve with floor = 0.03, slope = 6.0, cap = 1.5:
+        // stretch = min(1 + 6 × max(0, runup − 0.03), 1.5).
+        assert!((runup_stretch(0.02) - 1.0).abs() < 1e-9, "below floor → no stretch");
+        assert!((runup_stretch(0.03) - 1.0).abs() < 1e-9, "at floor → no stretch");
+        assert!((runup_stretch(0.05) - 1.12).abs() < 1e-9, "+5% → 1.12");
+        assert!((runup_stretch(0.08) - 1.30).abs() < 1e-9, "+8% → 1.30");
+        assert!((runup_stretch(0.12) - 1.5).abs() < 1e-9, "+12% → capped at 1.5");
+        assert!((runup_stretch(0.50) - 1.5).abs() < 1e-9, "capped at 1.5");
+        assert!((runup_stretch(-0.20) - 1.0).abs() < 1e-9, "negative runup (crash) → no stretch");
+        // Parameterized variant retains ability to test arbitrary configurations:
+        assert!((runup_stretch_with(0.08, 0.03, 20.0, 2.4) - 2.0).abs() < 1e-9, "+8% with slope 20 at cap 2.4 → 2.0");
+    }
+
+    #[test]
+    fn test_runup_stretch_20d_calibrated_curve() {
+        // Curve with floor = 0.10, slope = 2.0, cap = 1.20:
+        // stretch = min(1 + 2 × max(0, runup − 0.10), 1.20).
+        assert!((runup_stretch_for_period(0.05, 20) - 1.0).abs() < 1e-9, "+5% (below 10% floor) → no stretch");
+        assert!((runup_stretch_for_period(0.10, 20) - 1.0).abs() < 1e-9, "at 10% floor → no stretch");
+        assert!((runup_stretch_for_period(0.15, 20) - 1.10).abs() < 1e-9, "+15% → 1.10");
+        assert!((runup_stretch_for_period(0.20, 20) - 1.20).abs() < 1e-9, "+20% → 1.20 (cap)");
+        assert!((runup_stretch_for_period(0.50, 20) - 1.20).abs() < 1e-9, "+50% → capped at 1.20");
+        assert!((runup_stretch_for_period(-0.20, 20) - 1.0).abs() < 1e-9, "negative runup (crash) → no stretch");
+    }
+
+    #[test]
+    fn test_past_return_simple_series() {
+        let closes = [90.0, 95.0, 100.0, 110.0];
+        assert!((past_return(&closes, 3) - (110.0 / 90.0 - 1.0)).abs() < 1e-9);
+        assert!((past_return(&closes, 1) - 0.10).abs() < 1e-9);
+        assert!((past_return(&[100.0], 5) - 0.0).abs() < 1e-9, "insufficient history → 0.0");
+    }
+
+    #[test]
+    fn test_strike_range_runup_stretch_deepens_band_one_sided() {
+        // Below/at the floor the band is IDENTICAL to runup 0.0; above it the
+        // band deepens (both bounds lower); a crash runup (-0.20) does NOT
+        // touch the band (the fresh crash data already widened it).
+        let base = calculate_adjusted_strike_range(100.0, 0.10, 0.05, 5, 5, 1.0, 0.0);
+        let quiet = calculate_adjusted_strike_range(100.0, 0.10, 0.05, 5, 5, 1.0, 0.02);
+        let at_floor = calculate_adjusted_strike_range(100.0, 0.10, 0.05, 5, 5, 1.0, 0.03);
+        let ripped = calculate_adjusted_strike_range(100.0, 0.10, 0.05, 5, 5, 1.0, 0.08);
+        let crashed = calculate_adjusted_strike_range(100.0, 0.10, 0.05, 5, 5, 1.0, -0.20);
+
+        for (label, got, want) in [
+            ("below floor min", quiet.0, base.0),
+            ("below floor max", quiet.1, base.1),
+            ("at floor min", at_floor.0, base.0),
+            ("at floor max", at_floor.1, base.1),
+            ("crash min", crashed.0, base.0),
+            ("crash max", crashed.1, base.1),
+        ] {
+            assert!((got - want).abs() < 1e-9, "{}: {} vs {}", label, got, want);
+        }
+        assert!(ripped.0 < base.0, "ripped min {} < base min {}", ripped.0, base.0);
+        assert!(ripped.1 < base.1, "ripped max {} < base max {}", ripped.1, base.1);
+        // At +8% with slope 6.0, stretch is 1 + 6×(0.08−0.03) = 1.30:
+        // deep end = 100×(1−0.13) = 87.0, shallow = 93.5×(1−0.0013) ≈ 93.378.
+        assert!((ripped.0 - 87.0).abs() < 1e-6, "deep end should be 87.0, got {}", ripped.0);
+        assert!((ripped.1 - 93.378).abs() < 1e-3, "shallow end ≈ 93.378, got {}", ripped.1);
+
+        // At +15%, stretch reaches the 1.5 cap → drops ×1.5:
+        // deep end = 100×(1−0.15) = 85.0, shallow = 92.5×(1−0.0015) ≈ 92.361.
+        let extreme = calculate_adjusted_strike_range(100.0, 0.10, 0.05, 5, 5, 1.0, 0.15);
+        assert!((extreme.0 - 85.0).abs() < 1e-6, "deep end should be 85.0, got {}", extreme.0);
+        assert!((extreme.1 - 92.3613).abs() < 1e-3, "shallow end ≈ 92.361, got {}", extreme.1);
+    }
+
+    #[test]
     fn test_strike_range_no_tightening() {
         // trend_factor = 1.0 → no change to max_strike
         // dte == period → √(5/5) = 1.0 → no scaling
         let (min, max) = calculate_adjusted_strike_range(
-            100.0, 0.10, 0.05, 5, 5, 1.0,
+            100.0, 0.10, 0.05, 5, 5, 1.0, 0.0,
         );
         // v1 = 100 * (1 - 0.05) = 95.0, v2 = 100 * (1 - 0.10) = 90.0
         // min = 90.0, max = 95.0
@@ -647,7 +777,7 @@ mod tests {
         // trend_factor = 0.75 → max moves toward price, min unchanged
         // dte == period → √(5/5) = 1.0 → no drop scaling
         let (min, max) = calculate_adjusted_strike_range(
-            100.0, 0.10, 0.05, 5, 5, 0.75,
+            100.0, 0.10, 0.05, 5, 5, 0.75, 0.0,
         );
         // min = 90.0 (unchanged)
         // adjusted_max = 94.905 (same as no_tightening: safety = 0.05 * 0.02 = 0.001)
@@ -659,7 +789,7 @@ mod tests {
     #[test]
     fn test_strike_range_tightening_dte_scaled() {
         let (min, max) = calculate_adjusted_strike_range(
-            724.66, 0.15, 0.08, 2, 5, 0.75,
+            724.66, 0.15, 0.08, 2, 5, 0.75, 0.0,
         );
         // adj = √(2/5) ≈ 0.6325 (was linear 0.4)
         // perc_drop = 0.15 * 0.6325 = 0.09487, ema_drop = 0.08 * 0.6325 = 0.0506
@@ -673,8 +803,8 @@ mod tests {
 
     #[test]
     fn test_strike_range_min_unchanged_by_tightening() {
-        let (min_no_tighten, _) = calculate_adjusted_strike_range(100.0, 0.10, 0.05, 5, 5, 1.0);
-        let (min_tighten, _) = calculate_adjusted_strike_range(100.0, 0.10, 0.05, 5, 5, 0.75);
+        let (min_no_tighten, _) = calculate_adjusted_strike_range(100.0, 0.10, 0.05, 5, 5, 1.0, 0.0);
+        let (min_tighten, _) = calculate_adjusted_strike_range(100.0, 0.10, 0.05, 5, 5, 0.75, 0.0);
         assert!((min_no_tighten - min_tighten).abs() < 1e-9,
             "min must be identical regardless of trend_factor: {} vs {}", min_no_tighten, min_tighten);
     }
