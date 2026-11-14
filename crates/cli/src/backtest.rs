@@ -1964,6 +1964,7 @@ pub fn run_backtest(
                         weight_safety: config.weight_safety,
                         weight_return: config.weight_return,
                         weight_trend: config.weight_trend,
+                        max_abs_delta: constants::max_abs_delta_for_dte(dte),
                         ..model::ScoreParams::default()
                     };
                     model::calculate_put_chain_score(

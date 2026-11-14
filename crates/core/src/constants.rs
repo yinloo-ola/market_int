@@ -34,6 +34,24 @@ pub const PERCENTILE: f64 = 0.97; // 97th-percentile drawdown → deep band end
 /// risk-equivalent moneyness. Null-delta rows pass through (the max_drop
 /// band remains the fallback safety there).
 pub const PRESENT_MAX_ABS_DELTA: f64 = 0.16;
+/// 5-day (Short) presentation fence: 5-day options carry ~2× higher negative
+/// gamma than 20-day options at the same delta, so 5-day puts use a tighter 0.12
+/// delta cap to avoid high-gamma, knife-edge assignments.
+pub const PRESENT_MAX_ABS_DELTA_5D: f64 = 0.12;
+/// 20-day (Medium) presentation fence: 20-day options have softer gamma and more
+/// time to mean-revert, safely supporting the 1-std-dev line (0.16 delta).
+pub const PRESENT_MAX_ABS_DELTA_20D: f64 = 0.16;
+
+/// Returns the presentation delta fence for a given DTE:
+/// DTE <= 7 (Short / weekly) -> PRESENT_MAX_ABS_DELTA_5D (0.12)
+/// DTE > 7 (Medium / monthly) -> PRESENT_MAX_ABS_DELTA_20D (0.16)
+pub fn max_abs_delta_for_dte(dte: u32) -> f64 {
+    if dte <= 7 {
+        PRESENT_MAX_ABS_DELTA_5D
+    } else {
+        PRESENT_MAX_ABS_DELTA_20D
+    }
+}
 pub const TREND_TIGHTEN_MULTIPLIER: f64 = 2.0;
 pub const TREND_TIGHTEN_CAP: f64 = 0.10;
 pub const TREND_TIGHTEN_PEAK: f64 = 1.05;

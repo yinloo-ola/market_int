@@ -38,6 +38,7 @@ pub struct ScoreParams {
     pub trend_score_floor: f64,
     pub trend_score_band: f64,
     pub earnings_safety_multiplier: f64,
+    pub max_abs_delta: f64,
 }
 
 impl Default for ScoreParams {
@@ -52,6 +53,7 @@ impl Default for ScoreParams {
             trend_score_floor: constants::TREND_SCORE_FLOOR,
             trend_score_band: constants::TREND_SCORE_BAND,
             earnings_safety_multiplier: constants::EARNINGS_SAFETY_MULTIPLIER,
+            max_abs_delta: constants::PRESENT_MAX_ABS_DELTA,
         }
     }
 }
@@ -359,11 +361,11 @@ pub fn calculate_put_chain_score_components(
     params: ScoreParams,
 ) -> Option<(f64, ScoreComponents)> {
     // Presentation fence: exclude puts whose real delta implies more than
-    // PRESENT_MAX_ABS_DELTA ITM probability (a strike too close to spot to
+    // max_abs_delta ITM probability (a strike too close to spot to
     // hand a user). Null delta passes through — the max_drop band is the
     // fallback safety there.
     if let Some(d) = delta {
-        if d.abs() > constants::PRESENT_MAX_ABS_DELTA {
+        if d.abs() > params.max_abs_delta {
             return None;
         }
     }
@@ -605,14 +607,20 @@ pub fn scored_chain_rows(
         .iter()
         // Presentation fence: drop near-money puts from EVERY output (result
         // document, CSV, top picks) — not just null their score. Delta ≈ ITM
-        // probability, so |delta| > PRESENT_MAX_ABS_DELTA means the market
+        // probability, so |delta| > max_abs_delta_for_dte(chain.dte) means the market
         // prices the strike above the presentation line (too close to spot).
-        // Null delta passes through — the max_drop band is the fallback safety.
+        // 5-day options use a tighter 0.12 cap (due to ~2× gamma), while 20-day
+        // options use 0.16. Null delta passes through — max_drop band is fallback safety.
         .filter(|chain| match chain.delta {
-            Some(d) => d.abs() <= constants::PRESENT_MAX_ABS_DELTA,
+            Some(d) => d.abs() <= constants::max_abs_delta_for_dte(chain.dte),
             None => true,
         })
         .map(|chain| {
+            let max_abs_delta = constants::max_abs_delta_for_dte(chain.dte);
+            let score_params = ScoreParams {
+                max_abs_delta,
+                ..ScoreParams::default()
+            };
             let sharpe_ratio = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
             let trend_data_entry = trend_data.get(&chain.underlying);
             let trend_scoring_short = trend_data_entry.map(|(s, _)| *s).unwrap_or(0.0);
@@ -629,7 +637,7 @@ pub fn scored_chain_rows(
                     chain.delta,
                     realized_vols.get(&chain.underlying).copied(),
                     constants::VOL_SAFETY_BOOST,
-                    ScoreParams::default(),
+                    score_params,
                 ) {
                     Some((total, parts)) => (Some(total), Some(parts)),
                     None => (None, None),
@@ -2250,6 +2258,50 @@ mod tests {
             underlyings,
             vec!["ATFENCE", "SHALLOW", "NULLD"],
             "near-money put must be dropped from raw rows; got {underlyings:?}"
+        );
+    }
+
+    #[test]
+    fn test_scored_chain_rows_dte_aware_delta_fence() {
+        // 5-day (DTE <= 7) fence is 0.12 due to ~2× gamma;
+        // 20-day (DTE > 7) fence is 0.16.
+        let mut short_near = make_chain("SHORT_NEAR", 90.0, 0.35);
+        short_near.dte = 5;
+        short_near.delta = Some(-0.15); // > 0.12 → dropped for 5D
+
+        let mut short_ok = make_chain("SHORT_OK", 90.0, 0.35);
+        short_ok.dte = 5;
+        short_ok.delta = Some(-0.12); // <= 0.12 → kept for 5D
+
+        let mut med_near = make_chain("MED_NEAR", 90.0, 0.35);
+        med_near.dte = 20;
+        med_near.delta = Some(-0.15); // <= 0.16 → kept for 20D
+
+        let mut med_drop = make_chain("MED_DROP", 90.0, 0.35);
+        med_drop.dte = 20;
+        med_drop.delta = Some(-0.18); // > 0.16 → dropped for 20D
+
+        let mut sharpe = HashMap::new();
+        for s in ["SHORT_NEAR", "SHORT_OK", "MED_NEAR", "MED_DROP"] {
+            sharpe.insert(s.to_string(), 1.5);
+        }
+
+        let rows = scored_chain_rows(
+            &[short_near, short_ok, med_near, med_drop],
+            &sharpe,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &bull_regime(),
+        );
+        let underlyings: Vec<&str> = rows.iter().map(|r| r.underlying.as_str()).collect();
+        assert_eq!(
+            underlyings,
+            vec!["SHORT_OK", "MED_NEAR"],
+            "5-day must enforce 0.12 cap and 20-day must enforce 0.16 cap; got {underlyings:?}"
         );
     }
 
