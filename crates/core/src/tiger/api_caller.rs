@@ -12,6 +12,7 @@ use std::env;
 use std::time::{Duration, Instant};
 
 // Import necessary types
+use crate::constants;
 use crate::http::client::RequestError;
 use crate::model::{self, Candle};
 
@@ -68,13 +69,15 @@ pub struct Requester {
     /// Gateway URL. Defaults to `ENDPOINT`; the pipeline test seam overrides
     /// it with a loopback address so stubbed runs can never reach out.
     endpoint: String,
+    max_retries: usize,
+    retry_backoff: Duration,
 }
 
 impl Requester {
     // NewRequester creates a new Requester instance with the base URL set to the Tiger API endpoint.
     pub async fn new() -> Option<Requester> {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(3))
+            .timeout(std::time::Duration::from_secs(constants::TIGER_API_TIMEOUT_SECS))
             .build()
             .ok()?;
 
@@ -83,6 +86,8 @@ impl Requester {
             option_expiration_cache: HashMap::new(),
             cache_ttl: Duration::from_secs(300), // 5 minutes cache TTL
             endpoint: ENDPOINT.to_string(),
+            max_retries: constants::TIGER_API_MAX_RETRIES,
+            retry_backoff: Duration::from_millis(constants::TIGER_API_RETRY_BACKOFF_MS),
         };
 
         // Try to grab quote permission to test the connection
@@ -112,6 +117,28 @@ impl Requester {
             option_expiration_cache: HashMap::new(),
             cache_ttl: Duration::from_secs(0),
             endpoint: "http://127.0.0.1:1".to_string(),
+            max_retries: 0,
+            retry_backoff: Duration::from_millis(0),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_instance(
+        endpoint: String,
+        timeout: Duration,
+        max_retries: usize,
+        retry_backoff: Duration,
+    ) -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .timeout(timeout)
+                .build()
+                .expect("test http client"),
+            option_expiration_cache: HashMap::new(),
+            cache_ttl: Duration::from_secs(0),
+            endpoint,
+            max_retries,
+            retry_backoff,
         }
     }
 
@@ -679,79 +706,134 @@ impl Requester {
             RequestError::Other("Missing TIGER_RSA environment variable".to_string())
         })?;
 
-        // Format timestamp as "2006-01-02 15:04:05"
-        let now = Local::now();
-        let timestamp = now.format("%Y-%m-%d %H:%M:%S").to_string();
+        let mut attempts = 0;
+        let max_attempts = 1 + self.max_retries;
 
-        let mut data = HashMap::new();
-        data.insert(KEY_TIGER_ID.to_string(), tiger_id);
-        data.insert(KEY_METHOD.to_string(), method.to_string());
-        data.insert(KEY_CHARSET.to_string(), CHARSET.to_string());
-        data.insert(KEY_SIGN_TYPE.to_string(), SIGN_TYPE.to_string());
-        data.insert(KEY_TIMESTAMP.to_string(), timestamp);
-        data.insert(KEY_VERSION.to_string(), "2.0".to_string());
-        data.insert(KEY_DEVICE_ID.to_string(), "00:15:5d:34:01:5e".to_string());
+        loop {
+            attempts += 1;
 
-        if !version.is_empty() {
-            data.insert(KEY_VERSION.to_string(), version.to_string());
-        }
+            // Format timestamp as "2006-01-02 15:04:05"
+            let now = Local::now();
+            let timestamp = now.format("%Y-%m-%d %H:%M:%S").to_string();
 
-        if let Some(biz_content) = biz_content {
-            let biz_content_str = serde_json::to_string(&biz_content).map_err(|e| {
-                RequestError::Other(format!("Failed to marshal biz_content: {}", e))
+            let mut data = HashMap::new();
+            data.insert(KEY_TIGER_ID.to_string(), tiger_id.clone());
+            data.insert(KEY_METHOD.to_string(), method.to_string());
+            data.insert(KEY_CHARSET.to_string(), CHARSET.to_string());
+            data.insert(KEY_SIGN_TYPE.to_string(), SIGN_TYPE.to_string());
+            data.insert(KEY_TIMESTAMP.to_string(), timestamp);
+            data.insert(KEY_VERSION.to_string(), "2.0".to_string());
+            data.insert(KEY_DEVICE_ID.to_string(), "00:15:5d:34:01:5e".to_string());
+
+            if !version.is_empty() {
+                data.insert(KEY_VERSION.to_string(), version.to_string());
+            }
+
+            if let Some(biz_content) = &biz_content {
+                let biz_content_str = serde_json::to_string(biz_content).map_err(|e| {
+                    RequestError::Other(format!("Failed to marshal biz_content: {}", e))
+                })?;
+                data.insert(KEY_BIZ_CONTENT.to_string(), biz_content_str);
+            }
+
+            // Generate the signature
+            let sign_content = get_sign_content(&data);
+            let sign = sign_with_rsa(&private_key, sign_content.as_bytes())
+                .map_err(|e| RequestError::Other(format!("Failed to sign request: {}", e)))?;
+            data.insert(KEY_SIGN.to_string(), sign);
+
+            let body = serde_json::to_string(&data)
+                .map_err(|e| RequestError::Other(format!("Failed to marshal request data: {}", e)))?;
+
+            let send_result = self
+                .client
+                .post(&self.endpoint)
+                .header(
+                    "Content-Type",
+                    format!("application/json;charset={}", CHARSET),
+                )
+                .header("Cache-Control", "no-cache")
+                .header("Connection", "Keep-Alive")
+                .body(body)
+                .send()
+                .await;
+
+            let response = match send_result {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if attempts < max_attempts {
+                        log::warn!(
+                            "Tiger API request {} failed on attempt {}/{}: {}. Retrying in {:?}...",
+                            method,
+                            attempts,
+                            max_attempts,
+                            e,
+                            self.retry_backoff
+                        );
+                        tokio::time::sleep(self.retry_backoff).await;
+                        continue;
+                    }
+                    return Err(RequestError::Other(format!("Request to Tiger API failed: {}", e)));
+                }
+            };
+
+            if response.status().is_server_error() {
+                if attempts < max_attempts {
+                    log::warn!(
+                        "Tiger API request {} returned server error status {} on attempt {}/{}. Retrying in {:?}...",
+                        method,
+                        response.status(),
+                        attempts,
+                        max_attempts,
+                        self.retry_backoff
+                    );
+                    tokio::time::sleep(self.retry_backoff).await;
+                    continue;
+                }
+            }
+
+            if !response.status().is_success() {
+                return Err(RequestError::Other(format!(
+                    "Unexpected response status: {}",
+                    response.status()
+                )));
+            }
+
+            let body_text = match response.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    if attempts < max_attempts {
+                        log::warn!(
+                            "Tiger API request {} failed to read response body on attempt {}/{}: {}. Retrying in {:?}...",
+                            method,
+                            attempts,
+                            max_attempts,
+                            e,
+                            self.retry_backoff
+                        );
+                        tokio::time::sleep(self.retry_backoff).await;
+                        continue;
+                    }
+                    return Err(RequestError::Other(format!("Failed to read response body: {}", e)));
+                }
+            };
+
+            let result: Response = serde_json::from_str(&body_text).map_err(|e| {
+                // An unexpected envelope (e.g. a method-level error without
+                // `data`) would otherwise vanish — surface its head verbatim.
+                let head: String = body_text.chars().take(300).collect();
+                RequestError::Other(format!("Failed to parse response: {e}; body={head}"))
             })?;
-            data.insert(KEY_BIZ_CONTENT.to_string(), biz_content_str);
+
+            if result.code != 0 {
+                return Err(RequestError::Other(format!(
+                    "Tiger API error: code={}, message={}",
+                    result.code, result.message
+                )));
+            }
+
+            return Ok(result);
         }
-
-        // Generate the signature
-        let sign_content = get_sign_content(&data);
-        let sign = sign_with_rsa(&private_key, sign_content.as_bytes())
-            .map_err(|e| RequestError::Other(format!("Failed to sign request: {}", e)))?;
-        data.insert(KEY_SIGN.to_string(), sign);
-
-        let body = serde_json::to_string(&data)
-            .map_err(|e| RequestError::Other(format!("Failed to marshal request data: {}", e)))?;
-
-        let response = self
-            .client
-            .post(&self.endpoint)
-            .header(
-                "Content-Type",
-                format!("application/json;charset={}", CHARSET),
-            )
-            .header("Cache-Control", "no-cache")
-            .header("Connection", "Keep-Alive")
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| RequestError::Other(format!("Request to Tiger API failed: {}", e)))?;
-
-        if !response.status().is_success() {
-            return Err(RequestError::Other(format!(
-                "Unexpected response status: {}",
-                response.status()
-            )));
-        }
-
-        let body_text = response
-            .text()
-            .await
-            .map_err(|e| RequestError::Other(format!("Failed to read response body: {}", e)))?;
-        let result: Response = serde_json::from_str(&body_text).map_err(|e| {
-            // An unexpected envelope (e.g. a method-level error without
-            // `data`) would otherwise vanish — surface its head verbatim.
-            let head: String = body_text.chars().take(300).collect();
-            RequestError::Other(format!("Failed to parse response: {e}; body={head}"))
-        })?;
-
-        if result.code != 0 {
-            return Err(RequestError::Other(format!(
-                "Tiger API error: code={}, message={}",
-                result.code, result.message
-            )));
-        }
-
-        Ok(result)
     }
 
     // Helper function to process option data and add matching candles to the result
@@ -1102,5 +1184,118 @@ mod session_close_tests {
         );
         assert_eq!(candles.len(), 2, "degenerate holdings strike query must be admitted");
         assert_eq!(candles[1].strike, 92.0);
+    }
+
+    #[tokio::test]
+    async fn execute_query_retries_on_gateway_error_and_succeeds() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let count = attempts_clone.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf).await;
+                if count == 0 {
+                    // 1st request: return 504 Gateway Timeout
+                    let resp = "HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 0\r\n\r\n";
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                } else {
+                    // 2nd request (retry): return 200 OK
+                    let body = r#"{"code":0,"message":"success","data":[],"timestamp":1700000000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    break;
+                }
+            }
+        });
+
+        if std::env::var("TIGER_ID").is_err() {
+            unsafe { std::env::set_var("TIGER_ID", "test_id"); }
+        }
+        let dummy_rsa = "-----BEGIN RSA PRIVATE KEY-----\n\
+MIIBPAIBAAJBAKGHaRQnwSe98SHqeE9VBR2CdNy8GpedPQKDTplpoP9vN7438toq\n\
+RohQ+dnagGOqageEZhdboh9os5Settp7M6kCAwEAAQJBAJA6rrLWhHwN9/+GswJz\n\
+MewVjm+CbmQufEmAIXCOhrlMlFAMUapcOEb//SH+tRlTK+S3g9b29HysTx4+Mhd1\n\
+0OECIQDO0vibGv6pGaMO6Qlbt9ZZVi3mq62fIV+WVccQB0cX5QIhAMfvZpFZojGC\n\
+6CvD8RdoKvEd0OrjUO//uIPot0J/I6h1AiEApEIXoY/Z6tDqmH/pp8ckXIU+JTH5\n\
+zSUDNnFfjFJLWyUCID3TcBo+Z4N8AaOXAfTFB5JsL/CSvrKYl0xjKFhtzG8JAiEA\n\
+oorPW7KwUUJY4NonY6diUjyRC+CzTBlTxjImGTmNIqM=\n\
+-----END RSA PRIVATE KEY-----";
+        if std::env::var("TIGER_RSA").is_err() {
+            unsafe { std::env::set_var("TIGER_RSA", dummy_rsa); }
+        }
+
+        let requester = Requester::test_instance(
+            format!("http://127.0.0.1:{port}"),
+            Duration::from_millis(500),
+            1, // 1 retry
+            Duration::from_millis(10), // 10ms backoff
+        );
+
+        let res = requester.execute_query("test_method", "", None).await;
+        assert!(res.is_ok(), "query must succeed after retry: {:?}", res.err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "must have made exactly 2 attempts");
+    }
+
+    #[tokio::test]
+    async fn execute_query_exhausts_retries_on_persistent_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                attempts_clone.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf).await;
+                let resp = "HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 0\r\n\r\n";
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        if std::env::var("TIGER_ID").is_err() {
+            unsafe { std::env::set_var("TIGER_ID", "test_id"); }
+        }
+        let dummy_rsa = "-----BEGIN RSA PRIVATE KEY-----\n\
+MIIBPAIBAAJBAKGHaRQnwSe98SHqeE9VBR2CdNy8GpedPQKDTplpoP9vN7438toq\n\
+RohQ+dnagGOqageEZhdboh9os5Settp7M6kCAwEAAQJBAJA6rrLWhHwN9/+GswJz\n\
+MewVjm+CbmQufEmAIXCOhrlMlFAMUapcOEb//SH+tRlTK+S3g9b29HysTx4+Mhd1\n\
+0OECIQDO0vibGv6pGaMO6Qlbt9ZZVi3mq62fIV+WVccQB0cX5QIhAMfvZpFZojGC\n\
+6CvD8RdoKvEd0OrjUO//uIPot0J/I6h1AiEApEIXoY/Z6tDqmH/pp8ckXIU+JTH5\n\
+zSUDNnFfjFJLWyUCID3TcBo+Z4N8AaOXAfTFB5JsL/CSvrKYl0xjKFhtzG8JAiEA\n\
+oorPW7KwUUJY4NonY6diUjyRC+CzTBlTxjImGTmNIqM=\n\
+-----END RSA PRIVATE KEY-----";
+        if std::env::var("TIGER_RSA").is_err() {
+            unsafe { std::env::set_var("TIGER_RSA", dummy_rsa); }
+        }
+
+        let requester = Requester::test_instance(
+            format!("http://127.0.0.1:{port}"),
+            Duration::from_millis(500),
+            2, // 2 retries (3 attempts total)
+            Duration::from_millis(5),
+        );
+
+        let res = requester.execute_query("test_method", "", None).await;
+        assert!(res.is_err(), "must fail after exhausting retries");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3, "must have made exactly 3 attempts (1 initial + 2 retries)");
     }
 }

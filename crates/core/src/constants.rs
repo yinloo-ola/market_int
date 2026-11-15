@@ -9,6 +9,16 @@ pub const SHARPE_MIN_CANDLES: usize = 14;
 pub const PRICE_PERCENTILE_DAYS: u32 = 20;
 pub const DEFAULT_RISK_FREE_RATE: f64 = 0.0;
 
+// ── Upstream API / Network ────────────────────────────────────
+/// Upstream Tiger Brokers API client timeout in seconds.
+/// Batch option chain queries for 10 symbols across all strikes require
+/// sufficient headroom during peak market hours.
+pub const TIGER_API_TIMEOUT_SECS: u64 = 10;
+/// Maximum retry attempts for transient Tiger API gateway timeouts / network errors.
+pub const TIGER_API_MAX_RETRIES: usize = 2;
+/// Backoff duration between Tiger API retries in milliseconds.
+pub const TIGER_API_RETRY_BACKOFF_MS: u64 = 1000;
+
 // ── Trend (EMAs, regime) ──────────────────────────────────────
 pub const EMA_SHORT_PERIOD: u32 = 20;
 pub const EMA_LONG_PERIOD: u32 = 50;
