@@ -376,8 +376,10 @@ pub fn calculate_put_chain_score_components(
             return None;
         }
     }
-    // Safety: real Tiger delta when available, max_drop band as fallback.
+    // Safety: real Tiger delta when available (put delta must be strictly negative, d < 0.0),
+    // max_drop band as fallback.
     let mut safety = delta
+        .filter(|&d| d < 0.0)
         .map(|d| (1.0 + d).clamp(0.0, 1.0))
         .unwrap_or_else(|| calculate_max_drop_safety(strike, strike_from, strike_to));
     if earnings_in_window {
@@ -605,15 +607,24 @@ pub fn scored_chain_rows(
 
     all_chains
         .iter()
-        // Presentation fence: drop near-money puts from EVERY output (result
-        // document, CSV, top picks) — not just null their score. Delta ≈ ITM
-        // probability, so |delta| > max_abs_delta_for_dte(chain.dte) means the market
+        // Presentation fence: drop near-money and in-the-money puts from EVERY output
+        // (result document, CSV, top picks) — not just null their score.
+        // Cash-secured puts must be strictly out-of-the-money (strike < underlying_price).
+        // Delta ≈ ITM probability, so |delta| > max_abs_delta_for_dte(chain.dte) means the market
         // prices the strike above the presentation line (too close to spot).
         // 5-day options use a tighter 0.12 cap (due to ~2× gamma), while 20-day
         // options use 0.16. Null delta passes through — max_drop band is fallback safety.
-        .filter(|chain| match chain.delta {
-            Some(d) => d.abs() <= constants::max_abs_delta_for_dte(chain.dte),
-            None => true,
+        .filter(|chain| {
+            if matches!(chain.side, OptionChainSide::Put)
+                && chain.underlying_price > 0.0
+                && chain.strike >= chain.underlying_price
+            {
+                return false;
+            }
+            match chain.delta {
+                Some(d) => d < 0.0 && d.abs() <= constants::max_abs_delta_for_dte(chain.dte),
+                None => true,
+            }
         })
         .map(|chain| {
             let max_abs_delta = constants::max_abs_delta_for_dte(chain.dte);
@@ -1173,7 +1184,7 @@ mod tests {
         OptionStrikeCandle {
             underlying: underlying.to_string(),
             strike,
-            underlying_price: 100.0,
+            underlying_price: (strike * 1.15).max(100.0),
             side: OptionChainSide::Put,
             bid: 1.0,
             mid: 1.5,
@@ -2345,6 +2356,62 @@ mod tests {
             vec!["SHORT_LOW", "MED_HIGH"],
             "5-day allows 0.25 RoR while 20-day requires >= 0.30 RoR; got {scored_underlyings:?}"
         );
+    }
+
+    #[test]
+    fn test_scored_chain_rows_rejects_itm_and_zero_delta_puts() {
+        // Cash-secured put selling candidates must be strictly OTM (strike < underlying_price)
+        // and put delta must be strictly negative (d < 0.0). Tiger's unmodeled 0.0 delta on ITM
+        // puts must never pass into output rows.
+        let mut itm_put = make_chain("ITM_PUT", 105.0, 0.50);
+        itm_put.underlying_price = 100.0;
+        itm_put.delta = Some(0.0);
+
+        let mut atm_put = make_chain("ATM_PUT", 100.0, 0.40);
+        atm_put.underlying_price = 100.0;
+        atm_put.delta = Some(-0.50);
+
+        let mut otm_put = make_chain("OTM_PUT", 92.0, 0.35);
+        otm_put.underlying_price = 100.0;
+        otm_put.delta = Some(-0.10);
+
+        let mut sharpe = HashMap::new();
+        for s in ["ITM_PUT", "ATM_PUT", "OTM_PUT"] {
+            sharpe.insert(s.to_string(), 1.5);
+        }
+
+        let rows = scored_chain_rows(
+            &[itm_put, atm_put, otm_put],
+            &sharpe,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &bull_regime(),
+        );
+
+        let remaining: Vec<&str> = rows.iter().map(|r| r.underlying.as_str()).collect();
+        assert_eq!(remaining, vec!["OTM_PUT"], "ITM put and ATM/near-money put must be filtered out");
+    }
+
+    #[test]
+    fn test_calculate_put_chain_score_components_zero_delta_not_awarded_max_safety() {
+        let params = ScoreParams::default();
+        // Normal OTM put with delta -0.10: safety = 1.0 + (-0.10) = 0.90
+        let (_score_real, parts_real) = calculate_put_chain_score_components(
+            1.5, 90.0, 80.0, 95.0, 0.35, 1.0, &bull_regime(), false, Some(-0.10), None, 0.0, params,
+        ).unwrap();
+        assert!((parts_real.safety - 0.40 * 0.90).abs() < 1e-4);
+
+        // When delta is Some(0.0) (unmodeled Greek from broker), it must not be treated as 1.0 delta safety.
+        // It must fall back to max_drop band safety. For a strike outside the band (e.g. 105.0 > 95.0),
+        // band safety is 0.0.
+        let (_, parts_zero) = calculate_put_chain_score_components(
+            1.5, 105.0, 80.0, 95.0, 0.35, 1.0, &bull_regime(), false, Some(0.0), None, 0.0, params,
+        ).unwrap();
+        assert_eq!(parts_zero.safety, 0.0, "delta 0.0 for out-of-band strike must yield 0.0 safety, not max safety");
     }
 
     #[test]

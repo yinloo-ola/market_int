@@ -1909,7 +1909,7 @@ pub fn run_backtest(
             // max_strike or within presentation delta fence (raw_delta <= max_abs_delta)
             let max_abs_delta = constants::max_abs_delta_for_dte(dte);
             let mut strike = (min_strike / 0.5).ceil() * 0.5;
-            while strike < price {
+            while strike <= max_strike {
                 let t = dte as f64 / 252.0;
                 let iv_vol = vol * config.iv_multiplier;
                 let raw_delta = greeks::put_delta(
