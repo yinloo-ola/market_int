@@ -1193,6 +1193,7 @@ pub struct BacktestPick {
     pub trend_long: f64,
     pub regime_flag: String,
     pub assigned: bool,
+    pub touch_breached: bool,
     pub close_at_expiry: Option<f64>,
     pub close_day_after: Option<f64>,
     /// Net P&L per share: premium collected minus assignment loss (if any).
@@ -1210,6 +1211,7 @@ pub struct BacktestMetrics {
     pub total_simulations: usize,
     pub total_picks: usize,
     pub assignment_count: usize,
+    pub touch_breach_count: usize,
     pub avg_rate_of_return: f64,
     pub avg_score: f64,
     pub avg_loss_when_assigned: f64,
@@ -1225,6 +1227,13 @@ impl BacktestMetrics {
             return 0.0;
         }
         self.assignment_count as f64 / self.total_picks as f64
+    }
+
+    pub fn touch_breach_rate(&self) -> f64 {
+        if self.total_picks == 0 {
+            return 0.0;
+        }
+        self.touch_breach_count as f64 / self.total_picks as f64
     }
 }
 
@@ -1896,11 +1905,26 @@ pub fn run_backtest(
                 .map(|c| c.close)
                 .fold(f64::NEG_INFINITY, f64::max);
 
-            // Generate strikes at $0.50 intervals
+            // Generate strikes at $0.50 intervals: admit strikes within calibrated
+            // max_strike or within presentation delta fence (raw_delta <= max_abs_delta)
+            let max_abs_delta = constants::max_abs_delta_for_dte(dte);
             let mut strike = (min_strike / 0.5).ceil() * 0.5;
-            while strike <= max_strike {
+            while strike < price {
                 let t = dte as f64 / 252.0;
                 let iv_vol = vol * config.iv_multiplier;
+                let raw_delta = greeks::put_delta(
+                    price,
+                    strike,
+                    t,
+                    config.risk_free_rate,
+                    config.dividend_yield,
+                    iv_vol,
+                );
+                // Enforce presentation delta cap: put delta strictly increases with strike,
+                // so once raw_delta exceeds max_abs_delta, all higher strikes also exceed it.
+                if raw_delta > max_abs_delta {
+                    break;
+                }
                 let premium = greeks::black_scholes_put(
                     price,
                     strike,
@@ -1926,17 +1950,6 @@ pub fn run_backtest(
                     model::calculate_max_drop_safety(strike, min_strike, max_strike)
                 } else if config.safety_source == SafetySource::Delta {
                     // Synthetic delta from the same BS model used for pricing.
-                    let t = dte as f64 / 252.0;
-                    let raw_delta = greeks::put_delta(price, strike, t, config.risk_free_rate, config.dividend_yield, iv_vol);
-                    // IV/RV boost: when implied vol exceeds realized vol, the
-                    // premium collected is inflated relative to actual stock risk,
-                    // creating a cushion that justifies a higher strike at the same
-                    // net expected loss. Boost reduces delta (makes the strike appear
-                    // safer) proportionally to the IV/RV excess over baseline.
-                    // In the backtest, synthetic IV/RV = iv_multiplier = 1.3 = baseline,
-                    // so the boost is always 0. The mechanism fires in production
-                    // where real Tiger IV varies per symbol (e.g. AMZN today: IV/RV=1.9
-                    // → ~29% delta reduction → safety goes from ~0.87 to ~0.91).
                     let ivrv_boost = if config.ivrv_boost > 0.0 && vol > 0.0 {
                         let ivrv = iv_vol / vol; // synthetic IV / RV = iv_multiplier
                         let excess = (ivrv / config.iv_multiplier - 1.0).max(0.0);
@@ -1950,6 +1963,12 @@ pub fn run_backtest(
                 };
                 let sector = market_int_core::sectors::sector_of(sectors, symbol);
 
+                let effective_min_ror = if (config.min_rate_of_return - constants::MIN_RATE_OF_RETURN).abs() < 1e-9 {
+                    constants::min_rate_of_return_for_period(period)
+                } else {
+                    config.min_rate_of_return
+                };
+
                 let score = if config.apply_earnings_rule {
                     // Production mirror: delegate to the earnings-aware production
                     // scorer so the backtest is identical-by-construction to the
@@ -1958,14 +1977,19 @@ pub fn run_backtest(
                     // that override ideal_return, weights, and min_rate_of_return
                     // take effect (the pm_* presets).
                     let score_params = model::ScoreParams {
-                        min_rate_of_return: config.min_rate_of_return,
+                        min_rate_of_return: effective_min_ror,
                         ideal_return: config.ideal_return,
                         weight_sharpe: config.weight_sharpe,
                         weight_safety: config.weight_safety,
                         weight_return: config.weight_return,
                         weight_trend: config.weight_trend,
-                        max_abs_delta: constants::max_abs_delta_for_dte(dte),
+                        max_abs_delta,
                         ..model::ScoreParams::default()
+                    };
+                    let delta_for_score = if config.safety_source == SafetySource::Delta {
+                        Some(-raw_delta)
+                    } else {
+                        None
                     };
                     model::calculate_put_chain_score(
                         sharpe_ratio,
@@ -1976,12 +2000,16 @@ pub fn run_backtest(
                         trend_short,
                         &regime,
                         earnings_in_window,
-                        None, // no real Tiger delta in backtest → falls back to band safety
+                        delta_for_score,
                         None, // no realized vol in backtest → no vol boost
                         0.0,  // vol_safety_boost disabled in backtest (use presets)
                         score_params,
                     )
                 } else {
+                    if rate_of_return < effective_min_ror {
+                        strike += 0.5;
+                        continue;
+                    }
                     config.score_candidate(
                         sharpe_ratio,
                         strike_pct,
@@ -2035,13 +2063,16 @@ pub fn run_backtest(
             top_picks.push(*candidate);
         }
 
-        // Check assignment for each top pick
+        // Check assignment and touch breach for each top pick
         let expiry_date = *sim_date + Duration::days(period as i64);
         let day_after = expiry_date + Duration::days(1);
+        let sim_ts = date_to_timestamp(*sim_date);
+        let exp_ts = date_to_timestamp(expiry_date);
+        let da_ts = date_to_timestamp(day_after);
 
         for (symbol_idx, score, strike, premium, ror, ts, tl, price, sector) in &top_picks {
             let symbol = &symbols[*symbol_idx];
-            let (close_expiry, close_day_after, assigned) =
+            let (close_expiry, close_day_after, assigned, touch_breached) =
                 match candles_map.get(symbol) {
                     Some(candles) => {
                         let ec = find_close_on_date(candles, expiry_date);
@@ -2051,9 +2082,15 @@ pub fn run_backtest(
                         let assigned = ec.map(|c| c < *strike).unwrap_or_else(|| {
                             dac.map(|c| c < *strike).unwrap_or(false)
                         });
-                        (ec, dac, assigned)
+                        // Touch breach: stock low touches or breaches strike during the holding period
+                        let end_ts = if ec.is_some() { exp_ts } else { da_ts };
+                        let touch_breached = candles
+                            .iter()
+                            .filter(|c| c.timestamp > sim_ts && c.timestamp <= end_ts)
+                            .any(|c| c.low <= *strike);
+                        (ec, dac, assigned, touch_breached)
                     }
-                    None => (None, None, false),
+                    None => (None, None, false, false),
                 };
 
             // Net P&L per share: premium collected minus max(0, strike - worst_close)
@@ -2079,6 +2116,7 @@ pub fn run_backtest(
                 trend_long: *tl,
                 regime_flag: regime.flag.to_string(),
                 assigned,
+                touch_breached,
                 close_at_expiry: close_expiry,
                 close_day_after,
                 net_pnl,
@@ -2089,6 +2127,7 @@ pub fn run_backtest(
     // Compute aggregate metrics
     let total_picks = picks.len();
     let assignment_count = picks.iter().filter(|p| p.assigned).count();
+    let touch_breach_count = picks.iter().filter(|p| p.touch_breached).count();
     let avg_rate_of_return = if total_picks > 0 {
         picks.iter().map(|p| p.rate_of_return).sum::<f64>() / total_picks as f64
     } else {
@@ -2147,6 +2186,7 @@ pub fn run_backtest(
         total_simulations: mondays.len(),
         total_picks,
         assignment_count,
+        touch_breach_count,
         avg_rate_of_return,
         avg_score,
         avg_loss_when_assigned,
@@ -2180,6 +2220,22 @@ pub fn format_metrics(metrics: &BacktestMetrics) -> String {
         metrics.assignment_rate() * 100.0,
         metrics.assignment_count,
         metrics.total_picks
+    ));
+    out.push_str(&format!(
+        "Touch breach rate:  {:.1}% ({} / {})\n",
+        metrics.touch_breach_rate() * 100.0,
+        metrics.touch_breach_count,
+        metrics.total_picks
+    ));
+    out.push_str(&format!(
+        "Expiry breach rate: {:.1}% ({} / {})\n",
+        metrics.assignment_rate() * 100.0,
+        metrics.assignment_count,
+        metrics.total_picks
+    ));
+    out.push_str(&format!(
+        "Avg net PnL:        ${:.2} / share\n",
+        metrics.avg_net_pnl
     ));
     out.push_str(&format!(
         "Avg ror:            {:.1}%\n",
@@ -2256,14 +2312,14 @@ pub fn write_csv(path: &str, all_metrics: &[BacktestMetrics]) -> model::Result<(
         std::fs::File::create(path).map_err(model::QuotesError::CouldNotOpenFile)?;
     writeln!(
         file,
-        "config,sim_date,symbol,sector,strike,price,premium,rate_of_return,score,trend_short,trend_long,regime,assigned,close_at_expiry,close_day_after,net_pnl"
+        "config,sim_date,symbol,sector,strike,price,premium,rate_of_return,score,trend_short,trend_long,regime,assigned,touch_breached,close_at_expiry,close_day_after,net_pnl"
     )
     .map_err(model::QuotesError::CouldNotOpenFile)?;
     for metrics in all_metrics {
         for pick in &metrics.picks {
             writeln!(
                 file,
-                "{},{},{},{},{:.2},{:.2},{:.2},{:.4},{:.3},{:.3},{:.3},{},{},{},{},{:.2}",
+                "{},{},{},{},{:.2},{:.2},{:.2},{:.4},{:.3},{:.3},{:.3},{},{},{},{},{},{:.2}",
                 metrics.config_name,
                 pick.sim_date,
                 pick.symbol,
@@ -2277,6 +2333,7 @@ pub fn write_csv(path: &str, all_metrics: &[BacktestMetrics]) -> model::Result<(
                 pick.trend_long,
                 pick.regime_flag,
                 pick.assigned,
+                pick.touch_breached,
                 pick.close_at_expiry
                     .map(|v| format!("{:.2}", v))
                     .unwrap_or_default(),

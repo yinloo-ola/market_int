@@ -19,6 +19,7 @@ crates/webapp/frontend/dist-smoke/
 # effort notes / scratch
 .scratch/
 gui-test-screenshots/
+backtest_results*.csv
 
 # local before/after comparison runs (carry credential copies in .env)
 .compare/

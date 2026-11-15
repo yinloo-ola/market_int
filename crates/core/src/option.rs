@@ -110,9 +110,17 @@ pub fn calculate_adjusted_strike_range(
     let adjustment_factor = (effective_dte as f64 / period as f64).sqrt();
     let stretch = runup_stretch_for_period(runup, period);
 
+    // 20-day calibration: peak-normalize the trough-divided drop and scale by Brownian factor
+    let effective_ema_drop = if period >= 20 {
+        let peak_normalized = ema_drop / (1.0 + ema_drop);
+        peak_normalized * constants::DROP_20D_BROWNIAN_FACTOR
+    } else {
+        ema_drop
+    };
+
     // Compute drops without trend tightening
     let adjusted_percentile_drop = percentile_drop * stretch * adjustment_factor;
-    let adjusted_ema_drop = ema_drop * stretch * adjustment_factor;
+    let adjusted_ema_drop = effective_ema_drop * stretch * adjustment_factor;
 
     // Calculate strike prices
     let v1 = underlying_price * (1.0 - adjusted_ema_drop);
@@ -807,5 +815,20 @@ mod tests {
         let (min_tighten, _) = calculate_adjusted_strike_range(100.0, 0.10, 0.05, 5, 5, 0.75, 0.0);
         assert!((min_no_tighten - min_tighten).abs() < 1e-9,
             "min must be identical regardless of trend_factor: {} vs {}", min_no_tighten, min_tighten);
+    }
+
+    #[test]
+    fn test_strike_range_20d_calibration_peak_normalized() {
+        // For period >= 20, ema_drop is peak-normalized: ema_drop / (1.0 + ema_drop)
+        // and scaled by DROP_20D_BROWNIAN_FACTOR (0.75).
+        let (min, max) = calculate_adjusted_strike_range(100.0, 0.20, 0.15, 20, 20, 1.0, 0.0);
+        assert!((min - 80.0).abs() < 1e-6, "min should be 80.0, got {}", min);
+        assert!((max - 90.0330).abs() < 1e-3, "max should be ~90.0330, got {}", max);
+
+        // Under 5d (period < 20), ema_drop is untouched:
+        let (min_5d, max_5d) = calculate_adjusted_strike_range(100.0, 0.20, 0.15, 5, 5, 1.0, 0.0);
+        assert!((min_5d - 80.0).abs() < 1e-6);
+        assert!((max_5d - 84.915).abs() < 1e-3);
+        assert!(max > max_5d, "20d calibrated max {} should be higher than 5d uncalibrated max {}", max, max_5d);
     }
 }

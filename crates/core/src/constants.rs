@@ -95,8 +95,39 @@ pub const RUNUP_20D_STRETCH_CAP: f64 = 1.20;
 pub const RUNUP_20D_LOOKBACK_CANDLES: u32 = 21;
 pub const RUNUP_20D_STRETCH_DAYS: usize = 20;
 
+// ── 20-day EMA drop calibration ──────────────────────────────
+/// 20-day forward scaling factor for calibrated EMA drop in strike range calculation.
+/// Peak-normalizes the trough-divided drop and scales for zero-drift Brownian scaling.
+pub const DROP_20D_BROWNIAN_FACTOR: f64 = 0.75;
+
 // ── Pre-filters ───────────────────────────────────────────────
 pub const MIN_RATE_OF_RETURN: f64 = 0.20;
+/// 5-day (Short) min rate of return threshold.
+pub const MIN_RATE_OF_RETURN_5D: f64 = 0.20;
+/// 20-day (Medium) min rate of return threshold: monthly options target a higher annualized return floor.
+pub const MIN_RATE_OF_RETURN_20D: f64 = 0.30;
+
+/// Returns the minimum rate of return threshold for a given DTE:
+/// DTE <= 7 -> MIN_RATE_OF_RETURN_5D (0.20)
+/// DTE > 7  -> MIN_RATE_OF_RETURN_20D (0.30)
+pub fn min_rate_of_return_for_dte(dte: u32) -> f64 {
+    if dte <= 7 {
+        MIN_RATE_OF_RETURN_5D
+    } else {
+        MIN_RATE_OF_RETURN_20D
+    }
+}
+
+/// Returns the minimum rate of return threshold for a given horizon period in trading days:
+/// period <= 7 -> MIN_RATE_OF_RETURN_5D (0.20)
+/// period > 7  -> MIN_RATE_OF_RETURN_20D (0.30)
+pub fn min_rate_of_return_for_period(period: usize) -> f64 {
+    if period <= 7 {
+        MIN_RATE_OF_RETURN_5D
+    } else {
+        MIN_RATE_OF_RETURN_20D
+    }
+}
 /// Unused in production (no upper cap since 2026-07). Retained for backtest presets.
 pub const MAX_RATE_OF_RETURN: f64 = 0.80;
 /// Unused in production (danger expressed via band). Retained for backtest presets.

@@ -12,6 +12,7 @@ use std::env;
 use std::time::{Duration, Instant};
 
 // Import necessary types
+use crate::constants;
 use crate::http::client::RequestError;
 use crate::model::{self, Candle};
 
@@ -777,9 +778,13 @@ impl Requester {
                 underlying_price,
             )
         {
-            // Filter by strike range for this symbol
+            // Filter by strike range for this symbol: admit strikes within calibrated max_strike
+            // or within the presentation delta fence (|delta| <= max_abs_delta).
             let (min_strike, max_strike) = strike_range;
-            if candle.strike >= min_strike && candle.strike <= max_strike {
+            let max_abs_delta = constants::max_abs_delta_for_dte(candle.dte);
+            let within_ceiling = candle.strike <= max_strike
+                || candle.delta.map(|d| d.abs() <= max_abs_delta).unwrap_or(false);
+            if candle.strike >= min_strike && within_ceiling {
                 candles.push(candle);
             }
         }
@@ -1008,5 +1013,131 @@ mod session_close_tests {
         let requester = Requester::pipeline_test_stub();
         let err = requester.query_session_closes(&["AAPL"], "AfterHours").await;
         assert!(err.is_err(), "dead gateway must surface a RequestError");
+    }
+
+    #[test]
+    fn process_option_data_admits_within_max_strike_or_within_delta_fence() {
+        let requester = Requester::pipeline_test_stub();
+        let exp_20d = chrono::Utc::now().with_timezone(&chrono_tz::America::New_York)
+            + chrono::Duration::days(20);
+        let strike_range = (80.0, 90.0);
+        let underlying_price = 100.0;
+
+        let make_opt = |strike: &str, delta: Option<f64>| -> serde_json::Map<String, serde_json::Value> {
+            let mut map = serde_json::Map::new();
+            map.insert("strike".to_string(), serde_json::json!(strike));
+            map.insert("bidPrice".to_string(), serde_json::json!(1.0));
+            map.insert("askPrice".to_string(), serde_json::json!(1.2));
+            map.insert("latestPrice".to_string(), serde_json::json!(1.1));
+            if let Some(d) = delta {
+                map.insert("delta".to_string(), serde_json::json!(d));
+            }
+            map
+        };
+
+        let mut candles = Vec::new();
+
+        // 1. Strike 85.0 (within [80.0, 90.0]), no delta -> admitted
+        let opt1 = make_opt("85.0", None);
+        requester.process_option_data(
+            Some(&opt1),
+            "TEST",
+            "2026-12-05",
+            model::OptionChainSide::Put,
+            &exp_20d,
+            strike_range,
+            underlying_price,
+            &mut candles,
+        );
+        assert_eq!(candles.len(), 1);
+        assert_eq!(candles[0].strike, 85.0);
+
+        // 2. Strike 92.0 (> max 90.0), delta -0.14 (|d| <= 0.16) -> admitted by delta fence
+        let opt2 = make_opt("92.0", Some(-0.14));
+        requester.process_option_data(
+            Some(&opt2),
+            "TEST",
+            "2026-12-05",
+            model::OptionChainSide::Put,
+            &exp_20d,
+            strike_range,
+            underlying_price,
+            &mut candles,
+        );
+        assert_eq!(candles.len(), 2);
+        assert_eq!(candles[1].strike, 92.0);
+
+        // 3. Strike 94.0 (> max 90.0), delta -0.18 (|d| > 0.16) -> rejected
+        let opt3 = make_opt("94.0", Some(-0.18));
+        requester.process_option_data(
+            Some(&opt3),
+            "TEST",
+            "2026-12-05",
+            model::OptionChainSide::Put,
+            &exp_20d,
+            strike_range,
+            underlying_price,
+            &mut candles,
+        );
+        assert_eq!(candles.len(), 2, "delta -0.18 > 0.16 must be rejected");
+
+        // 4. Strike 92.0 (> max 90.0), no delta -> rejected (no delta to pass ceiling)
+        let opt4 = make_opt("92.0", None);
+        requester.process_option_data(
+            Some(&opt4),
+            "TEST",
+            "2026-12-05",
+            model::OptionChainSide::Put,
+            &exp_20d,
+            strike_range,
+            underlying_price,
+            &mut candles,
+        );
+        assert_eq!(candles.len(), 2, "above max_strike without delta must be rejected");
+
+        // 5. Strike 75.0 (< min 80.0), delta -0.05 -> rejected (below min_strike)
+        let opt5 = make_opt("75.0", Some(-0.05));
+        requester.process_option_data(
+            Some(&opt5),
+            "TEST",
+            "2026-12-05",
+            model::OptionChainSide::Put,
+            &exp_20d,
+            strike_range,
+            underlying_price,
+            &mut candles,
+        );
+        assert_eq!(candles.len(), 2, "below min_strike must be rejected");
+
+        // 6. 5-day horizon: delta -0.14 exceeds 5d cap (0.12), so strike 92.0 rejected
+        let exp_5d = chrono::Utc::now().with_timezone(&chrono_tz::America::New_York)
+            + chrono::Duration::days(5);
+        let opt6 = make_opt("92.0", Some(-0.14));
+        requester.process_option_data(
+            Some(&opt6),
+            "TEST",
+            "2026-11-20",
+            model::OptionChainSide::Put,
+            &exp_5d,
+            strike_range,
+            underlying_price,
+            &mut candles,
+        );
+        assert_eq!(candles.len(), 2, "5d cap is 0.12; -0.14 must be rejected");
+
+        // 7. 5-day horizon: delta -0.10 <= 0.12 -> admitted
+        let opt7 = make_opt("92.0", Some(-0.10));
+        requester.process_option_data(
+            Some(&opt7),
+            "TEST",
+            "2026-11-20",
+            model::OptionChainSide::Put,
+            &exp_5d,
+            strike_range,
+            underlying_price,
+            &mut candles,
+        );
+        assert_eq!(candles.len(), 3, "5d cap is 0.12; -0.10 must be admitted");
+        assert_eq!(candles[2].strike, 92.0);
     }
 }

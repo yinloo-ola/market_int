@@ -617,8 +617,10 @@ pub fn scored_chain_rows(
         })
         .map(|chain| {
             let max_abs_delta = constants::max_abs_delta_for_dte(chain.dte);
+            let min_rate_of_return = constants::min_rate_of_return_for_dte(chain.dte);
             let score_params = ScoreParams {
                 max_abs_delta,
+                min_rate_of_return,
                 ..ScoreParams::default()
             };
             let sharpe_ratio = sharpe_ratios.get(&chain.underlying).copied().unwrap_or(0.0);
@@ -2302,6 +2304,46 @@ mod tests {
             underlyings,
             vec!["SHORT_OK", "MED_NEAR"],
             "5-day must enforce 0.12 cap and 20-day must enforce 0.16 cap; got {underlyings:?}"
+        );
+    }
+
+    #[test]
+    fn test_scored_chain_rows_dte_aware_min_rate_of_return() {
+        // 5-day (DTE <= 7) min RoR is 0.20;
+        // 20-day (DTE > 7) min RoR is 0.30.
+        let mut short_low = make_chain("SHORT_LOW", 90.0, 0.25);
+        short_low.dte = 5;
+        short_low.delta = Some(-0.10); // kept, ror 0.25 >= 0.20
+
+        let mut med_low = make_chain("MED_LOW", 90.0, 0.25);
+        med_low.dte = 20;
+        med_low.delta = Some(-0.10); // score should be None because ror 0.25 < 0.30
+
+        let mut med_high = make_chain("MED_HIGH", 90.0, 0.32);
+        med_high.dte = 20;
+        med_high.delta = Some(-0.10); // score should be Some because ror 0.32 >= 0.30
+
+        let mut sharpe = HashMap::new();
+        for s in ["SHORT_LOW", "MED_LOW", "MED_HIGH"] {
+            sharpe.insert(s.to_string(), 1.5);
+        }
+
+        let rows = scored_chain_rows(
+            &[short_low, med_low, med_high],
+            &sharpe,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &bull_regime(),
+        );
+        let scored_underlyings: Vec<&str> = rows.iter().filter(|r| r.score.is_some()).map(|r| r.underlying.as_str()).collect();
+        assert_eq!(
+            scored_underlyings,
+            vec!["SHORT_LOW", "MED_HIGH"],
+            "5-day allows 0.25 RoR while 20-day requires >= 0.30 RoR; got {scored_underlyings:?}"
         );
     }
 
